@@ -80,6 +80,7 @@ function CompanionPanel(props: Props) {
   const presented = usePanePresentation(() => props.companionPresented);
   return (
     <openclaw-chat-session-rail
+      prop:presentation={props.presentation}
       data-sidebar-panel-host
       ref={[elementRef(props.registerPanelHost)]}
       prop:presented={presented()}
@@ -105,6 +106,14 @@ function DesktopPanel(props: Props) {
   const presented = usePanePresentation(() => props.desktopPresented);
   return (
     <openclaw-desktop-panel
+      prop:presentation={
+        props.presentation
+          ? {
+              platform: props.presentation,
+              openWindowHref: props.presentation === "desktop" ? props.desktopFocusHref : undefined,
+            }
+          : undefined
+      }
       data-sidebar-panel-host
       ref={[elementRef(props.registerPanelHost)]}
       prop:embedded={true}
@@ -334,6 +343,7 @@ declare module "@solidjs/web" {
   namespace JSX {
     interface IntrinsicElements {
       "openclaw-chat-session-rail": HTMLAttributes<HTMLElement> & {
+        "prop:presentation"?: SidebarPanelDefinitionParams["presentation"];
         "prop:sessionKey"?: SidebarPanelDefinitionParams["state"]["sessionKey"];
         "prop:digest"?: SidebarPanelDefinitionParams["digest"];
         "prop:running"?: boolean;
