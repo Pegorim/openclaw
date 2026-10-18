@@ -2265,6 +2265,11 @@ export const en: TranslationMap & {
         publishingBadge: "publishing",
       },
     },
+    mobileDetails: {
+      people: "People",
+      outputs: "Outputs",
+      generatedFiles: "Generated files",
+    },
     sessionDetails: {
       menu: "Session details",
       title: "Details",
