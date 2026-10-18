@@ -113,6 +113,8 @@ export type TranscriptAttachments = {
   omittedMedia: boolean;
 };
 
+export type MobileFileBack = { label: string; onBack: () => void };
+
 type SidebarFullMessageRequest = {
   sessionKey: string;
   agentId?: string;
@@ -242,7 +244,9 @@ export type FileReaderViewRequest = {
   view: FileReaderView;
 };
 
-export type FileSidebarNavigation = { line: number };
+export type FileSidebarNavigation =
+  | { line: number; view?: FileReaderViewRequest }
+  | { line?: number; view: FileReaderViewRequest };
 
 export type SessionFileSource = { sessionKey: string; agentId?: string; path: string };
 
@@ -256,7 +260,7 @@ export type FileSidebarContent = {
   absolutePath?: string;
   name: string;
   content: string;
-  download?: (signal: AbortSignal) => Promise<SessionFileDownload | null>;
+  download?: (signal: AbortSignal) => Promise<FileReaderDownload | null>;
   sessionFileSource?: SessionFileSource;
   /** Stable per-session identity used to retain an unsaved in-memory draft. */
   draftKey?: string;
@@ -266,7 +270,7 @@ export type FileSidebarContent = {
   mimeType?: string;
   language?: string;
   line?: number | null;
-  /** New identity for an explicit line request; ordinary tab selection retains it. */
+  /** Explicit line/view request; ordinary tab selection retains its identity. */
   navigation?: FileSidebarNavigation;
   rawText?: string | null;
   edit?: FileSidebarEdit;
@@ -307,6 +311,20 @@ export type SidebarSelection = (
 ) & { fileTab?: { id: string; label: string; disposition?: "pinned" | "preview" } };
 
 export type ChatDetailPanelProps = {
+  panelPresentation?: "desktop" | "mobile";
+  panelActive?: boolean;
+  /** Supplied by the native shell; a narrow desktop panel is still desktop. */
+  filePresentation?: "desktop" | "mobile";
+  fileBack?: MobileFileBack | null;
+  filePresented?: boolean;
+  fileWorkspace?: FileReaderWorkspace | null;
+  onFileInteraction?:
+    | ((
+        file: FileSidebarContent | ImageSidebarContent | AttachmentSidebarContent,
+        interaction: FileReaderInteraction,
+      ) => void)
+    | null;
+  onFileDraftChange?: ((draft: FileReaderDraftState | null) => void) | null;
   content: ChatDetailPanelContent | null;
   fileNavigation: FileSidebarNavigation | null;
   execNode: string | null;
