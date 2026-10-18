@@ -182,7 +182,7 @@ export function ApplicationShell(props: { host: ShellViewHost }): SolidJSX.Eleme
                   }
                   onClick={() => props.host.viewCallbacks.toggleSidebar()}
                 >
-                  <Icon name="panelLeftOpen" />
+                  <Icon name="sessionSidebarOpen" />
                 </button>
               </openclaw-tooltip>
             </Show>
