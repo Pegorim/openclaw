@@ -36,6 +36,8 @@ suite.define(() => {
           await openChatSidePanelType(pane, "Terminal");
           const embedded = pane.locator(".sidebar-region__right-runtime openclaw-terminal-panel");
           const bottom = page.locator("openclaw-terminal-panel:not([embedded])");
+          // Embedded desktop opens on Sessions; choose the already-owned session.
+          await embedded.locator(".tp-session.is-current").click();
           await embedded.locator(".tp-host canvas:visible").click();
           await page.keyboard.type("diagnostic-command\r");
           const sessionId = (
@@ -199,6 +201,8 @@ suite.define(() => {
             ".sidebar-region__right-runtime openclaw-terminal-panel",
           );
           const bottom = page.locator("openclaw-terminal-panel:not([embedded])");
+          // Embedded desktop opens on Sessions; choose the already-owned session.
+          await embedded.locator(".tp-session.is-current").click();
           await embedded.locator(".tp-host canvas:visible").waitFor();
           await embedded.locator(".tp-host canvas:visible").click();
           await page.keyboard.type("echo DOCKING_CONTINUITY\r");
@@ -249,7 +253,7 @@ suite.define(() => {
             };
             let restoreReleased = false;
             try {
-              await embedded.locator(".tp-host canvas:visible").waitFor();
+              await embedded.locator(".tp-host canvas").waitFor({ state: "attached" });
               await openPicker();
               await gateway.resolveDeferred("terminal.attach");
               restoreReleased = true;
@@ -385,7 +389,7 @@ suite.define(() => {
             // B stays mounted while A hands its restored tabs to the bottom host.
             await selectChat("Docking check");
             await openChatSidePanelType(activePane, "Terminal");
-            await embedded.locator(".tp-host canvas:visible").waitFor();
+            await embedded.locator(".tp-session-menu--inline").waitFor();
             await activePane.getByRole("button", { name: "Dock to bottom", exact: true }).click();
             await expect.poll(() => bottom.locator(".tabstrip-tab.is-live").count()).toBe(3);
             await selectChat("Other conversation");
