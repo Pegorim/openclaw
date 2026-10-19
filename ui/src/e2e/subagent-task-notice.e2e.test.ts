@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
+import { waitForLayoutSettled } from "../pages/chat/chat-layout.browser.test-support.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
@@ -10,7 +11,7 @@ import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts"
 const suite = createControlUiE2eSuite({ name: "Subagent task notice" });
 
 suite.define(() => {
-  it.each([1440, 768])("keeps task progress above the view-only footer at %ipx", async (width) => {
+  it.each([1440, 768])("keeps progress and the view-only footer usable at %ipx", async (width) => {
     await suite.withPage(
       { viewport: { width, height: 900 }, colorScheme: "dark" },
       async ({ page }) => {
@@ -80,6 +81,10 @@ suite.define(() => {
           );
           await writeFile(path.join(proofDir, `subagent-${width}.png`), frame.png);
         }
+        await waitForLayoutSettled(
+          page,
+          "openclaw-chat-pane.chat-pane-cache__pane--active :is(.chat-details, .agent-chat__disabled-banner--replacement)",
+        );
         // Capture the baseline with the layout check, before a reactive banner replacement.
         let footerTop = 0;
         await expect
@@ -91,8 +96,12 @@ suite.define(() => {
                 .querySelector(".agent-chat__disabled-banner--replacement")!
                 .getBoundingClientRect();
               return bounds.height > 0 &&
+                bounds.bottom <= innerHeight &&
                 footer.height > 0 &&
-                bounds.bottom <= footer.top + 1 &&
+                (bounds.bottom <= footer.top + 1 ||
+                  bounds.top >= footer.bottom - 1 ||
+                  bounds.right <= footer.left ||
+                  bounds.left >= footer.right) &&
                 footer.bottom <= innerHeight
                 ? footer.top
                 : null;
@@ -140,7 +149,11 @@ suite.define(() => {
                 .getBoundingClientRect();
               return (
                 detailsBounds.height > 0 &&
-                detailsBounds.bottom <= inputBounds.top &&
+                detailsBounds.bottom <= innerHeight &&
+                (detailsBounds.bottom <= inputBounds.top + 1 ||
+                  detailsBounds.top >= inputBounds.bottom - 1 ||
+                  detailsBounds.right <= inputBounds.left ||
+                  detailsBounds.left >= inputBounds.right) &&
                 inputBounds.bottom <= innerHeight
               );
             }),

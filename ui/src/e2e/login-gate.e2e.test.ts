@@ -245,9 +245,9 @@ suite.define(() => {
       await page.keyboard.press("Escape");
       await split.waitFor({ state: "hidden" });
       await selectChatLayoutAction(header, "Restore split");
-      await page.locator(".side-panel-empty--selector").waitFor();
+      await page.locator(".side-panel-launcher").waitFor();
       await selectChatLayoutAction(header, "Minimize side panel");
-      await page.locator(".side-panel-empty--selector").waitFor({ state: "hidden" });
+      await page.locator(".side-panel-launcher").waitFor({ state: "hidden" });
     } finally {
       await closeContext(context);
     }
