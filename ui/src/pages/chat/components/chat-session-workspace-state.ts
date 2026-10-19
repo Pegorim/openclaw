@@ -10,7 +10,11 @@ import type {
   SessionWorkspaceHost,
   SessionWorkspaceState,
 } from "./chat-session-workspace-types.ts";
-import type { SessionWorkspaceNavigation, FileReaderDraftState, SidebarSelection } from "./chat-sidebar-content-types.ts";
+import type {
+  SessionWorkspaceNavigation,
+  FileReaderDraftState,
+  SidebarSelection,
+} from "./chat-sidebar-content-types.ts";
 
 type SessionWorkspaceOwner = {
   readonly state: SessionWorkspaceState | undefined;
