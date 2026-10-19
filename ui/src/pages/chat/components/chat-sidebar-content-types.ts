@@ -42,6 +42,9 @@ type SessionWorkspaceOptionalKey =
 export type SessionWorkspaceProps = Omit<SessionWorkspaceView, SessionWorkspaceOptionalKey> &
   Partial<Pick<SessionWorkspaceView, SessionWorkspaceOptionalKey>>;
 
+/** Destination selected by the content owner; void keeps an existing reader in place. */
+export type SidebarOpenResult = "detail" | "workspace" | void;
+
 export type SessionWorkspaceFilter = "all" | "changed" | "read" | "artifacts";
 
 export type SessionWorkspaceTreeState = {
