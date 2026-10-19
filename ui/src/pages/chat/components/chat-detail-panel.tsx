@@ -308,6 +308,7 @@ function DetailPanel(props: ChatDetailPanelProps, host: ChatDetailPanel) {
           wrap: presentation.fileWrap,
           highlight: presentation.fileReadingMode === "highlighted",
           scrollFades: props.filePresentation === "mobile",
+          onScrollPortRef: props.onScrollPortRef,
           onSelectContent: () => interact("selection"),
           onSave: () => void saveFile(),
         });

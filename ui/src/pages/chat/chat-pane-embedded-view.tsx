@@ -177,6 +177,7 @@ function SubagentsPanel(props: Props) {
   const presented = usePanePresentation(() => props.subagentsPresented);
   return (
     <openclaw-chat-subagents-panel
+      prop:onScrollPortRef={props.onScrollPortRef}
       data-sidebar-panel-host
       ref={[elementRef(props.registerPanelHost)]}
       prop:sessionKey={props.state.sessionKey}
@@ -195,6 +196,7 @@ function ProcessesPanel(props: Props) {
   const presented = usePanePresentation(() => props.processesPresented ?? false);
   return (
     <openclaw-chat-processes-panel
+      prop:onScrollPortRef={props.onScrollPortRef}
       data-sidebar-panel-host
       ref={[elementRef(props.registerPanelHost)]}
       prop:sessionKey={props.state.sessionKey}
@@ -208,6 +210,7 @@ function LinkReaderPanel(props: Props) {
   const presented = usePanePresentation(() => props.linkReaderPresented ?? false);
   return (
     <openclaw-link-reader-panel
+      prop:onScrollPortRef={props.onScrollPortRef}
       data-sidebar-panel-host
       ref={[elementRef(props.registerPanelHost)]}
       prop:embedded={true}
@@ -257,7 +260,7 @@ export function ClearCompanion(
         disabled={
           !props.connected || props.companion.turns.some((turn) => turn.status === "pending")
         }
-        onClick={() => props.onClearCompanion()}
+        onClick={() => void props.onClearCompanion()}
       >
         <Icon name="trash" />
       </button>
