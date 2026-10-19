@@ -135,6 +135,7 @@ suite.define(() => {
         await picker.click();
       }
       await page.setViewportSize({ height: 844, width: 390 });
+      await composer.locator("textarea").click();
       await expect.poll(() => picker.isVisible()).toBe(true);
 
       if (proofDir) {
