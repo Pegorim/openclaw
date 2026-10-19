@@ -16,6 +16,11 @@ import {
   type ControlUiMockGatewayScenario,
 } from "../test-helpers/control-ui-e2e.ts";
 import { openChatSidePanelType } from "./chat-side-panel.test-support.ts";
+import {
+  readColdOpenOutcome,
+  seedMainCompanionLayout,
+  type ColdOpenOutcome,
+} from "./chat-sidebar-panel-contract.test-support.ts";
 import { controlUiE2eBuiltModuleRequest } from "./control-ui-built-module.test-support.ts";
 import {
   createControlUiE2eSuite,
@@ -43,15 +48,6 @@ const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nPcAAAAASUVORK5CYII=",
   "base64",
 );
-
-type ColdOpenOutcome =
-  | { outcome: "loading" | "content" }
-  | {
-      outcome: "generic-empty";
-      heading: string;
-      description: string;
-      emptyStateOffersAction: boolean;
-    };
 
 const offeredSlotLabels = [
   "Side chat",
@@ -348,30 +344,6 @@ async function clickSidebarTab(page: Page, label: string): Promise<void> {
   await page.locator(".side-panel__header .tabstrip-tab").filter({ hasText: label }).click();
 }
 
-async function readColdOpenOutcome(page: Page): Promise<ColdOpenOutcome> {
-  const activePanel = page.locator(".side-panel__panel:not([hidden])");
-  await activePanel.waitFor();
-  await activePanel.locator(":scope > *").first().waitFor();
-  if ((await activePanel.locator("openclaw-panel-loading-skeleton").count()) > 0) {
-    return { outcome: "loading" };
-  }
-  const emptyState = activePanel.locator("openclaw-panel-empty-state").first();
-  if (!(await emptyState.count())) {
-    return { outcome: "content" };
-  }
-  return {
-    outcome: "generic-empty",
-    heading: (await emptyState.locator(".empty-state__title").textContent())?.trim() ?? "",
-    description:
-      (await emptyState.locator(".empty-state__description").textContent())?.trim() ?? "",
-    emptyStateOffersAction:
-      (await activePanel
-        .locator('a[href]:not([aria-disabled="true"]), button:enabled:not([aria-disabled="true"])')
-        .filter({ visible: true })
-        .count()) > 0,
-  };
-}
-
 async function readSlotColdOpenOutcome(
   label: OfferedSlotLabel,
   scenario: ControlUiMockGatewayScenario,
@@ -427,6 +399,15 @@ async function readSlotColdOpenOutcome(
       } else {
         await subagents.getByText("No subagents in this conversation.", { exact: true }).waitFor();
       }
+    }
+    if (label === "Side chat" && !expectedOutcome) {
+      const companion = page.locator("openclaw-chat-session-rail");
+      await companion
+        .getByRole("textbox", { name: "Ask in side chat", exact: true })
+        .fill("What changed?");
+      expect(await companion.getByRole("button", { name: "Ask", exact: true }).isEnabled()).toBe(
+        true,
+      );
     }
     if (expectedOutcome) {
       await expect
@@ -605,7 +586,7 @@ suite.define(() => {
       await clickSidebarTab(page, "Desktop");
       const target = await gateway.waitForRequest("environments.status");
       expect(target.params).toEqual({ environmentId: retainedDesktopEnvironment.id });
-      const loading = desktop.getByRole("status", { name: "Connecting to desktop…", exact: true });
+      const loading = desktop.getByRole("status").filter({ hasText: "Connecting to desktop…" });
       await loading.getByText("Connecting to desktop…", { exact: true }).waitFor();
       expect(await loading.count()).toBe(1);
       expect(await desktop.locator(".skeleton").count()).toBe(0);
@@ -695,7 +676,8 @@ suite.define(() => {
       expect(await gateway.getRequests("environments.status")).toHaveLength(inventoryCount + 1);
       expect(await gateway.getRequests("desktop.observe")).toHaveLength(observeCount + 1);
 
-      await desktop.getByRole("button", { name: "Disconnect", exact: true }).click();
+      await desktop.getByRole("button", { name: "Desktop actions", exact: true }).click();
+      await desktop.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
       await expect.poll(rfb.events).toContain("closed:2");
       await desktop.getByRole("button", { name: "Reconnect", exact: true }).waitFor();
       await clickSidebarTab(page, "OpenClaw");
@@ -725,7 +707,10 @@ suite.define(() => {
       await clickSidebarTab(page, "Desktop");
       const desktop = page.locator("openclaw-desktop-panel");
       await expect.poll(rfb.events).toEqual(["authenticated:1"]);
-      await desktop.getByRole("button", { name: "Take control", exact: true }).click();
+      await desktop
+        .locator(".desktop-connection-rail")
+        .getByRole("button", { name: "Take control", exact: true })
+        .click();
       await expect.poll(rfb.events).toEqual(["authenticated:1", "authenticated:2", "closed:1"]);
       const canvas = desktop.locator("canvas");
       await canvas.click();
@@ -908,9 +893,15 @@ suite.define(() => {
   it("preserves the production header-action shapes for Side chat and Discussion", async () => {
     const context = await suite.newBrowserContext({ serviceWorkers: "block" });
     const page = await context.newPage();
-    const choices = await openColdSidebar(page, populatedColdOpenScenario());
-
-    await choices.filter({ hasText: "Side chat" }).click();
+    const mainCompanionKey = "agent:main:main";
+    await seedMainCompanionLayout(page, suite.server.baseUrl, mainCompanionKey);
+    await installMockGateway(page, {
+      ...populatedColdOpenScenario(),
+      sessionKey: mainCompanionKey,
+    });
+    await page.goto(controlUiSessionUrl(suite.server.baseUrl, mainCompanionKey));
+    await waitForControlUiGatewayReady(page);
+    await page.locator(`[data-panel-slot="companion"][data-region="main"]`).waitFor();
     const contentActions = await openChatLayoutMenu(page);
     const clearAction = contentActions.getByRole("button", {
       name: "Clear side chat",
@@ -931,9 +922,10 @@ suite.define(() => {
     expect(await clearTooltip.locator(".tooltip-content").textContent()).toContain(
       "Clear side chat",
     );
+
     await closeChatLayoutMenu(page);
 
-    const tab = page.locator(".side-panel__header .tabstrip-tab[active]");
+    const tab = page.locator(`.side-panel__header .tabstrip-tab[aria-selected="true"]`);
     for (const direction of ["ltr", "rtl"] as const) {
       const tabPadding = await tab.evaluate((node, dir) => {
         const panel = node.closest(".side-panel");
@@ -1005,11 +997,14 @@ suite.define(() => {
       }
     });
 
-    await selectChatLayoutAction(page, "Show discussion");
-    await openChatLayoutMenu(page);
-    const discussionAction = contentActions.locator(
-      ':scope > [role="menu"] a.rail-header__action[target="_blank"]',
-    );
+    const sideHeader = page.locator(`[data-region-header="side"]`);
+    await sideHeader.getByRole("button", { name: "New tab", exact: true }).click();
+    await page
+      .locator(".side-panel-launcher")
+      .getByRole("button")
+      .filter({ has: page.locator(".side-panel-type-option__label", { hasText: /^Discussion$/ }) })
+      .click();
+    const discussionAction = sideHeader.locator(`a.rail-header__action[target="_blank"]`);
     await discussionAction.waitFor();
     expect(await discussionAction.getAttribute("href")).toBe("https://discussion.example/session");
 
