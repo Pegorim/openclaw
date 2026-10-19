@@ -498,6 +498,39 @@ Live or uninspectable owners remain protected. On Linux with restricted `/proc`
 visibility, retry from the original OS account with process-inspection permissions;
 permission errors never prove that an owner died.
 
+An updater that is cancelled, for example by its activation deadline, and then
+exits before releasing the installation leaves cancelled update custody (lease
+version 4). `openclaw update` refuses with `Another update executor owns this
+installation` and names the custody owner, lease version, and last activity.
+Gateway startup and normal update admission never reclaim this custody.
+Explicit `openclaw update repair` settles the whole cancelled family: the
+installation root, a retained service root cancelled by the same updater, the
+occupied-slot and candidate roots bound to that generation, and every child
+lease beneath them. Repair requires the evidence it uses for triage handoffs:
+every recorded updater, child, and command process and process group has exited;
+the update run is identifiable in the selected state and has no unverified
+rollback or restoration; the 45-minute grace, or a longer recorded timeout, has
+passed since the custody was last recorded; and the host census finds no process
+referencing the run or its retained paths. Repair then replaces the custody with
+its own claim in one transaction, records the settled keys in the
+`finalize:handoff-settlement` step, and releases its claim after finalization.
+A failed repair keeps the original custody record in its claim for the next
+explicit repair.
+
+When any condition fails, or the family contains custody repair cannot inspect,
+repair leaves every row unchanged and still finishes its other maintenance.
+JSON output reports `status: "warning"`, a `nextAction`, and
+`retainedUpdateCustody` with `key`, `owner`, `leaseVersion`, `lastActivityAt`,
+and `reason`. Standalone repair exits with code **2**. Act on the reason: wait
+for or stop the named processes through their owning terminal or service, retry
+after the stated grace period, or complete the recorded restoration. A census
+match can name a Gateway launched from the installation; stop it through its
+service owner before retrying. An installed CLI without this repair cannot
+settle cancelled custody, and its update refuses before staging a candidate.
+Install a version containing this repair manually (the package hop above, or
+[updating a source checkout](/install/updating/update-methods#source-checkout-servers-reference-script)),
+then run `openclaw update repair` from the updated CLI.
+
 An ordinary installation-root update lease is not legacy custody just because it
 has no mutation-protocol marker. Repair leaves that lease to its current owner;
 normal update admission can reclaim it once its owners and descendants settle.
@@ -710,7 +743,8 @@ availability, installation, or load failures appear in
 successfully when required checks pass. Doctor maintenance admission refusals
 also report a warning when no data is at risk. Repair restores any service
 it stopped and leaves migrations pending. A standalone `update repair` exits
-with code **2** when Doctor maintenance is deferred; delegated finalization for
+with code **2** when Doctor maintenance is deferred or cancelled update custody
+remains (see above); delegated finalization for
 an existing update keeps exit code **0**, so an older updater can finish with
 warnings. When Doctor could not run, the saved standalone run is `skipped` with
 reason `doctor-maintenance-pending`, and the report leads with the next action:

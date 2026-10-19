@@ -48,6 +48,15 @@ export type ManagedHandoffRepair = {
   [Symbol.dispose](): void;
 };
 
+/** Custody explicit repair left in place; the next update admission stays blocked. */
+export type ManagedHandoffRetainedCustody = {
+  key: string;
+  owner: string;
+  leaseVersion: number;
+  lastActivityAt: string;
+  reason: string;
+};
+
 export type ManagedHandoffLeaseTransition = (
   lease: ManagedHandoffLease,
   action: ManagedHandoffLease["action"],

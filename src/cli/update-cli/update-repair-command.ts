@@ -1,3 +1,4 @@
+import { theme } from "../../../packages/terminal-core/src/theme.js";
 import {
   assertConfigWriteAllowedInCurrentMode,
   readConfigFileSnapshot,
@@ -15,6 +16,7 @@ import { UPDATE_RUN_ID_ENV } from "../../infra/update-control-plane-sentinel.js"
 import { readBuiltGatewayBuildId } from "../../infra/update-git-runtime.js";
 import { resolveUpdateInstallRoot } from "../../infra/update-install-root.js";
 import { prepareManagedHandoffLeaseStore } from "../../infra/update-managed-service-handoff-lease.js";
+import { ManagedHandoffCustodyRetainedError } from "../../infra/update-managed-service-handoff-reclamation.js";
 import { POST_CORE_UPDATE_ENV } from "../../infra/update-post-core-context.js";
 import {
   inspectUpdateRepairDriverAdmission,
@@ -46,6 +48,7 @@ import {
   resolveGatewayRestartProbeContext,
   waitForGatewayHttpReadiness,
 } from "../daemon-cli/restart-health-probe.js";
+import { exitCliAfterOutput } from "../one-shot-exit.js";
 import { hasCliProcessScope } from "../runtime-cleanup-scope.js";
 import { refuseHostOwnedUpdate } from "./host-owned.js";
 import {
@@ -54,7 +57,10 @@ import {
   resolveTargetVersion,
   type UpdateFinalizeOptions,
 } from "./shared.js";
-import { updateFinalizeCommand } from "./update-command-finalize.js";
+import {
+  updateFinalizeCommand,
+  type RetainedUpdateCustodyReport,
+} from "./update-command-finalize.js";
 import { refuseImmutableUpdateActivation } from "./update-command-immutable.js";
 import { resolveServiceRefreshEnv } from "./update-command-service-env.js";
 import { updateMaintenanceError } from "./update-maintenance-error.js";
@@ -119,15 +125,36 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
       defaultRuntime.error(`Warning: ${settlement.warning}`);
     }
   }
+  let retained: RetainedUpdateCustodyReport | undefined;
+  const prepareHandoffRepair = async () => {
+    const store = await prepareManagedHandoffLeaseStore();
+    try {
+      // Admission keys custody by the canonical installation, not a lexical slot.
+      return await store.prepareRepair(
+        resolveUpdateInstallRoot(await resolveUpdateRoot()),
+        env,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (!(error instanceof ManagedHandoffCustodyRetainedError)) {
+        throw error;
+      }
+      // Retained custody blocks the next update, not this repair's own maintenance.
+      retained = {
+        nextAction: `Cancelled update custody still blocks the next update. Resolve its reported reason, then rerun ${formatCliCommand("openclaw update repair", env)}.`,
+        retainedUpdateCustody: error.custody,
+      };
+      defaultRuntime.error(`Warning: ${error.message}`);
+      return null;
+    }
+  };
   using handoff =
     hasCliProcessScope() &&
     !inheritedRunId &&
     !env.OPENCLAW_UPDATE_RUN_HANDOFF &&
     !env[POST_CORE_UPDATE_ENV] &&
     validChannel
-      ? await (
-          await prepareManagedHandoffLeaseStore()
-        ).prepareRepair(await resolveUpdateRoot(), env, timeoutMs)
+      ? await prepareHandoffRepair()
       : null;
   // Capture Doctor-visible history before finalization admits its own newer run.
   // Terminal age limits the shortcut below, not successful repair acknowledgment.
@@ -182,6 +209,7 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
             opts,
             [lastRun.runId],
             `OpenClaw ${currentVersion} satisfies the package target ${targetVersion}. Acknowledged the package-owner refusal; no maintenance or service restart was needed.`,
+            retained,
           );
           return;
         }
@@ -213,12 +241,12 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
     history.postCoreRuns.length > 0 ||
     history.incomplete
   ) {
-    return await updateFinalizeCommand(opts, recoveryRunIds, handoff ?? undefined);
+    return await updateFinalizeCommand(opts, recoveryRunIds, handoff ?? undefined, retained);
   }
 
   const snapshot = await readConfigFileSnapshot({ skipPluginValidation: true });
   if (!snapshot.valid) {
-    return await updateFinalizeCommand(opts, recoveryRunIds);
+    return await updateFinalizeCommand(opts, recoveryRunIds, undefined, retained);
   }
   const context = await resolveGatewayRestartProbeContext(env);
   const port = resolveGatewayPort(context.config, env);
@@ -248,7 +276,7 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
     http.healthz !== 200 ||
     http.readyz !== 200
   ) {
-    return await updateFinalizeCommand(opts, recoveryRunIds);
+    return await updateFinalizeCommand(opts, recoveryRunIds, undefined, retained);
   }
 
   // Health probes await network I/O. Recheck current rows before the ledger's
@@ -292,23 +320,31 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
   const message = reconciled.length
     ? `Gateway is healthy. Reconciled ${reconciled.length} abandoned update run${reconciled.length === 1 ? "" : "s"}. No maintenance or service restart was needed.`
     : "Gateway is healthy. Abandoned update runs are already reconciled. No maintenance or service restart was needed.";
-  reportRepairResult(opts, acknowledged, message);
+  reportRepairResult(opts, acknowledged, message, retained);
 }
 
 function reportRepairResult(
   opts: UpdateFinalizeOptions,
   reconciledRuns: string[],
   message: string,
+  retained?: RetainedUpdateCustodyReport,
 ): void {
   if (opts.json) {
     defaultRuntime.writeJson({
-      status: "ok",
+      status: retained ? "warning" : "ok",
       mode: "repair",
       restart: false,
       reconciledRuns,
       message,
+      ...retained,
     });
   } else {
     defaultRuntime.log(message);
+    if (retained) {
+      defaultRuntime.log(theme.warn(retained.nextAction));
+    }
+  }
+  if (retained) {
+    exitCliAfterOutput(defaultRuntime, 2);
   }
 }

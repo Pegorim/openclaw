@@ -204,6 +204,107 @@ it.each(["installation repair", "settlement receipt"] as const)(
   },
 );
 
+it("settles a dead original's cancelled family with its retained service root", async () => {
+  const keys = fixture.seedCancellation();
+  const family = fixture.rows();
+  expect(nextUpdate()).toBe("busy");
+  using repair = await prepareRepair();
+  // The claim replaces the original; every other family row retires with it.
+  expect(fixture.rows().map((row) => row.install_root)).toEqual([fixture.root]);
+  const run = newRun();
+  repair.bindRun(run.runId);
+  repair.complete(run.runId);
+  const detail = settlement(run.runId)?.detail ?? "";
+  expect(detail).toContain(`cancelled update custody settled: updater PID ${keys.updater.pid}`);
+  // History shortens paths under the fixture home; sibling roots stay verbatim.
+  const settled = /Settled keys: (.*)\. Current-installation/.exec(detail)?.[1]?.split(", ");
+  expect(settled).toHaveLength(family.length);
+  expect(settled).toEqual(
+    expect.arrayContaining(
+      [keys.slot, keys.service].flatMap((key) => [key, `${key}${keys.lineage}`]),
+    ),
+  );
+  expect(fixture.rows()).toEqual([]);
+  expect(nextUpdate()).toBe("acquired");
+  expect(fixture.store.acquire(keys.service, "next-service", { kind: "update" }).kind).toBe(
+    "acquired",
+  );
+});
+
+it.each([
+  ["recent custody", /recovery grace ends at/],
+  ["unverified candidate", /live or unverified: PID 1000004/],
+  ["alias outside the family", /unsupported custody at .*-other\/\.openclaw-update-child-/],
+] as const)("retains cancelled custody unchanged for %s", async (reason, expected) => {
+  const keys = fixture.seedCancellation(
+    reason === "recent custody" ? { ageMs: 44 * 60_000 } : undefined,
+  );
+  if (reason === "unverified candidate") {
+    fixture.births.set(fixture.candidate.pid, null);
+  }
+  if (reason === "alias outside the family") {
+    const child = fixture.rows().find((row) => row.install_root.endsWith(keys.lineage));
+    fixture.insert([{ ...child!, install_root: `${fixture.root}-other${keys.lineage}` }]);
+  }
+  const family = fixture.rows();
+  await expect(prepareRepair()).rejects.toMatchObject({
+    name: "ManagedHandoffCustodyRetainedError",
+    custody: { key: fixture.root, owner: "original-owner", leaseVersion: 4, reason: expected },
+  });
+  expect(fixture.rows()).toEqual(family);
+  expect(nextUpdate()).toBe("busy");
+});
+
+it("preserves a dependent admitted while cancelled custody was inspected", async () => {
+  const keys = fixture.seedCancellation();
+  const inspecting = createDeferred();
+  const observation = createDeferred<typeof fixture.facts>();
+  fixture.repairFacts.mockImplementationOnce(() => {
+    inspecting.resolve();
+    return observation.promise;
+  });
+  const result = prepareRepair();
+  // A repair that skips fact inspection settles first instead of hanging the test.
+  await Promise.race([inspecting.promise, result]);
+  const mirror = fixture.rows().find((row) => row.install_root === keys.slot);
+  fixture.insert([{ ...mirror!, install_root: `${keys.slot}-newer`, updated_at: Date.now() }]);
+  const family = fixture.rows();
+  observation.resolve(fixture.facts);
+  await expect(result).rejects.toThrow("ownership changed; retry");
+  expect(fixture.rows()).toEqual(family);
+});
+
+it("resumes a failed cancelled-custody repair from its retained original", async () => {
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  fixture.seedCancellation();
+  const [original] = fixture.rows();
+  await expect(
+    withRepair(() => {
+      throw new Error("Current installation repair failed");
+    }),
+  ).rejects.toThrow("Current installation repair failed");
+  const retained = fixture.current();
+  expect(retained.action).toMatchObject({ kind: "triage", phase: "uncertain" });
+  expect(fixture.readMetadata(retained)?.source).toEqual({
+    owner: original!.owner,
+    payload_json: original!.payload_json,
+    updated_at: original!.updated_at,
+  });
+  expect(nextUpdate()).toBe("busy");
+  // A later process resumes after the interrupted claim's own grace period.
+  now += 45 * 60_000 + 1_000;
+  fixture.births.set(process.pid, 20);
+  const nextStore = createManagedHandoffLeaseStore();
+  using resumed = await prepareRepair(nextStore);
+  const run = newRun();
+  resumed.bindRun(run.runId);
+  resumed.complete(run.runId);
+  expect(settlement(run.runId)?.detail).toContain("cancelled update custody settled");
+  expect(fixture.rows()).toEqual([]);
+  expect(nextUpdate(nextStore)).toBe("acquired");
+});
+
 it("preserves interrupted repair evidence across reboot until explicit repair settles it", async () => {
   let now = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => now);

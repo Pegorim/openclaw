@@ -11,6 +11,7 @@ import {
   createManagedHandoffLeaseDatabase,
   leaseQueries,
   readManagedHandoffRepairMetadata,
+  type LeaseTable,
 } from "./update-managed-service-handoff-database.js";
 import {
   createManagedHandoffLeaseStore,
@@ -71,17 +72,91 @@ export function createManagedHandoffRecoveryFixture(root: string) {
     }
     return found.lease;
   };
+  const insert = (rows: LeaseTable[]) =>
+    database(true, (db) =>
+      executeSqliteQuerySync(
+        db,
+        leaseQueries(db).insertInto("managed_update_handoffs").values(rows),
+      ),
+    );
+  const candidate = { pid: 1_000_004, startIdentity: "14" };
   return {
     root,
     store,
     births,
     helper,
+    candidate,
     processCensus,
     runCensus,
     repairFacts,
     facts,
     diagnosticPath,
     current,
+    insert,
+    rows: () =>
+      database(false, (db) =>
+        executeSqliteQuerySync(
+          db,
+          leaseQueries(db)
+            .selectFrom("managed_update_handoffs")
+            .select(["install_root", "owner", "payload_json", "updated_at"])
+            .orderBy("install_root"),
+        ),
+      ).rows,
+    /** Rows a cancelled original leaves when it dies before joining its candidate:
+     * its v4 generation, a retained service root, an occupied-slot mirror, and the
+     * candidate lineage under each root, in the shapes their producers write. */
+    seedCancellation(options: { ageMs?: number } = {}) {
+      const updatedAt = Date.now() - (options.ageMs ?? 45 * 60_000 + 1_000);
+      const original = { kind: "update", mutationProtocol: "original-cancellation-v1" };
+      const generation = (key: string, owner: string, action: object) => ({
+        key,
+        owner,
+        payload: JSON.stringify({ version: 2, executor, helper: executor, action }),
+        updatedAt,
+      });
+      const cancel = (cancellation: ReturnType<typeof generation>, action: object) => ({
+        install_root: cancellation.key,
+        owner: cancellation.owner,
+        payload_json: JSON.stringify({
+          version: 4,
+          helper: executor,
+          executor,
+          action,
+          cancellation,
+        }),
+        updated_at: updatedAt + 1,
+      });
+      const keys = { slot: `${root}-slot`, service: `${root}-service` };
+      const originalGeneration = generation(root, "original-owner", original);
+      const lineage = `/.openclaw-update-child-01234567-89ab-cdef-0123-456789abcdef-lineage-${"b".repeat(64)}`;
+      const child = (parent: string, action: object) => ({
+        install_root: parent + lineage,
+        owner: "retained-update",
+        payload_json: JSON.stringify({ version: 2, helper: executor, executor: candidate, action }),
+        updated_at: updatedAt,
+      });
+      insert([
+        cancel(originalGeneration, original),
+        cancel(generation(keys.service, "service-owner", { kind: "update" }), { kind: "update" }),
+        {
+          install_root: keys.slot,
+          owner: "original-owner",
+          payload_json: JSON.stringify({
+            version: 2,
+            executor,
+            helper: executor,
+            action: { kind: "update" },
+            mutationOriginal: originalGeneration,
+          }),
+          updated_at: updatedAt,
+        },
+        child(root, original),
+        child(keys.slot, { kind: "update" }),
+        child(keys.service, { kind: "update" }),
+      ]);
+      return { ...keys, lineage, updater: executor };
+    },
     seed(options: { ageMs?: number; timeoutMs?: number } = {}): ManagedHandoffLease {
       const updatedAt = Date.now() - (options.ageMs ?? 45 * 60_000 + 1_000);
       const payload = JSON.stringify({
@@ -91,17 +166,9 @@ export function createManagedHandoffRecoveryFixture(root: string) {
         action: { kind: "triage", phase: "uncertain", lifetime: { kind: "foreground", boot } },
       });
       facts.timeoutMs = options.timeoutMs ?? null;
-      database(true, (db) =>
-        executeSqliteQuerySync(
-          db,
-          leaseQueries(db).insertInto("managed_update_handoffs").values({
-            install_root: root,
-            owner: "prior-owner",
-            payload_json: payload,
-            updated_at: updatedAt,
-          }),
-        ),
-      );
+      insert([
+        { install_root: root, owner: "prior-owner", payload_json: payload, updated_at: updatedAt },
+      ]);
       return current();
     },
     readMetadata(lease: ManagedHandoffLease) {
