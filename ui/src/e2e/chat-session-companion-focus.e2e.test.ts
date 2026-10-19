@@ -84,7 +84,9 @@ suite.define(() => {
           await page.keyboard.type("Keep typing here");
           expect(await mainInput.inputValue()).toBe("Keep typing here");
           expect(await sideInput.inputValue()).toBe("");
-          await page.getByRole("button", { name: "Close Side chat", exact: true }).click();
+          const close = page.getByRole("button", { name: "Close Side chat", exact: true });
+          await close.click();
+          await close.waitFor({ state: "hidden" });
           await openChatSidePanelType(page, "Side chat");
           await expect
             .poll(() => sideInput.evaluate((element) => document.activeElement === element))
@@ -113,7 +115,9 @@ suite.define(() => {
           expect(await sideInput.count()).toBe(0);
           await page.getByRole("tab", { name: "Side chat", exact: true }).waitFor();
           if (action === "close") {
-            await page.getByRole("button", { name: "Close Side chat", exact: true }).click();
+            const close = page.getByRole("button", { name: "Close Side chat", exact: true });
+            await close.click();
+            await close.waitFor({ state: "hidden" });
           } else if (action === "minimize") {
             await selectChatLayoutAction(page, "Minimize side panel");
           } else {
