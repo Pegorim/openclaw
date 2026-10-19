@@ -239,7 +239,7 @@ function SessionRenameInput(props: ChatPaneHeaderProps) {
         }
         if (event.key === "Enter") {
           event.preventDefault();
-          if (!props.actionsDisabled) {
+          if (!props.renameDisabledReason) {
             props.onCommitRename();
           }
         } else if (event.key === "Escape") {
@@ -249,7 +249,7 @@ function SessionRenameInput(props: ChatPaneHeaderProps) {
       }}
       onBlur={(event) => {
         clearCompositionEnd(event);
-        if (!props.actionsDisabled) {
+        if (!props.renameDisabledReason) {
           props.onCommitRename();
         }
       }}
