@@ -143,7 +143,19 @@ suite.define(() => {
         terminalEnabled: true,
         featureMethods: ["terminal.open"],
         methodResponses: {
-          "terminal.list": { sessions: [] },
+          "terminal.list": {
+            sessions: [
+              {
+                agentId: "main",
+                confined: false,
+                cwd: "/workspace",
+                sessionId: "failed-font",
+                shell: "/bin/zsh",
+                attached: true,
+                createdAtMs: 1,
+              },
+            ],
+          },
           "terminal.open": {
             agentId: "main",
             confined: false,
@@ -155,6 +167,7 @@ suite.define(() => {
       });
       await page.goto(suite.server.baseUrl + "terminal");
       await gateway.waitForRequest("terminal.open");
+      await page.locator(".tp-session.is-current").click();
       const canvas = page.locator(".tp-host canvas");
       await canvas.waitFor();
       await expect
