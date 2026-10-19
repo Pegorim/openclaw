@@ -7,6 +7,7 @@ import {
   installMockGateway,
   waitForControlUiRoute,
 } from "../test-helpers/control-ui-e2e.ts";
+import { navigationDrawerToggle } from "../test-helpers/control-ui-navigation.ts";
 import { compactCronJobFixture } from "../test-helpers/cron.ts";
 import { openSidebarPages } from "./sidebar-customization.test-support.ts";
 
@@ -16,10 +17,6 @@ type SidebarAttentionScopeFlowOptions = {
   browser: Browser;
   captureProof: boolean;
 };
-
-function visibleDrawerButton(page: Page) {
-  return page.locator(".topbar-nav-toggle:visible, .chat-pane__nav-toggle:visible").first();
-}
 
 async function captureProof(
   params: SidebarAttentionScopeFlowOptions,
@@ -350,7 +347,7 @@ export async function runSidebarAttentionScopeFlow(params: SidebarAttentionScope
       .evaluateAll((elements) =>
         elements.map((element) => element.getAttribute("data-attention-kind")),
       );
-    await visibleDrawerButton(page).click();
+    await navigationDrawerToggle(page).click();
     await expect
       .poll(() => page.locator(".shell").getAttribute("class"))
       .toContain("shell--nav-drawer-open");
