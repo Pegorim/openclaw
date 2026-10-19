@@ -9,18 +9,25 @@ import {
   resolveTargetSqliteOptions,
   type ExistingAgentDatabaseTarget,
 } from "../infra/session-sqlite-migration-readers.js";
+import { beginUpdateDoctorHistoricalScan } from "../infra/update-doctor-scan-receipts.js";
 import { ReadOnlySqliteTranscriptReader } from "./doctor-session-sqlite-transcript-readers.js";
 
 /** Each snapshot closes its cursors before a repair; each pass owns only its read connection. */
 export function scanDoctorSessionTranscripts(
-  params: { cfg: OpenClawConfig; env: NodeJS.ProcessEnv; title: string; failureLabel: string },
+  params: {
+    cfg: OpenClawConfig;
+    env: NodeJS.ProcessEnv;
+    title: string;
+    failureLabel: string;
+    cleanScanIdentity?: (target: ExistingAgentDatabaseTarget) => readonly unknown[];
+  },
   visit: (context: {
     reader: ReadOnlySqliteTranscriptReader;
     sessionId: string;
     target: ExistingAgentDatabaseTarget;
     databaseOptions: ReturnType<typeof resolveTargetSqliteOptions>;
     reportError: (message: string, error: unknown) => void;
-  }) => void,
+  }) => boolean | void,
 ): void {
   const reportError = (message: string, error: unknown) =>
     note(`${message}: ${formatErrorMessage(error).replace(/\s+/g, " ").trim()}`, params.title);
@@ -29,18 +36,41 @@ export function scanDoctorSessionTranscripts(
     params.env,
     params.cfg,
   )) {
+    const scan = params.cleanScanIdentity
+      ? beginUpdateDoctorHistoricalScan(target.sqlitePath, params.cleanScanIdentity(target))
+      : undefined;
+    if (scan?.reused) {
+      scan.complete();
+      continue;
+    }
+    let clean = true;
+    const reportTargetError = (message: string, error: unknown) => {
+      clean = false;
+      reportError(message, error);
+    };
     const databaseOptions = resolveTargetSqliteOptions(target, params.env);
     let database: DatabaseSync | undefined;
     try {
       database = openNodeSqliteDatabase(target.sqlitePath, { readOnly: true });
       const reader = new ReadOnlySqliteTranscriptReader(database);
       for (const sessionId of reader.sessionIds()) {
-        visit({ reader, sessionId, target, databaseOptions, reportError });
+        if (
+          visit({ reader, sessionId, target, databaseOptions, reportError: reportTargetError }) ===
+          false
+        ) {
+          clean = false;
+        }
       }
     } catch (error) {
-      reportError(`- ${params.failureLabel} for ${target.agentId} (${target.sqlitePath})`, error);
+      reportTargetError(
+        `- ${params.failureLabel} for ${target.agentId} (${target.sqlitePath})`,
+        error,
+      );
     } finally {
       database?.close();
+    }
+    if (clean) {
+      scan?.complete();
     }
   }
 }

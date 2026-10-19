@@ -1,3 +1,4 @@
+import { measureGatewayBootstrapStep } from "../cli/startup-trace.js";
 import { noteBackupDoctorHint } from "../commands/backup-health.js";
 import { isLegacyParentWritableUpdateDoctorPass } from "../commands/doctor/shared/update-phase.js";
 import { copyConfigResolutionFactsThroughRewrite } from "../config/resolution-facts.js";
@@ -226,19 +227,25 @@ export async function runConfigAuditScrubHealth(ctx: DoctorHealthFlowContext): P
 export async function runLegacyCronHealth(ctx: DoctorHealthFlowContext): Promise<void> {
   const { maybeRepairLegacyCronStore, noteLegacyWhatsAppCrontabHealthCheck } =
     await import("../commands/doctor/cron/index.js");
-  await noteLegacyWhatsAppCrontabHealthCheck();
-  await maybeRepairLegacyCronStore({
-    cfg: ctx.cfg,
-    options: ctx.options,
-    prompter: ctx.prompter,
-  });
+  await measureGatewayBootstrapStep("doctor.legacy-cron.crontab", () =>
+    noteLegacyWhatsAppCrontabHealthCheck(),
+  );
+  await measureGatewayBootstrapStep("doctor.legacy-cron.store", () =>
+    maybeRepairLegacyCronStore({
+      cfg: ctx.cfg,
+      options: ctx.options,
+      prompter: ctx.prompter,
+    }),
+  );
   const { maybeRepairCronInferenceBindings } =
     await import("../commands/doctor/cron/inference-binding-migration.js");
-  const inference = await maybeRepairCronInferenceBindings({
-    cfg: ctx.cfg,
-    env: ctx.env,
-    shouldRepair: ctx.prompter.shouldRepair,
-  });
+  const inference = await measureGatewayBootstrapStep("doctor.legacy-cron.inference", () =>
+    maybeRepairCronInferenceBindings({
+      cfg: ctx.cfg,
+      env: ctx.env,
+      shouldRepair: ctx.prompter.shouldRepair,
+    }),
+  );
   const { note } = await import("../../packages/terminal-core/src/note.js");
   noteDoctorRepairResult(inference, note);
   recordDoctorHealthWarnings(ctx, [], inference.warnings);
