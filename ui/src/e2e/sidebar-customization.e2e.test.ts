@@ -738,7 +738,7 @@ suite.define(() => {
         )
         .toBe(0);
       // Narrow Chat merges navigation controls into its title bar.
-      await expect.poll(() => page.locator(".chat-pane__header").first().isVisible()).toBe(true);
+      await expect.poll(() => page.locator(".agent-chat__header--mobile").isVisible()).toBe(true);
       await captureUiProof(page, "05-expanded-tablet-drawer.png");
 
       // Widening with the drawer open must not leave its stale state blocking
@@ -763,7 +763,7 @@ suite.define(() => {
         .poll(() => page.locator(".shell").getAttribute("class"))
         .not.toContain("shell--nav-drawer-open");
       await page.setViewportSize({ height: 852, width: 393 });
-      await expect.poll(() => page.locator(".chat-pane__header").first().isVisible()).toBe(true);
+      await expect.poll(() => page.locator(".agent-chat__header--mobile").isVisible()).toBe(true);
       await expect
         .poll(() =>
           page.locator(".shell-nav").evaluate((element) => element.getBoundingClientRect().right),

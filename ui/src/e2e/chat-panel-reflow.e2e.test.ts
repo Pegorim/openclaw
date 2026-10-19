@@ -124,7 +124,10 @@ suite.define(() => {
       await page.screenshot({ path: path.join(artifactDir, "00-closed.png") });
 
       await openChatSidePanelType(page, "Files");
-      await page.locator(".chat-workspace-rail").waitFor({ state: "visible" });
+      await page
+        .locator(".workspace-desktop")
+        .getByRole("button", { name: "/workspace/AGENTS.md", exact: true })
+        .waitFor({ state: "visible" });
       await expectMessagesNotToOverlap(page);
       await page.screenshot({ path: path.join(artifactDir, "02-thread-files.png") });
 

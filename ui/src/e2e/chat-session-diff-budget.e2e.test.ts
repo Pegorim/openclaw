@@ -76,10 +76,22 @@ suite.define(() => {
       await focusChatSidePanel(page);
       const panel = page.locator(".session-diff");
       const readSide = (selector: string) => panel.locator(selector).allTextContents();
-      expect(await readSide(".chat-diff__row--del .chat-diff__text")).toEqual(before);
+      const fileToggle = panel.getByRole("button", {
+        name: "src/large.ts — Modified",
+        exact: true,
+      });
+      const modeButton = (current: "auto" | "unified" | "split") =>
+        panel.getByRole("button", {
+          name: "Diff mode: " + current + ". Switch to next mode",
+          exact: true,
+        });
+      await fileToggle.waitFor();
+      expect(await fileToggle.getAttribute("aria-expanded")).toBe("false");
+      await fileToggle.click();
+      await modeButton("auto").click();
+      await expect.poll(() => readSide(".chat-diff__row--del .chat-diff__text")).toEqual(before);
       expect(await readSide(".chat-diff__row--add .chat-diff__text")).toEqual(after);
-      await panel.getByRole("button", { name: "Change view options" }).click();
-      await page.getByRole("menuitem", { name: "Switch to Split Diff" }).click();
+      await modeButton("unified").click();
       await expect
         .poll(() =>
           readSide(
@@ -96,15 +108,18 @@ suite.define(() => {
       expect(await panel.locator(".session-diff-split__row").last().textContent()).toContain(
         after[63],
       );
-      await panel.getByRole("button", { name: "Change view options" }).click();
-      await page.getByRole("menuitem", { name: "Switch to Unified Diff" }).click();
+      await modeButton("split").click();
+      await modeButton("auto").click();
       expect(await readSide(".chat-diff__row--add .chat-diff__text")).toEqual(after);
       const samples: { cpuRate: number; paintMs: number }[] = [];
       for (let i = 0; i < (captureProof ? 10 : 1); i++) {
         const cpuRate = i < 5 ? 4 : 1;
         await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuRate });
+        const previousRequests = (await gateway.getRequests("sessions.diff")).length;
         await gateway.deferNext("sessions.diff");
         await panel.getByRole("button", { name: "Refresh changes" }).click();
+        await gateway.waitForRequest("sessions.diff", { after: previousRequests });
+        expect(await fileToggle.getAttribute("aria-expanded")).toBe("false");
         const painted = page.evaluate(
           () =>
             new Promise<number>((resolve) => {
@@ -127,6 +142,9 @@ suite.define(() => {
         );
         await gateway.resolveDeferred("sessions.diff");
         samples.push({ cpuRate, paintMs: await painted });
+        await fileToggle.click();
+        await expect.poll(() => readSide(".chat-diff__row--del .chat-diff__text")).toEqual(before);
+        expect(await readSide(".chat-diff__row--add .chat-diff__text")).toEqual(after);
       }
       if (captureProof) {
         console.log("DIFF_BROWSER_REFRESH_PAINT_MS", mode, JSON.stringify(samples));

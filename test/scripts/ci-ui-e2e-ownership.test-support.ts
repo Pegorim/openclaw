@@ -152,7 +152,6 @@ export function assertControlUiE2eOwnership(
     "ui/src/e2e/deepseek-search.real-gateway.e2e.test.ts",
     "ui/src/e2e/desktop-resize.real-gateway.e2e.test.ts",
     "ui/src/e2e/device-platform-family.real-gateway.e2e.test.ts",
-    "ui/src/e2e/mobile-chat-session-menu.e2e.test.ts",
     "ui/src/e2e/mobile-sidebar-session-menu.e2e.test.ts",
     "ui/src/e2e/model-api-keys.real-gateway.e2e.test.ts",
     "ui/src/e2e/model-catalog-partial-refresh.real-gateway.e2e.test.ts",

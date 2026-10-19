@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
 import type { SessionSnapshotStore } from "../pages/chat/session-snapshot-store.ts";
+import { closeChatDetails, openChatTaskProgress } from "./chat-details.test-support.ts";
 import {
   chatSessionListResponse,
   controlUiSessionUrl,
@@ -18,8 +19,6 @@ type ColdLoadFrame = {
   progress: boolean;
   threadTop: number;
   threadHeight: number;
-  cardTop: number | null;
-  cardHeight: number | null;
 };
 declare global {
   interface Window {
@@ -108,8 +107,6 @@ suite.define(() => {
                 progress: false,
                 threadTop: 0,
                 threadHeight: thread.clientHeight,
-                cardTop: null,
-                cardHeight: null,
               });
             }
             if (window.coldLoadSamples!.length < 24) {
@@ -249,10 +246,11 @@ suite.define(() => {
           .waitFor();
         await page.getByText("Worked for 3 minutes", { exact: true }).waitFor();
         await page.locator(".chat-reply-attribution__name").filter({ hasText: "Avery" }).waitFor();
-        await page
-          .locator('[data-progress-card-placement="details"]')
-          .filter({ hasText: "Review final report" })
-          .waitFor({ state: "attached" });
+        const progress = await openChatTaskProgress(page);
+        await progress
+          .locator(".task-progress-details__plan")
+          .getByText("Review final report", { exact: true })
+          .waitFor();
         await page.locator(".chat-pane-cache__pane--active").evaluate(async (element) => {
           const pane = element as HTMLElement & { sessionSnapshotStore?: SessionSnapshotStore };
           if (!pane.sessionSnapshotStore) {
@@ -273,7 +271,6 @@ suite.define(() => {
               return null;
             }
             const card = pane?.querySelector('[data-progress-card-placement="details"]');
-            const cardRect = card?.getBoundingClientRect();
             const threadRect = thread.getBoundingClientRect();
             return {
               title:
@@ -287,8 +284,6 @@ suite.define(() => {
               progress: card?.textContent?.includes("Review final report") === true,
               threadTop: threadRect.top,
               threadHeight: threadRect.height,
-              cardTop: cardRect?.top ?? null,
-              cardHeight: cardRect?.height ?? null,
             };
           };
           Object.assign(window, {
@@ -309,12 +304,34 @@ suite.define(() => {
         });
         await page.reload();
         await page.waitForFunction(() => (window.coldLoadSamples?.length ?? 0) >= 20);
+        const firstFrames = await page.evaluate(() => window.coldLoadSamples!.slice(0, 20));
+        for (const frame of firstFrames) {
+          expect(frame.title).toBe(session.label);
+          expect(Math.abs(frame.max - frame.top)).toBeLessThanOrEqual(1);
+          expect(frame).toMatchObject({ duration: true, reply: true });
+        }
+        // Details mounts on demand; its saved progress must still be readable before hello.
+        await openChatTaskProgress(page);
+        await progress
+          .locator(".task-progress-details__plan")
+          .getByText("Review final report", { exact: true })
+          .waitFor();
+        await page.screenshot({
+          path: path.join(suite.artifactDir, "cold-load-cached-progress.png"),
+        });
+        // Compare the same closed-inspector scene across authentication and roster hydration.
+        await closeChatDetails(page);
+        const closedStart = await page.evaluate(() => window.coldLoadSamples!.length);
+        await page.waitForFunction(
+          (start) => (window.coldLoadSamples?.length ?? 0) >= start + 20,
+          closedStart,
+        );
         const samples = await page.evaluate(() => {
           if (!window.coldLoadSamples) {
             throw new Error("Missing cold-load frame recorder");
           }
           window.coldLoadCard = document.querySelector('[data-progress-card-placement="details"]');
-          return window.coldLoadSamples.slice(0, 20);
+          return window.coldLoadSamples.slice(-20);
         });
         await writeFile(
           path.join(suite.artifactDir, "cold-load-cached-frames.json"),
@@ -357,7 +374,7 @@ suite.define(() => {
         });
         await writeFile(
           path.join(suite.artifactDir, "cold-load-frames.json"),
-          JSON.stringify({ cached: samples, live: reconciled.frames }),
+          JSON.stringify({ firstFrames, cached: samples, live: reconciled.frames }),
         );
         await page.screenshot({ path: path.join(suite.artifactDir, "cold-load-live.png") });
         expect(reconciled.retainedCard).toBe(true);
@@ -367,15 +384,8 @@ suite.define(() => {
           expect(frame.title).toBe(session.label);
           expect(frame).toMatchObject({ duration: true, reply: true, progress: true });
           expect(Math.abs(frame.max - frame.top)).toBeLessThanOrEqual(1);
-          for (const key of [
-            "top",
-            "threadTop",
-            "threadHeight",
-            "cardTop",
-            "cardHeight",
-          ] as const) {
-            expect(frame[key]).not.toBeNull();
-            expect(Math.abs(frame[key]! - cached[key]!)).toBeLessThanOrEqual(1);
+          for (const key of ["top", "threadTop", "threadHeight"] as const) {
+            expect(Math.abs(frame[key] - cached[key])).toBeLessThanOrEqual(1);
           }
         }
       },

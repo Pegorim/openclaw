@@ -5,7 +5,11 @@ import { waitForLayoutSettled } from "../pages/chat/chat-layout.browser.test-sup
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
-import { openChatDetails } from "./chat-details.test-support.ts";
+import {
+  closeChatDetails,
+  openChatDetails,
+  openChatTaskProgress,
+} from "./chat-details.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Subagent task notice" });
@@ -19,7 +23,11 @@ suite.define(() => {
         const proofDir = artifactRoot
           ? createControlUiE2eArtifactDir("subagent-task-notice", artifactRoot)
           : undefined;
-        const parent = { key: "agent:main:task-parent", kind: "direct", label: "Workspace review" };
+        const parent = {
+          key: "agent:main:task-parent",
+          kind: "direct",
+          label: "Workspace review",
+        };
         const child = {
           key: "agent:main:subagent:task-child",
           kind: "direct",
@@ -59,15 +67,17 @@ suite.define(() => {
         const pane = page.locator("openclaw-chat-pane.chat-pane-cache__pane--active");
         const shell = pane.locator(".agent-chat__composer-shell");
         const notice = shell.locator(".agent-chat__disabled-banner--replacement");
-        const progress = pane.locator('[data-progress-card-placement="details"]');
         await notice.getByText("View-only subagent", { exact: true }).waitFor();
-        await progress.waitFor({ state: "attached" });
-        expect(await progress.isVisible()).toBe(false);
+        expect(await pane.locator(".task-progress-details__plan").isVisible()).toBe(false);
+        const progress = await openChatTaskProgress(pane);
         const details = await openChatDetails(pane);
-        await progress.waitFor();
+        const mobile = width === 768;
+        const scrollport = mobile
+          ? progress.locator(".chat-mobile-details-page__body")
+          : details.locator(".chat-details-desktop-body");
         expect(await shell.locator(".session-progress-card").count()).toBe(0);
         expect(await shell.locator("textarea").count()).toBe(0);
-        if (!(await progress.evaluate((element) => element.hasAttribute("open")))) {
+        if (!mobile && !(await progress.evaluate((element) => element.hasAttribute("open")))) {
           await progress.locator("summary").click();
         }
         if (proofDir) {
@@ -113,16 +123,16 @@ suite.define(() => {
             return true;
           })
           .toBe(true);
-        expect(await details.evaluate((element) => getComputedStyle(element).overflowY)).toBe(
+        expect(await scrollport.evaluate((element) => getComputedStyle(element).overflowY)).toBe(
           "auto",
         );
         expect(
-          await details.evaluate((element) => element.scrollHeight > element.clientHeight),
+          await scrollport.evaluate((element) => element.scrollHeight > element.clientHeight),
         ).toBe(true);
-        await details.hover();
+        await scrollport.hover();
         await page.mouse.wheel(0, 1000);
         await expect
-          .poll(() => details.evaluate((element) => element.scrollTop))
+          .poll(() => scrollport.evaluate((element) => element.scrollTop))
           .toBeGreaterThan(0);
         expect(await notice.evaluate((element) => element.getBoundingClientRect().top)).toBeCloseTo(
           footerTop,
@@ -131,29 +141,44 @@ suite.define(() => {
         await notice.getByRole("button", { name: "Open parent session", exact: true }).click({
           trial: true,
         });
-        await progress.locator("summary").click();
-        await expect.poll(() => progress.getAttribute("open")).toBeNull();
+        if (mobile) {
+          await details
+            .locator(".chat-mobile-host__header")
+            .getByRole("button", { name: "Back", exact: true })
+            .click();
+          await progress.waitFor({ state: "hidden" });
+          await closeChatDetails(pane);
+        } else {
+          await progress.locator("summary").click();
+          await expect.poll(() => progress.getAttribute("open")).toBeNull();
+        }
         await notice.getByRole("button", { name: "Open parent session", exact: true }).click();
         const input = shell.locator(".agent-chat__input");
         await input.locator("textarea").fill("Continue the review");
-        await openChatDetails(pane);
-        await progress.waitFor();
+        await openChatTaskProgress(pane);
         expect(await input.locator("textarea").inputValue()).toBe("Continue the review");
+        if (!mobile) {
+          // Floating desktop Details keeps its approved composer-bottom alignment.
+          await closeChatDetails(pane);
+        }
         await expect
           .poll(() =>
             input.evaluate((element) => {
               const inputBounds = element.getBoundingClientRect();
               const detailsBounds = element
                 .closest("openclaw-chat-pane")!
-                .querySelector(".chat-details")!
-                .getBoundingClientRect();
+                .querySelector(
+                  ".sidebar-region--mobile-host > .chat-mobile-host:not([hidden]), .chat-details[data-open]:not(.chat-mobile-host .chat-details)",
+                )
+                ?.getBoundingClientRect();
               return (
-                detailsBounds.height > 0 &&
-                detailsBounds.bottom <= innerHeight &&
-                (detailsBounds.bottom <= inputBounds.top + 1 ||
-                  detailsBounds.top >= inputBounds.bottom - 1 ||
-                  detailsBounds.right <= inputBounds.left ||
-                  detailsBounds.left >= inputBounds.right) &&
+                (!detailsBounds ||
+                  (detailsBounds.height > 0 &&
+                    detailsBounds.bottom <= innerHeight &&
+                    (detailsBounds.bottom <= inputBounds.top + 1 ||
+                      detailsBounds.top >= inputBounds.bottom - 1 ||
+                      detailsBounds.right <= inputBounds.left ||
+                      detailsBounds.left >= inputBounds.right))) &&
                 inputBounds.bottom <= innerHeight
               );
             }),

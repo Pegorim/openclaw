@@ -70,15 +70,22 @@ suite.define(() => {
           expect(await typography(side.getByText(questionText, { exact: true }))).toEqual(
             await typography(main.getByText(questionText, { exact: true })),
           );
-          expect(await typography(side.getByRole("textbox"))).toEqual(
-            await typography(
-              page.getByRole("textbox", {
-                name: "Chat composer",
-                exact: true,
-                includeHidden: true,
-              }),
-            ),
+          const mainInput = await typography(
+            page.getByRole("textbox", {
+              name: "Chat composer",
+              exact: true,
+              includeHidden: true,
+            }),
           );
+          const sideInput = await typography(side.getByRole("textbox"));
+          if (width === 390) {
+            // The collapsed mobile composer has a compact 22px row; Side chat
+            // retains its multiline editor. Both consume the same text scale.
+            expect(mainInput).toMatchObject({ size: "20px", lineHeight: "22px", weight: "500" });
+            expect(sideInput).toEqual({ ...mainInput, lineHeight: "30px", weight: "400" });
+          } else {
+            expect(sideInput).toEqual(mainInput);
+          }
           await side.getByRole("button", { name: "Copy code", exact: true }).click();
           await expect
             .poll(() => page.evaluate(() => navigator.clipboard.readText()))
