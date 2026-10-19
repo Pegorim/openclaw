@@ -18,6 +18,7 @@ import {
 import { writeJsonFile } from "../../../test/helpers/temp-repo.js";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import * as census from "../../infra/openclaw-process-census.js";
+import { DoctorMaintenanceRefusalError } from "../../infra/update-doctor-result.js";
 import {
   createManagedHandoffLeaseDatabase,
   leaseQueries,
@@ -262,15 +263,40 @@ unix(
   },
 );
 
-unix(
-  "a failed cancelled-custody repair keeps the original evidence for the next repair",
+unix.each(["failed", "deferred"] as const)(
+  "a %s cancelled-custody repair keeps the original evidence and reports it on rerun",
   { timeout: 60_000 },
-  async () => {
+  async (interruption) => {
     const { original, runId } = f.crash();
+    const lastActivityAt = new Date(original.updated_at).toISOString();
     await f.stopCandidate();
-    mocks.doctor.mockRejectedValueOnce(new Error("Doctor interrupted"));
-    await repair();
-    expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
+    if (interruption === "failed") {
+      mocks.doctor.mockRejectedValueOnce(new Error("Doctor interrupted"));
+      await repair();
+      expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
+    } else {
+      mocks.doctor.mockRejectedValueOnce(
+        new DoctorMaintenanceRefusalError("Synthetic maintenance contention", {
+          kind: "deferred",
+          reason: "coordinator-contention",
+        }),
+      );
+      await expect(repair()).rejects.toEqual(new ExitError(2));
+      // The open claim still guards the cancelled custody; the report says so.
+      expect(lastJson()).toMatchObject({
+        status: "warning",
+        nextAction: expect.stringMatching(
+          /gateway stop.*update repair.*Cancelled update custody/su,
+        ),
+        retainedUpdateCustody: {
+          key: f.install,
+          owner: original.owner,
+          leaseVersion: 4,
+          lastActivityAt,
+          reason: expect.stringContaining("Doctor maintenance remains pending"),
+        },
+      });
+    }
     const [claim, ...others] = f.rows();
     expect(others).toEqual([]);
     expect(claim).toMatchObject({ install_root: f.install });
@@ -285,8 +311,26 @@ unix(
       },
       facts: { runIds: [runId, listUpdateRuns()[0]!.runId] },
     });
-    await expect(admit("blocked-after-failure")).rejects.toThrow(
+    await expect(admit("blocked-after-interruption")).rejects.toThrow(
       "Another update executor owns this installation",
     );
+
+    // An immediate rerun still finishes maintenance and reports the retained custody.
+    // This process owns the interrupted claim, so it stays live and is refused.
+    vi.mocked(defaultRuntime.writeJson).mockClear();
+    mocks.doctor.mockClear();
+    await expect(repair()).rejects.toEqual(new ExitError(2));
+    expect(mocks.doctor).toHaveBeenCalled();
+    expect(lastJson()).toMatchObject({
+      status: "warning",
+      retainedUpdateCustody: {
+        key: f.install,
+        owner: original.owner,
+        leaseVersion: 4,
+        lastActivityAt,
+        reason: expect.stringContaining(`live or unverified: PID ${process.pid}`),
+      },
+    });
+    expect(f.rows()).toHaveLength(1);
   },
 );

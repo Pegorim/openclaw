@@ -51,15 +51,21 @@ export function createManagedHandoffRecoveryFixture(root: string) {
     unverifiedPids: [],
   };
   const runCensus = new Map<string, typeof processCensus>();
+  // Processes whose argv or cwd names a retained path, keyed by that path.
+  const pathCensus = new Map<string, number[]>();
   function inspect(references: {
     runId: string;
     artifactPaths: readonly string[];
   }): typeof processCensus;
   function inspect(): { pids: number[] };
   function inspect(references?: { runId: string; artifactPaths: readonly string[] }) {
-    return references
-      ? (runCensus.get(references.runId) ?? processCensus)
-      : { pids: processCensus.matchingPids };
+    if (!references) {
+      return { pids: processCensus.matchingPids };
+    }
+    const holders = references.artifactPaths.flatMap((entry) => pathCensus.get(entry) ?? []);
+    return holders.length
+      ? { matchingPids: holders, unverifiedPids: [] }
+      : (runCensus.get(references.runId) ?? processCensus);
   }
   vi.spyOn(census, "inspectOtherOpenClawProcesses").mockImplementation(inspect);
   const databasePath = path.join(control, "managed-update-handoffs.sqlite");
@@ -88,6 +94,7 @@ export function createManagedHandoffRecoveryFixture(root: string) {
     candidate,
     processCensus,
     runCensus,
+    pathCensus,
     repairFacts,
     facts,
     diagnosticPath,
@@ -106,14 +113,15 @@ export function createManagedHandoffRecoveryFixture(root: string) {
     /** Rows a cancelled original leaves when it dies before joining its candidate:
      * its v4 generation, a retained service root, an occupied-slot mirror, and the
      * candidate lineage under each root, in the shapes their producers write. */
-    seedCancellation(options: { ageMs?: number } = {}) {
-      const updatedAt = Date.now() - (options.ageMs ?? 45 * 60_000 + 1_000);
+    seedCancellation(options: { ageMs?: number; serviceAgeMs?: number } = {}) {
+      const at = (ageMs = 45 * 60_000 + 1_000) => Date.now() - ageMs;
+      const updatedAt = at(options.ageMs);
       const original = { kind: "update", mutationProtocol: "original-cancellation-v1" };
-      const generation = (key: string, owner: string, action: object) => ({
+      const generation = (key: string, owner: string, action: object, time = updatedAt) => ({
         key,
         owner,
         payload: JSON.stringify({ version: 2, executor, helper: executor, action }),
-        updatedAt,
+        updatedAt: time,
       });
       const cancel = (cancellation: ReturnType<typeof generation>, action: object) => ({
         install_root: cancellation.key,
@@ -125,7 +133,7 @@ export function createManagedHandoffRecoveryFixture(root: string) {
           action,
           cancellation,
         }),
-        updated_at: updatedAt + 1,
+        updated_at: cancellation.updatedAt + 1,
       });
       const keys = { slot: `${root}-slot`, service: `${root}-service` };
       const originalGeneration = generation(root, "original-owner", original);
@@ -138,7 +146,15 @@ export function createManagedHandoffRecoveryFixture(root: string) {
       });
       insert([
         cancel(originalGeneration, original),
-        cancel(generation(keys.service, "service-owner", { kind: "update" }), { kind: "update" }),
+        cancel(
+          generation(
+            keys.service,
+            "service-owner",
+            { kind: "update" },
+            options.serviceAgeMs === undefined ? updatedAt : at(options.serviceAgeMs),
+          ),
+          { kind: "update" },
+        ),
         {
           install_root: keys.slot,
           owner: "original-owner",

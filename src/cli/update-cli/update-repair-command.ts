@@ -57,13 +57,14 @@ import {
   resolveTargetVersion,
   type UpdateFinalizeOptions,
 } from "./shared.js";
-import {
-  updateFinalizeCommand,
-  type RetainedUpdateCustodyReport,
-} from "./update-command-finalize.js";
+import { updateFinalizeCommand } from "./update-command-finalize.js";
 import { refuseImmutableUpdateActivation } from "./update-command-immutable.js";
 import { resolveServiceRefreshEnv } from "./update-command-service-env.js";
 import { updateMaintenanceError } from "./update-maintenance-error.js";
+import {
+  reportRetainedUpdateCustody,
+  type RetainedUpdateCustodyReport,
+} from "./update-retained-custody.js";
 
 export function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<void> {
   return repairUpdate(opts).catch((error: unknown) => {
@@ -140,10 +141,7 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
         throw error;
       }
       // Retained custody blocks the next update, not this repair's own maintenance.
-      retained = {
-        nextAction: `Cancelled update custody still blocks the next update. Resolve its reported reason, then rerun ${formatCliCommand("openclaw update repair", env)}.`,
-        retainedUpdateCustody: error.custody,
-      };
+      retained = reportRetainedUpdateCustody(error.custody, env);
       defaultRuntime.error(`Warning: ${error.message}`);
       return null;
     }

@@ -19,10 +19,7 @@ import {
   DoctorMaintenanceRefusalError,
   normalizeUpdatePostInstallDoctorWarnings,
 } from "../../infra/update-doctor-result.js";
-import type {
-  ManagedHandoffRepair,
-  ManagedHandoffRetainedCustody,
-} from "../../infra/update-managed-service-handoff-lease-types.js";
+import type { ManagedHandoffRepair } from "../../infra/update-managed-service-handoff-lease-types.js";
 import { POST_CORE_UPDATE_SOURCE_CONFIG_PATH_ENV } from "../../infra/update-post-core-context.js";
 import { formatUpdateRunOwnership } from "../../infra/update-run-activity.js";
 import {
@@ -88,11 +85,10 @@ import {
   UpdateFinalizationLifecycle,
   type UpdateFinalizationPhase,
 } from "./update-finalization-lifecycle.js";
-
-export type RetainedUpdateCustodyReport = {
-  nextAction: string;
-  retainedUpdateCustody: ManagedHandoffRetainedCustody;
-};
+import {
+  reportRetainedUpdateCustody,
+  type RetainedUpdateCustodyReport,
+} from "./update-retained-custody.js";
 
 export async function updateFinalizeCommand(
   opts: UpdateFinalizeOptions,
@@ -217,9 +213,19 @@ export async function updateFinalizeCommand(
                 ]);
                 lifecycle.recordWarnings(warnings);
                 defaultRuntime.error(warnings.join("\n"));
-                // The rerun also retries custody repair; report both follow-ups.
-                const reportedNextAction = retained
-                  ? `${nextAction} ${retained.nextAction}`
+                // An unfinished claim still stands in for cancelled custody until a
+                // later repair completes it; the rerun settles both.
+                const custody =
+                  retained ??
+                  (handoff?.cancelledCustody
+                    ? reportRetainedUpdateCustody({
+                        ...handoff.cancelledCustody,
+                        reason:
+                          "Doctor maintenance remains pending; this repair keeps its claim on the cancelled custody until a later repair completes.",
+                      })
+                    : undefined);
+                const reportedNextAction = custody
+                  ? `${nextAction} ${custody.nextAction}`
                   : nextAction;
                 if (opts.json) {
                   defaultRuntime.writeJson({
@@ -230,7 +236,7 @@ export async function updateFinalizeCommand(
                     restart: false,
                     phaseTimings: lifecycle.phaseTimings,
                     postUpdate: { doctor: { status: "warning", warnings } },
-                    ...(retained ? { retainedUpdateCustody: retained.retainedUpdateCustody } : {}),
+                    ...(custody ? { retainedUpdateCustody: custody.retainedUpdateCustody } : {}),
                   });
                 } else {
                   defaultRuntime.log(

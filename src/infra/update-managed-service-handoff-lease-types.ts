@@ -42,6 +42,8 @@ export type ManagedHandoffLeaseStoreOptions = {
 };
 
 export type ManagedHandoffRepair = {
+  /** Present while this claim stands in for cancelled update custody. */
+  cancelledCustody?: Omit<ManagedHandoffRetainedCustody, "reason">;
   assertCurrent: () => void;
   bindRun(runId: string): void;
   complete(runId: string): void;

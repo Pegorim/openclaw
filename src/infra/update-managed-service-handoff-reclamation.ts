@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
+import { isChildProcessTreeAlive } from "../process/child-process-tree.js";
 import { executeSqliteQuerySync } from "./kysely-sync.js";
 import type { createManagedHandoffBootIdentityReader } from "./update-managed-service-handoff-boot.js";
 import { readCancelledUpdateFamily } from "./update-managed-service-handoff-cancellation.js";
@@ -208,15 +209,21 @@ type RepairContext = {
   cas: ManagedHandoffLeaseTransition;
 };
 
+function describeCancelledCustody(lease: ManagedHandoffLease) {
+  return {
+    key: lease.key,
+    owner: lease.owner,
+    leaseVersion: lease.version,
+    lastActivityAt: new Date(lease.updatedAt).toISOString(),
+  };
+}
+
 /** Repair left cancelled custody in place; its caller still finishes maintenance. */
 export class ManagedHandoffCustodyRetainedError extends Error {
   readonly custody: ManagedHandoffRetainedCustody;
   constructor(lease: ManagedHandoffLease, cause: unknown) {
     const custody = {
-      key: lease.key,
-      owner: lease.owner,
-      leaseVersion: lease.version,
-      lastActivityAt: new Date(lease.updatedAt).toISOString(),
+      ...describeCancelledCustody(lease),
       reason: cause instanceof Error ? cause.message : String(cause),
     };
     super(
@@ -288,24 +295,6 @@ export async function prepareManagedHandoffRepair(
   ) {
     return null;
   }
-  const assertDead = () => {
-    const owners = [previous, ...children]
-      .flatMap((lease) => [lease.helper, lease.executor])
-      .filter((owner) => processState(owner) !== "dead");
-    if (owners.length) {
-      throw liveOwnersError(owners);
-    }
-  };
-  assertDead();
-  const assertChildrenSettled = (db: DatabaseSync) => {
-    if (
-      store.hasUnsettledChildren(root, db) ||
-      children.some((child) => !legacyUpdateChild(child) || !reclaimable(child, db))
-    ) {
-      throw new Error(unsettledDescendantsMessage);
-    }
-  };
-  withDatabase(false, assertChildrenSettled);
   const metadata = withDatabase(true, (db) =>
     readManagedHandoffRepairMetadata(db, previous, (operation) => store.transact(db, operation)),
   );
@@ -314,40 +303,82 @@ export async function prepareManagedHandoffRepair(
   }
   const source = metadata?.source ?? managedHandoffLeaseRow(previous);
   const sourceLease = rows.handle(previous.key, source);
-  const discovered = await readManagedHandoffRepairFacts(
-    sourceLease,
-    env,
-    metadata?.facts.runIds[0],
-  );
-  let facts = await inspectManagedHandoffRepairFacts(previous, discovered, metadata?.facts);
-  const retainedChildren = children.filter((child) => child.key !== previous.key);
-  for (const child of retainedChildren) {
-    const childFacts = await readManagedHandoffRepairFacts(child, env);
-    facts = await inspectManagedHandoffRepairFacts(child, childFacts, facts);
-  }
-  // Keep the original child key with its existing recovery metadata after
-  // promoting an orphan to the installation's exclusive repair claim.
-  if (previous.key !== root && !facts.artifactPaths.includes(previous.key)) {
-    facts.artifactPaths.push(previous.key);
-  }
-  facts.timeoutMs = Math.max(facts.timeoutMs ?? 0, timeoutMs ?? 0) || null;
-  const settledKeys = [previous.key, ...retainedChildren.map((child) => child.key)];
-  return await claimManagedHandoffRepair(store, context, root, previous, source, facts, env, {
-    unchanged: (db) => {
-      assertDead();
-      assertChildrenSettled(db);
-      return (
-        isDeepStrictEqual(readChildren(db), children) &&
-        (previous.key === root || !rows.row(db, root))
-      );
-    },
-    release: retainedChildren,
-    // A resumed cancelled-custody repair keeps describing what it settles.
-    settlement:
+  const resume = async () => {
+    const assertDead = () => {
+      const owners = [previous, ...children]
+        .flatMap((lease) => [lease.helper, lease.executor])
+        .filter((owner) => processState(owner) !== "dead");
+      if (owners.length) {
+        throw liveOwnersError(owners);
+      }
+    };
+    assertDead();
+    const assertChildrenSettled = (db: DatabaseSync) => {
+      if (
+        store.hasUnsettledChildren(root, db) ||
+        children.some((child) => !legacyUpdateChild(child) || !reclaimable(child, db))
+      ) {
+        throw new Error(unsettledDescendantsMessage);
+      }
+    };
+    withDatabase(false, assertChildrenSettled);
+    const discovered = await readManagedHandoffRepairFacts(
+      sourceLease,
+      env,
+      metadata?.facts.runIds[0],
+    );
+    // An interrupted cancelled-custody claim existed only after that family's grace
+    // elapsed. Count from the cancelled source, not the claim; the claim's own
+    // process and the census remain checked.
+    let facts = await inspectManagedHandoffRepairFacts(
+      sourceLease.version === 4 ? sourceLease : previous,
       sourceLease.version === 4
-        ? cancelledCustodySettlement(sourceLease, settledKeys)
-        : `legacy handoff lease reclaimed: owners proven dead, lease last recorded at ${new Date(previous.updatedAt).toISOString()}, no live descendants. Reclaimed keys: ${settledKeys.join(", ")}. Current-installation repair completed.`,
-  });
+        ? { ...discovered, drivers: [...(discovered.drivers ?? []), previous.helper] }
+        : discovered,
+      metadata?.facts,
+    );
+    const retainedChildren = children.filter((child) => child.key !== previous.key);
+    for (const child of retainedChildren) {
+      const childFacts = await readManagedHandoffRepairFacts(child, env);
+      facts = await inspectManagedHandoffRepairFacts(child, childFacts, facts);
+    }
+    // Keep the original child key with its existing recovery metadata after
+    // promoting an orphan to the installation's exclusive repair claim.
+    if (previous.key !== root && !facts.artifactPaths.includes(previous.key)) {
+      facts.artifactPaths.push(previous.key);
+    }
+    facts.timeoutMs = Math.max(facts.timeoutMs ?? 0, timeoutMs ?? 0) || null;
+    const settledKeys = [previous.key, ...retainedChildren.map((child) => child.key)];
+    return await claimManagedHandoffRepair(store, context, root, previous, source, facts, env, {
+      unchanged: (db) => {
+        assertDead();
+        assertChildrenSettled(db);
+        return (
+          isDeepStrictEqual(readChildren(db), children) &&
+          (previous.key === root || !rows.row(db, root))
+        );
+      },
+      release: retainedChildren,
+      // A resumed cancelled-custody repair keeps describing what it settles.
+      ...(sourceLease.version === 4
+        ? {
+            cancelled: sourceLease,
+            settlement: cancelledCustodySettlement(sourceLease, settledKeys),
+          }
+        : {
+            settlement: `legacy handoff lease reclaimed: owners proven dead, lease last recorded at ${new Date(previous.updatedAt).toISOString()}, no live descendants. Reclaimed keys: ${settledKeys.join(", ")}. Current-installation repair completed.`,
+          }),
+    });
+  };
+  if (sourceLease.version !== 4) {
+    return await resume();
+  }
+  // An interrupted cancelled-custody repair still guards that custody.
+  try {
+    return await resume();
+  } catch (error) {
+    throw new ManagedHandoffCustodyRetainedError(sourceLease, error);
+  }
 }
 
 /** Settle a dead original's cancellation through the same explicit claim and
@@ -381,16 +412,33 @@ async function prepareCancelledCustodyRepair(
     }
   };
   // Check beneath every member: a root path may itself contain the child marker.
+  // The killed updater's own process group can outlive it, e.g. a package install.
   const assertSettled = (db: DatabaseSync) => {
-    if (family.some((lease) => store.hasUnsettledChildren(lease.key, db))) {
+    if (
+      family.some((lease) => store.hasUnsettledChildren(lease.key, db)) ||
+      (process.platform !== "win32" &&
+        family.some((lease) => isChildProcessTreeAlive(lease.executor)))
+    ) {
       throw new Error(unsettledDescendantsMessage);
     }
   };
   assertDead();
   withDatabase(false, assertSettled);
+  // The run's facts come from its origin, but grace and census cover every row
+  // this claim retires: the latest family activity, keys and process identities.
+  const discovered = await readManagedHandoffRepairFacts(origin, env);
   const facts = await inspectManagedHandoffRepairFacts(
-    origin,
-    await readManagedHandoffRepairFacts(origin, env),
+    family.reduce((latest, lease) => (lease.updatedAt > latest.updatedAt ? lease : latest)),
+    {
+      ...discovered,
+      artifactPaths: [
+        ...new Set([...discovered.artifactPaths, ...family.map((lease) => lease.key)]),
+      ],
+      drivers: [
+        ...(discovered.drivers ?? []),
+        ...family.flatMap((lease) => [lease.helper, lease.executor]),
+      ],
+    },
   );
   facts.timeoutMs = Math.max(facts.timeoutMs ?? 0, timeoutMs ?? 0) || null;
   const retired = family.filter((lease) => lease.key !== origin.key);
@@ -411,6 +459,7 @@ async function prepareCancelledCustodyRepair(
       retire: (db) =>
         retired.every((lease) => rows.deleteRow(db, lease.key, managedHandoffLeaseRow(lease))),
       release: [],
+      cancelled: origin,
       settlement: cancelledCustodySettlement(
         origin,
         family.map((lease) => lease.key),
@@ -433,6 +482,7 @@ async function claimManagedHandoffRepair(
     unchanged: (db: DatabaseSync) => boolean;
     retire?: (db: DatabaseSync) => boolean;
     release: ManagedHandoffLease[];
+    cancelled?: ManagedHandoffLease;
     settlement: string;
   },
 ): Promise<ManagedHandoffRepair> {
@@ -473,6 +523,7 @@ async function claimManagedHandoffRepair(
     }
   };
   return {
+    ...(claim.cancelled ? { cancelledCustody: describeCancelledCustody(claim.cancelled) } : {}),
     assertCurrent,
     bindRun(runId: string) {
       assertCurrent();

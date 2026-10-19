@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import * as childTree from "../process/child-process-tree.js";
 import * as stateDb from "../state/openclaw-state-db.js";
 import * as bootReader from "./update-managed-service-handoff-boot.js";
 import { createManagedHandoffLeaseStore } from "./update-managed-service-handoff-lease.js";
@@ -233,12 +234,29 @@ it("settles a dead original's cancelled family with its retained service root", 
 
 it.each([
   ["recent custody", /recovery grace ends at/],
+  ["recent retained service root", /recovery grace ends at/],
+  ["process referencing the retained service root", /PID 81236/],
+  ["surviving process group of the cancelled updater", /descendants remain live or unverified/],
   ["unverified candidate", /live or unverified: PID 1000004/],
   ["alias outside the family", /unsupported custody at .*-other\/\.openclaw-update-child-/],
 ] as const)("retains cancelled custody unchanged for %s", async (reason, expected) => {
   const keys = fixture.seedCancellation(
-    reason === "recent custody" ? { ageMs: 44 * 60_000 } : undefined,
+    reason === "recent custody"
+      ? { ageMs: 44 * 60_000 }
+      : reason === "recent retained service root"
+        ? { serviceAgeMs: 44 * 60_000 }
+        : undefined,
   );
+  if (reason === "process referencing the retained service root") {
+    // The run's own facts name other paths; every retired family key is censused too.
+    fixture.pathCensus.set(keys.service, [81236]);
+  }
+  if (reason === "surviving process group of the cancelled updater") {
+    const groupAlive = childTree.isChildProcessTreeAlive;
+    vi.spyOn(childTree, "isChildProcessTreeAlive").mockImplementation((child) =>
+      child.pid === keys.updater.pid ? true : groupAlive(child),
+    );
+  }
   if (reason === "unverified candidate") {
     fixture.births.set(fixture.candidate.pid, null);
   }
@@ -275,8 +293,6 @@ it("preserves a dependent admitted while cancelled custody was inspected", async
 });
 
 it("resumes a failed cancelled-custody repair from its retained original", async () => {
-  let now = Date.now();
-  vi.spyOn(Date, "now").mockImplementation(() => now);
   fixture.seedCancellation();
   const [original] = fixture.rows();
   await expect(
@@ -292,11 +308,23 @@ it("resumes a failed cancelled-custody repair from its retained original", async
     updated_at: original!.updated_at,
   });
   expect(nextUpdate()).toBe("busy");
-  // A later process resumes after the interrupted claim's own grace period.
-  now += 45 * 60_000 + 1_000;
+  // The interrupted claim's own process is live: report the cancelled custody, keep the claim.
+  const custody = {
+    key: fixture.root,
+    owner: original!.owner,
+    leaseVersion: 4,
+    lastActivityAt: new Date(original!.updated_at).toISOString(),
+  };
+  await expect(prepareRepair()).rejects.toMatchObject({
+    name: "ManagedHandoffCustodyRetainedError",
+    custody: { ...custody, reason: expect.stringContaining(`PID ${process.pid}`) },
+  });
+  expect(fixture.current()).toEqual(retained);
+  // Once that process is gone, grace counts from the cancelled family, not the claim.
   fixture.births.set(process.pid, 20);
   const nextStore = createManagedHandoffLeaseStore();
   using resumed = await prepareRepair(nextStore);
+  expect(resumed.cancelledCustody).toEqual(custody);
   const run = newRun();
   resumed.bindRun(run.runId);
   resumed.complete(run.runId);
