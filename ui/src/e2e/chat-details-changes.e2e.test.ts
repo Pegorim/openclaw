@@ -91,12 +91,12 @@ suite.define(() => {
     });
     await page.goto(`${suite.server.baseUrl}chat`);
     await page.getByText("Improve workspace navigation", { exact: true }).first().waitFor();
-    await pauseVirtualClock(page);
     expect(await gateway.getRequests("sessions.diff")).toHaveLength(0);
     const details = await openChatDetails(page);
     const action = details.getByRole("button", { name: "All changes", exact: true });
     // The lazy Session view must mount before its summary timer can advance.
     await action.waitFor();
+    await pauseVirtualClock(page);
     await page.clock.runFor(1);
     await expect.poll(() => action.textContent()).toContain("12 files");
     expect(await action.textContent()).toContain("+248");
@@ -162,11 +162,15 @@ suite.define(() => {
       await page.setViewportSize({ width: 1180, height: 800 });
       await page.clock.runFor(32);
     }
+    await page.clock.resume();
     await closeChatDetails(page);
+    await pauseVirtualClock(page);
     const beforeHidden = (await gateway.getRequests("sessions.diff")).length;
     await page.clock.fastForward(60_000);
     expect(await gateway.getRequests("sessions.diff")).toHaveLength(beforeHidden);
+    await page.clock.resume();
     await openChatDetails(page);
+    await pauseVirtualClock(page);
     await page.clock.runFor(1);
     await expect
       .poll(async () => (await gateway.getRequests("sessions.diff")).length)
