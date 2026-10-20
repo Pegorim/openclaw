@@ -45,6 +45,20 @@ afterEach(async () => {
   await closeStateDatabaseForTest();
 });
 
+function activationResult() {
+  return {
+    status: "ok" as const,
+    mode: "npm" as const,
+    root: candidateRoot,
+    steps: [],
+    durationMs: 0,
+  };
+}
+
+function inspect(params: Omit<Parameters<typeof inspectActivatedUpdateState>[0], "root">) {
+  return runtimeFixture.track(inspectActivatedUpdateState({ root: candidateRoot, ...params }));
+}
+
 it.each([
   { agentId: "main", changed: "none", blocked: undefined },
   { agentId: "verification", changed: "none", blocked: undefined },
@@ -148,29 +162,20 @@ it.each([
         db.close();
       }
     }
-    const result = {
-      status: "ok" as const,
-      mode: "npm" as const,
-      root: candidateRoot,
-      steps: [],
-      durationMs: 0,
-    };
+    const result = activationResult();
     await expect(
-      runtimeFixture.track(
-        inspectActivatedUpdateState({
-          result,
-          root: candidateRoot,
-          schemaVersions,
-          candidateSchemaVersions: {
-            state:
-              OPENCLAW_STATE_SCHEMA_VERSION +
-              Number(changed === "shared" || changed === "retained" || changed === "pending"),
-            agent: OPENCLAW_AGENT_SCHEMA_VERSION + Number(changed === "incomplete"),
-          },
-          config: {},
-          env,
-        }),
-      ),
+      inspect({
+        result,
+        schemaVersions,
+        candidateSchemaVersions: {
+          state:
+            OPENCLAW_STATE_SCHEMA_VERSION +
+            Number(changed === "shared" || changed === "retained" || changed === "pending"),
+          agent: OPENCLAW_AGENT_SCHEMA_VERSION + Number(changed === "incomplete"),
+        },
+        config: {},
+        env,
+      }),
     ).resolves.toBe(blocked);
     if (changed === "local") {
       expect(result.status).toBe("ok");
@@ -231,27 +236,18 @@ it.each([
     const before = await fs.readFile(file);
     const schemaVersions = await readUpdateStateSchemaVersions({ stateDir, config, env });
     expect(schemaVersions).toContainEqual(expect.objectContaining({ path: file }));
-    const result = {
-      status: "ok" as const,
-      mode: "npm" as const,
-      root: candidateRoot,
-      steps: [],
-      durationMs: 0,
-    };
+    const result = activationResult();
     await expect(
-      runtimeFixture.track(
-        inspectActivatedUpdateState({
-          result,
-          root: candidateRoot,
-          schemaVersions,
-          candidateSchemaVersions: {
-            state: OPENCLAW_STATE_SCHEMA_VERSION,
-            agent: OPENCLAW_AGENT_SCHEMA_VERSION,
-          },
-          config,
-          env,
-        }),
-      ),
+      inspect({
+        result,
+        schemaVersions,
+        candidateSchemaVersions: {
+          state: OPENCLAW_STATE_SCHEMA_VERSION,
+          agent: OPENCLAW_AGENT_SCHEMA_VERSION,
+        },
+        config,
+        env,
+      }),
     ).resolves.toBeUndefined();
     expect(result).toMatchObject({
       status: envKey ? "error" : "ok",
@@ -264,15 +260,12 @@ it.each([
 it("refuses state inspection when activation leaves no known runtime root", async () => {
   const result = { status: "error" as const, mode: "npm" as const, steps: [], durationMs: 0 };
   await expect(
-    runtimeFixture.track(
-      inspectActivatedUpdateState({
-        result,
-        root: candidateRoot,
-        schemaVersions: [],
-        config: {},
-        env: { OPENCLAW_STATE_DIR: dirs.make("unknown-update-runtime-") },
-      }),
-    ),
+    inspect({
+      result,
+      schemaVersions: [],
+      config: {},
+      env: { OPENCLAW_STATE_DIR: dirs.make("unknown-update-runtime-") },
+    }),
   ).resolves.toBe("rollback-state-unverified");
   expect(result).toMatchObject({
     reason: "rollback-state-unverified",
@@ -305,24 +298,15 @@ it.each([
     if (publish) {
       shared.db.exec(`PRAGMA user_version = ${contentVersion};`);
     }
-    const result = {
-      status: "ok" as const,
-      mode: "npm" as const,
-      root: candidateRoot,
-      steps: [],
-      durationMs: 0,
-    };
+    const result = activationResult();
     await expect(
-      runtimeFixture.track(
-        inspectActivatedUpdateState({
-          result,
-          root: candidateRoot,
-          schemaVersions,
-          candidateSchemaVersions: { state: contentVersion, agent: OPENCLAW_AGENT_SCHEMA_VERSION },
-          config: {},
-          env,
-        }),
-      ),
+      inspect({
+        result,
+        schemaVersions,
+        candidateSchemaVersions: { state: contentVersion, agent: OPENCLAW_AGENT_SCHEMA_VERSION },
+        config: {},
+        env,
+      }),
     ).resolves.toBe(blocked);
     expect(result).toMatchObject({ status: "ok", steps: [] });
     expect(shared.db.prepare("PRAGMA user_version").get()?.user_version).toBe(

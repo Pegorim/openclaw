@@ -11,6 +11,7 @@ import * as childCommands from "../../process/exec-runner.js";
 import { defaultRuntime } from "../../runtime.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
 import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
+import { expectNoCalls } from "../daemon-cli/lifecycle-assertions.test-support.js";
 import type { MigratedUpdateFinalizationInput } from "./update-command-migrated-types.js";
 import { continueMigratedUpdateInFreshProcess } from "./update-command-migrated.js";
 import { readMigratedUpdateRunRow } from "./update-command-migrated.test-support.js";
@@ -88,8 +89,7 @@ export async function expectMigratedPackageFinalization(
   const onResult = vi.fn();
   if (recovered) {
     windowsRecovery.complete.mockImplementationOnce(async () => {
-      expect(stdout).not.toHaveBeenCalled();
-      expect(onResult).not.toHaveBeenCalled();
+      expectNoCalls(stdout, onResult);
     });
   }
   let stdoutAtCompletion: number | undefined;
@@ -289,10 +289,7 @@ export async function expectMigratedPackageFinalization(
     expect(observedProgress).toEqual(expectedProgress);
     expect(Buffer.concat(stderrChunks)).toEqual(Buffer.concat([expectedProgress, cancellation]));
     expect(settled).toBeInstanceOf(Error);
-    expect(stdout).not.toHaveBeenCalled();
-    expect(onResult).not.toHaveBeenCalled();
-    expect(complete).not.toHaveBeenCalled();
-    expect(rollback).not.toHaveBeenCalled();
+    expectNoCalls(stdout, onResult, complete, rollback);
     await expect(fs.access(transaction.backupRoot)).resolves.toBeUndefined();
     return;
   }
@@ -329,14 +326,12 @@ export async function expectMigratedPackageFinalization(
   const outcome = continuedResult!;
   expect(outcome).toMatchObject({
     exitCode,
-    result: { status },
+    result: { status, reason },
   });
-  expect(outcome.result.reason).toBe(reason);
   expect(outcome.candidateStartAttempted).toBe(candidateStartAttempted);
   expect(outcome.databaseRollbackAvailable).toBe(handback ? true : undefined);
   if (handback) {
-    expect(stdout).not.toHaveBeenCalled();
-    expect(onResult).not.toHaveBeenCalled();
+    expectNoCalls(stdout, onResult);
   } else {
     expect(stdout).toHaveBeenCalledExactlyOnceWith("candidate finalization result\n");
     expect(onResult).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status }));

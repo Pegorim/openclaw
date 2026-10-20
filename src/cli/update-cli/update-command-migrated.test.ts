@@ -248,16 +248,14 @@ it.for([
       ? readDaemonRuntimePin({ kind: "gateway", env }, { programArguments: [] })
       : undefined;
     // The migration owner publishes its committed schema to the already-running updater.
-    const migrated = nodeSqlite.openNodeSqliteDatabase(database.path);
-    try {
+    {
+      using migrated = nodeSqlite.openNodeSqliteDatabase(database.path);
       migrated.exec(`
       BEGIN IMMEDIATE;
       PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};
       UPDATE schema_meta SET schema_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1} WHERE meta_key = 'primary';
       COMMIT;
     `);
-    } finally {
-      migrated.close();
     }
     expect(() =>
       recordUpdateRunStep(created.runId, { step: "old writer", status: "completed" }, { env }),
@@ -489,14 +487,8 @@ it.for([
               rollback,
               complete: async () => {
                 stdoutAtCleanup = stdout;
-                const inspected = new DatabaseSync(database.path, { readOnly: true });
-                try {
-                  terminalAtCleanup = inspected
-                    .prepare("SELECT status, reason FROM update_runs WHERE run_id = ?")
-                    .get(created.runId);
-                } finally {
-                  inspected.close();
-                }
+                const row = inspectTerminal();
+                terminalAtCleanup = row && { status: row.status, reason: row.reason };
                 if (settlement === "package") {
                   throw new UpdateCommandPendingRecoveryFailure(
                     {
@@ -532,15 +524,11 @@ it.for([
         settledResult = continued;
         stdoutAtExecutorSettlement = stdout;
         if (settlement === "release") {
-          const leases = new DatabaseSync(path.join(control, "managed-update-handoffs.sqlite"));
-          try {
-            // Refuse the real owner's final DELETE, after the delegated child has settled.
-            leases.exec(
-              "CREATE TRIGGER deny_migrated_release BEFORE DELETE ON managed_update_handoffs BEGIN SELECT RAISE(FAIL, 'fixture migrated release refused'); END",
-            );
-          } finally {
-            leases.close();
-          }
+          using leases = new DatabaseSync(path.join(control, "managed-update-handoffs.sqlite"));
+          // Refuse the real owner's final DELETE, after the delegated child has settled.
+          leases.exec(
+            "CREATE TRIGGER deny_migrated_release BEFORE DELETE ON managed_update_handoffs BEGIN SELECT RAISE(FAIL, 'fixture migrated release refused'); END",
+          );
         }
         if (settlement === "uncertain-cleanup") {
           throw uncertainCleanup;
@@ -641,19 +629,11 @@ it.for([
         expect(events).not.toContainEqual({ event: "service" });
         expect(terminalAtCleanup).toBeUndefined();
         expect(rollback).not.toHaveBeenCalled();
-        const inspected = new DatabaseSync(database.path, { readOnly: true });
-        try {
-          const row = inspected
-            .prepare("SELECT steps_json FROM update_runs WHERE run_id = ?")
-            .get(created.runId);
-          const steps = JSON.parse(String(row?.steps_json));
-          expect(steps).toContainEqual(
-            expect.objectContaining({ step: "receiver-first", status: "completed" }),
-          );
-          expect(steps).not.toContainEqual(expect.objectContaining({ step: "receiver-second" }));
-        } finally {
-          inspected.close();
-        }
+        const steps = JSON.parse(String(inspectTerminal()?.steps_json));
+        expect(steps).toContainEqual(
+          expect.objectContaining({ step: "receiver-first", status: "completed" }),
+        );
+        expect(steps).not.toContainEqual(expect.objectContaining({ step: "receiver-second" }));
         return;
       }
       expect(outcome).toEqual({ error: expect.any(UpdateCommandFailure) });
@@ -712,29 +692,20 @@ it.for([
     } else {
       expect(stdout).toMatch(/update failed/iu);
     }
-    const inspected = new DatabaseSync(database.path, { readOnly: true });
-    try {
-      const row = inspected
-        .prepare(
-          "SELECT status, reason, origin_json, steps_json, verification_json FROM update_runs WHERE run_id = ?",
-        )
-        .get(created.runId);
-      expect(row).toMatchObject({ status: "failed", reason: "state-migrated-no-rollback" });
-      expect(JSON.parse(String(row?.verification_json)).rollbackOutcome).toEqual(rollbackOutcome);
-      expect(JSON.parse(String(row?.steps_json))).toEqual(
-        expect.arrayContaining([progress.pendingSteps.at(-1)]),
-      );
-      const origin = JSON.parse(String(row?.origin_json));
-      const driver = origin.driver;
-      expect(driver).toMatchObject({
-        host: os.hostname(),
-        pid: expect.any(Number),
-        startIdentity: expect.any(String),
-      });
-      expect(driver.pid).not.toBe(process.pid);
-      expect(origin.previousDrivers).toEqual(parentOwns ? [parentDriver] : undefined);
-    } finally {
-      inspected.close();
-    }
+    const row = inspectTerminal();
+    expect(row).toMatchObject({ status: "failed", reason: "state-migrated-no-rollback" });
+    expect(JSON.parse(String(row?.verification_json)).rollbackOutcome).toEqual(rollbackOutcome);
+    expect(JSON.parse(String(row?.steps_json))).toEqual(
+      expect.arrayContaining([progress.pendingSteps.at(-1)]),
+    );
+    const origin = JSON.parse(String(row?.origin_json));
+    const driver = origin.driver;
+    expect(driver).toMatchObject({
+      host: os.hostname(),
+      pid: expect.any(Number),
+      startIdentity: expect.any(String),
+    });
+    expect(driver.pid).not.toBe(process.pid);
+    expect(origin.previousDrivers).toEqual(parentOwns ? [parentDriver] : undefined);
   },
 );

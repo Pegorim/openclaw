@@ -63,31 +63,25 @@ it.each(["restored", "failed", "finished", "retried", "absent", "symlink", "unch
             fs.stat(agentPath, { bigint: true }),
             fs.stat(shared.path, { bigint: true }),
           ]);
-          expect(preflight?.verifiedSnapshots).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                sourcePath: agentPath,
-                role: "agent",
-                agentId: "main",
-                dev: agentIdentity.dev,
-                ino: agentIdentity.ino,
-              }),
-              expect.objectContaining({
-                sourcePath: shared.path,
-                role: "global",
-                dev: sharedIdentity.dev,
-                ino: sharedIdentity.ino,
-              }),
-            ]),
-          );
-          expect(receipt.databaseIdentities[agentPath]).toEqual({
-            dev: Number(agentIdentity.dev),
-            ino: Number(agentIdentity.ino),
-          });
-          expect(receipt.databaseIdentities[shared.path]).toEqual({
-            dev: Number(sharedIdentity.dev),
-            ino: Number(sharedIdentity.ino),
-          });
+          for (const [file, identity, owner] of [
+            [agentPath, agentIdentity, { role: "agent", agentId: "main" }],
+            [shared.path, sharedIdentity, { role: "global" }],
+          ] as const) {
+            expect(preflight?.verifiedSnapshots).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  sourcePath: file,
+                  ...owner,
+                  dev: identity.dev,
+                  ino: identity.ino,
+                }),
+              ]),
+            );
+            expect(receipt.databaseIdentities[file]).toEqual({
+              dev: Number(identity.dev),
+              ino: Number(identity.ino),
+            });
+          }
           using database = new DatabaseSync(agentPath);
           database.exec("UPDATE update_witness SET value='candidate';");
           await fs.writeFile(state.configPath, '{"gateway":{"mode":"local"}}\n');

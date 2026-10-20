@@ -39,9 +39,7 @@ vi.mock("./update-command-post-update.js", () => ({ finishUpdate: boundary.finis
 
 const { finishAlreadyCurrentUpdate } = await import("./update-command-noop.js");
 
-beforeEach(() => {
-  vi.resetAllMocks();
-});
+beforeEach(() => vi.resetAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
 it.each([
@@ -106,17 +104,14 @@ it.each([
     expect(refuseUpdate).not.toHaveBeenCalled();
     const refresh = platform === "linux" && !foreground;
     expect(boundary.maintenance).toHaveBeenCalledTimes(refresh ? 1 : 0);
-    for (const [index, phase] of (refresh ? ["refresh"] : []).entries()) {
-      expect(boundary.maintenance).toHaveBeenNthCalledWith(
-        index + 1,
+    if (refresh) {
+      expect(boundary.maintenance).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
-          phase,
+          phase: "refresh",
           root: serviceRoot,
           expectedService: before,
+          handoffRoot: managedServiceRoot ? root : undefined,
         }),
-      );
-      expect(boundary.maintenance.mock.calls[index]?.[0].handoffRoot).toBe(
-        managedServiceRoot ? root : undefined,
       );
     }
     expect(boundary.finish).toHaveBeenCalledWith(
