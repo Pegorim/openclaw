@@ -1,4 +1,3 @@
-import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
 import type { SessionsPatchResult } from "../../../src/gateway/session-utils.types.js";
@@ -90,27 +89,9 @@ suite.define(() => {
         await expect.poll(() => trigger.getAttribute("aria-disabled")).toBe("false");
         await trigger.click();
         await picker.locator(".chat-controls__model-menu").waitFor();
-        const observedSelection = await trigger.getAttribute("data-chat-select-value");
-        const observedLabel = await trigger.textContent();
-        // Preserve the actual settled UI and transport evidence before the regression assertion.
         await page.screenshot({ path: path.join(artifactDir, "after-confirmed-selection.png") });
-        await writeFile(
-          path.join(artifactDir, "selection.json"),
-          JSON.stringify(
-            {
-              refreshFails,
-              confirmed: selected,
-              observedSelection,
-              observedLabel,
-              patches: await gateway.getRequests("sessions.patch"),
-              lists: await gateway.getRequests("sessions.list"),
-            },
-            null,
-            2,
-          ),
-        );
-        expect(observedSelection).toBe("openai/gpt-5.5");
-        expect(observedLabel).toContain("GPT-5.5");
+        expect(await trigger.getAttribute("data-chat-select-value")).toBe("openai/gpt-5.5");
+        expect(await trigger.textContent()).toContain("GPT-5.5");
       });
     },
   );
@@ -222,8 +203,6 @@ suite.define(() => {
           expect(await textarea.evaluate((element) => document.activeElement === element)).toBe(
             true,
           );
-        }
-        if (state !== "open") {
           expect(await picker.getAttribute("open")).toBeNull();
           await trigger.click();
         }

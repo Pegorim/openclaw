@@ -18,31 +18,30 @@ suite.define(() => {
     const page = await context.newPage();
     const firstKey = "agent:main:thread:aaaaaaaa-1111-4111-8111-111111111111";
     const secondKey = "agent:main:thread:bbbbbbbb-2222-4222-8222-222222222222";
-    const activeSessions = chatSessionListResponse([
-      {
-        key: firstKey,
-        kind: "direct",
-        label: "Instant A",
-        updatedAt: 2,
-        activeRunIds: ["server-run"],
-        hasActiveRun: true,
-        status: "running",
-      },
-      { key: secondKey, kind: "direct", label: "Instant B", updatedAt: 1 },
-    ]);
-    const idleSessions = chatSessionListResponse([
-      {
-        key: firstKey,
-        kind: "direct",
-        label: "Instant A",
-        updatedAt: 3,
-        activeRunIds: [],
-        hasActiveRun: false,
-        lastRunId: "server-run",
-        status: "done",
-      },
-      { key: secondKey, kind: "direct", label: "Instant B", updatedAt: 1 },
-    ]);
+    const sessions = (idle: boolean) =>
+      chatSessionListResponse([
+        {
+          key: firstKey,
+          kind: "direct",
+          label: "Instant A",
+          updatedAt: idle ? 3 : 2,
+          activeRunIds: idle ? [] : ["server-run"],
+          hasActiveRun: !idle,
+          status: idle ? "done" : "running",
+          ...(idle ? { lastRunId: "server-run" } : {}),
+        },
+        { key: secondKey, kind: "direct", label: "Instant B", updatedAt: 1 },
+      ]);
+    const activeSessions = sessions(false);
+    const idleSessions = sessions(true);
+    const title = (name: string) =>
+      page.locator(".chat-pane-cache__pane--visible .chat-pane__session-title").getByText(name);
+    const switchTo = (key: string) =>
+      page
+        .locator(
+          `.sidebar-recent-session[data-session-key="${key}"] a.sidebar-recent-session__link`,
+        )
+        .click();
     const gateway = await installMockGateway(page, {
       methodResponses: {
         "chat.history": {
@@ -58,24 +57,14 @@ suite.define(() => {
     try {
       await page.goto(controlUiSessionUrl(suite.server.baseUrl, firstKey));
       await page.locator(`.sidebar-recent-session[data-session-key="${secondKey}"]`).waitFor();
-      await page
-        .locator(".chat-pane-cache__pane--visible .chat-pane__session-title")
-        .getByText("Instant A")
-        .waitFor();
+      await title("Instant A").waitFor();
       await page.waitForTimeout(500);
       const initialListCount = (await gateway.getRequests("sessions.list", rosterMatch)).length;
       const initialMetadataCount = (await gateway.getRequests("chat.metadata")).length;
       await gateway.deferNext("sessions.list", rosterMatch);
 
-      await page
-        .locator(
-          `.sidebar-recent-session[data-session-key="${secondKey}"] a.sidebar-recent-session__link`,
-        )
-        .click();
-      await page
-        .locator(".chat-pane-cache__pane--visible .chat-pane__session-title")
-        .getByText("Instant B")
-        .waitFor();
+      await switchTo(secondKey);
+      await title("Instant B").waitFor();
       const emptyOutboxListRequests = (
         await gateway.getRequests("sessions.list", rosterMatch)
       ).slice(initialListCount);
@@ -147,15 +136,8 @@ suite.define(() => {
           targetKey: firstKey,
         },
       );
-      await page
-        .locator(
-          `.sidebar-recent-session[data-session-key="${firstKey}"] a.sidebar-recent-session__link`,
-        )
-        .click();
-      await page
-        .locator(".chat-pane-cache__pane--visible .chat-pane__session-title")
-        .getByText("Instant A")
-        .waitFor();
+      await switchTo(firstKey);
+      await title("Instant A").waitFor();
       await expect
         .poll(async () => (await gateway.getRequests("sessions.list", rosterMatch)).length)
         .toBe(emptyOutboxListCount + 1);

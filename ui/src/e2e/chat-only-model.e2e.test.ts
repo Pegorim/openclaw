@@ -1,5 +1,6 @@
 import path from "node:path";
-import { beforeEach, expect, it } from "vitest";
+import type { Locator, Page } from "playwright";
+import { expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
 import { createChatFlowE2eSuite, installMockGateway } from "./chat-flow.test-support.ts";
@@ -7,13 +8,6 @@ import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-su
 
 const suite = createChatFlowE2eSuite();
 const sessionKey = "agent:main:main";
-let proofDir: string | null;
-beforeEach(() => {
-  proofDir =
-    process.env.OPENCLAW_CAPTURE_UI_PROOF === "1"
-      ? createControlUiE2eArtifactDir("chat-only-model")
-      : null;
-});
 
 const models = [
   {
@@ -64,6 +58,19 @@ function sessionsList(model: string, modelProvider: string) {
 
 suite.define(() => {
   it("explains chat-only models and keeps model switching as the recovery path", async () => {
+    const proofDir =
+      process.env.OPENCLAW_CAPTURE_UI_PROOF === "1"
+        ? createControlUiE2eArtifactDir("chat-only-model")
+        : null;
+    const screenshot = async (target: Locator | Page, name: string) => {
+      if (proofDir) {
+        await target.screenshot({
+          animations: "disabled",
+          path: path.join(proofDir, name),
+          ...(target === page ? { fullPage: true } : {}),
+        });
+      }
+    };
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
     const gateway = await installMockGateway(page, {
@@ -89,12 +96,7 @@ suite.define(() => {
       await expect.poll(async () => (await badge.textContent())?.trim()).toBe("Chat only");
       await expect.poll(() => picker.getAttribute("aria-label")).toContain("Chat only");
 
-      if (proofDir) {
-        await composer.screenshot({
-          animations: "disabled",
-          path: path.join(proofDir, "01-desktop-chat-only-composer.png"),
-        });
-      }
+      await screenshot(composer, "01-desktop-chat-only-composer.png");
 
       await picker.click();
       const localOption = composer.locator('[data-chat-model-option="lmstudio/qwen3-8b"]');
@@ -111,13 +113,7 @@ suite.define(() => {
         .poll(async () => (await openAiOption.textContent())?.includes("Chat only"))
         .toBe(false);
 
-      if (proofDir) {
-        await page.screenshot({
-          animations: "disabled",
-          fullPage: true,
-          path: path.join(proofDir, "02-desktop-model-picker.png"),
-        });
-      }
+      await screenshot(page, "02-desktop-model-picker.png");
 
       await selectChatModelOption(openAiOption);
       const patch = await gateway.waitForRequest("sessions.patch");
@@ -137,13 +133,7 @@ suite.define(() => {
       await page.setViewportSize({ height: 844, width: 390 });
       await expect.poll(() => picker.isVisible()).toBe(true);
 
-      if (proofDir) {
-        await page.screenshot({
-          animations: "disabled",
-          fullPage: true,
-          path: path.join(proofDir, "03-mobile-chat-only-model.png"),
-        });
-      }
+      await screenshot(page, "03-mobile-chat-only-model.png");
 
       if (!(await pickerDetails.evaluate((element: HTMLDetailsElement) => element.open))) {
         await picker.click();
@@ -156,13 +146,7 @@ suite.define(() => {
         })
         .toBe(true);
 
-      if (proofDir) {
-        await page.screenshot({
-          animations: "disabled",
-          fullPage: true,
-          path: path.join(proofDir, "04-mobile-model-picker.png"),
-        });
-      }
+      await screenshot(page, "04-mobile-model-picker.png");
     } finally {
       await suite.closeBrowserContext(context);
     }

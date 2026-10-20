@@ -1,9 +1,30 @@
+import type { Page } from "playwright";
 import { assert, expect, it } from "vitest";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 import { waitForGatewayRecoveryScope } from "./new-session-page.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "chat mention popover" });
+
+const presenceUsers = [
+  {
+    self: true,
+    id: "demo-viewer",
+    identity: { type: "profile" as const, id: "demo-viewer" },
+    name: "Demo viewer",
+  },
+];
+async function openComposer(page: Page, route: string) {
+  await page.goto(
+    route === "new"
+      ? `${suite.server.baseUrl}new`
+      : controlUiSessionUrl(suite.server.baseUrl, "agent:main:main"),
+  );
+  await waitForGatewayRecoveryScope(page);
+  return page.locator(
+    route === "new" ? ".new-session-page__message" : ".agent-chat__composer-combobox textarea",
+  );
+}
 
 suite.define(() => {
   it.each(["chat", "new"])(
@@ -28,14 +49,7 @@ suite.define(() => {
         });
         try {
           await installMockGateway(page, {
-            presenceUsers: [
-              {
-                self: true,
-                id: "demo-viewer",
-                identity: { type: "profile", id: "demo-viewer" },
-                name: "Demo viewer",
-              },
-            ],
+            presenceUsers,
             methodResponses: {
               "users.mentionable": {
                 users: [{ profileId, displayName: "Casey Vale", avatarUrl, online: true }],
@@ -43,17 +57,7 @@ suite.define(() => {
               },
             },
           });
-          await page.goto(
-            route === "new"
-              ? `${suite.server.baseUrl}new`
-              : controlUiSessionUrl(suite.server.baseUrl, "agent:main:main"),
-          );
-          await waitForGatewayRecoveryScope(page);
-          const textarea = page.locator(
-            route === "new"
-              ? ".new-session-page__message"
-              : ".agent-chat__composer-combobox textarea",
-          );
+          const textarea = await openComposer(page, route);
           await textarea.pressSequentially("@Casey");
           const menu = page.getByRole("listbox", { name: "Mention a person" });
           await expect.poll(() => menu.getByRole("option").count()).toBe(1);
@@ -107,27 +111,10 @@ suite.define(() => {
         const lastPerson = users.at(-1);
         assert(lastPerson, "The mention fixture must include a selectable person.");
         const gateway = await installMockGateway(page, {
-          presenceUsers: [
-            {
-              self: true,
-              id: "demo-viewer",
-              identity: { type: "profile", id: "demo-viewer" },
-              name: "Demo viewer",
-            },
-          ],
+          presenceUsers,
           methodResponses: { "users.mentionable": { users, truncated: false } },
         });
-        await page.goto(
-          route === "new"
-            ? `${suite.server.baseUrl}new`
-            : controlUiSessionUrl(suite.server.baseUrl, "agent:main:main"),
-        );
-        await waitForGatewayRecoveryScope(page);
-        const textarea = page.locator(
-          route === "new"
-            ? ".new-session-page__message"
-            : ".agent-chat__composer-combobox textarea",
-        );
+        const textarea = await openComposer(page, route);
         await textarea.pressSequentially("@");
         await gateway.waitForRequest("users.mentionable");
         const menu = page.getByRole("listbox", { name: "Mention a person" });
