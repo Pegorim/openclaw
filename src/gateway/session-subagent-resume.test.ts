@@ -146,43 +146,40 @@ async function expectAnnounced(
   expect(prepared.isCurrent()).toBe(true);
 }
 
-it.each(["agent:main:subagent:resume-child"])(
-  "preserves the task and frozen completion batch for %s",
-  async (childSessionKey) => {
-    const state = await arrangePausedChild(childSessionKey, "original-incarnation");
-    state.entry = await updateRun(previousRunId, (draft) => {
-      draft.requesterSettleWake = {
-        status: "pending",
-        attemptCount: 0,
-        requesterYieldBatch: true,
-        afterRequesterYield: true,
-        rearmGeneration: 1,
-        batchRunIds: [previousRunId],
-      };
-    });
-    const adopt = await state.prepare();
-    await expect(adopt()).resolves.toBe(previousRunId);
-    const next = subagentRuns.get(nextRunId)!;
-    expect(next).toMatchObject({
-      taskRunId: previousRunId,
-      requesterSessionKey: parent,
-      controllerSessionKey: parent,
-      task: "Continue with the supplied answer",
-    });
-    expect(next.generation).toBeGreaterThan(state.entry.generation!);
-    expect(next.pauseReason).toBeUndefined();
-    expect(next.requesterSettleWake?.batchRunIds).toEqual([nextRunId]);
-    expect(subagentRuns.has(previousRunId)).toBe(false);
-    const stored = loadSubagentRegistryFromSqlite();
-    expect(stored.get(nextRunId)).toMatchObject({
-      taskRunId: previousRunId,
-      requesterSessionKey: parent,
-      task: next.task,
-    });
-    expect(stored.has(previousRunId)).toBe(false);
-    await expect(adopt()).rejects.toThrow(/paused/);
-  },
-);
+it("preserves the task and frozen completion batch", async () => {
+  const state = await arrangePausedChild(undefined, "original-incarnation");
+  state.entry = await updateRun(previousRunId, (draft) => {
+    draft.requesterSettleWake = {
+      status: "pending",
+      attemptCount: 0,
+      requesterYieldBatch: true,
+      afterRequesterYield: true,
+      rearmGeneration: 1,
+      batchRunIds: [previousRunId],
+    };
+  });
+  const adopt = await state.prepare();
+  await expect(adopt()).resolves.toBe(previousRunId);
+  const next = subagentRuns.get(nextRunId)!;
+  expect(next).toMatchObject({
+    taskRunId: previousRunId,
+    requesterSessionKey: parent,
+    controllerSessionKey: parent,
+    task: "Continue with the supplied answer",
+  });
+  expect(next.generation).toBeGreaterThan(state.entry.generation!);
+  expect(next.pauseReason).toBeUndefined();
+  expect(next.requesterSettleWake?.batchRunIds).toEqual([nextRunId]);
+  expect(subagentRuns.has(previousRunId)).toBe(false);
+  const stored = loadSubagentRegistryFromSqlite();
+  expect(stored.get(nextRunId)).toMatchObject({
+    taskRunId: previousRunId,
+    requesterSessionKey: parent,
+    task: next.task,
+  });
+  expect(stored.has(previousRunId)).toBe(false);
+  await expect(adopt()).rejects.toThrow(/paused/);
+});
 
 it.each([
   { original: "original-incarnation", current: "successor-incarnation" },

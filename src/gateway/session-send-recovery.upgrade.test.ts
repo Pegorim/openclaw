@@ -1,7 +1,6 @@
 import { expect, it } from "vitest";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { writeSessionEntry } from "../config/sessions/session-accessor.sqlite-entry-store.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { readChatPendingInputs } from "./server-methods/chat-pending-inputs.js";
@@ -9,52 +8,40 @@ import { createContext } from "./server-plugin-in-process-dispatch.test-support.
 import { createMockGatewayRecoveryRuntime } from "./server-recovery-runtime.test-support.js";
 import { recoverSessionSendDeliveries } from "./session-send-recovery.js";
 
-// Captured row shape from openclaw@2026.10.5 (npm latest, commit 1b58cb9a1b4f):
-// src/config/sessions/session-pending-input-operations.kernel.ts:155-168,
-// src/state/openclaw-agent-schema.sql:878-893, and
-// src/sessions/user-turn-transcript.message.ts:215-230. That release did not
-// record chatInputRecovery, so its accepted chat inputs cannot restore authority.
-const stableRow = {
-  input_id: "stable-queued",
+// Row shape from openclaw@2026.10.5 (1b58cb9a1b4f): pending-input kernel:155-168,
+// agent schema:878-893, user-turn transcript:215-230. No chatInputRecovery authority.
+const stableRow = (state: string) => ({
+  input_id: `stable-${state}`,
   session_key: "agent:main:stable-upgrade",
   session_id: "stable-upgrade-session",
-  idempotency_key: "stable-queued:user",
-  run_id: "stable-queued",
+  idempotency_key: `stable-${state}:user`,
+  run_id: `stable-${state}`,
   request_hash: "request:stable-request-fingerprint",
   message_json: JSON.stringify({
     role: "user",
     content: "Synthetic input accepted by the stable release",
     timestamp: 1_792_281_600_000,
-    idempotencyKey: "stable-queued:user",
+    idempotencyKey: `stable-${state}:user`,
   }),
   lifecycle_generation: "stable-process-generation",
-  state: "queued",
-  accepted_at: 1_792_281_600_000,
+  state,
+  accepted_at: Date.now(),
   consumed_event_id: null,
-};
+});
 
 it("keeps latest-stable pending rows visible without replaying missing operator authority", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
     const database = openOpenClawAgentDatabase({ agentId: "main", env });
     const scope = {
       agentId: "main",
-      sessionKey: stableRow.session_key,
-      sessionId: stableRow.session_id,
+      sessionKey: "agent:main:stable-upgrade",
+      sessionId: "stable-upgrade-session",
       storePath: database.path,
       env,
     };
     writeSessionEntry(database, scope.sessionKey, { sessionId: scope.sessionId, updatedAt: 1 });
-    const rows = ["queued", "interrupted", "cancelled"].map((state) =>
-      Object.assign({}, stableRow, {
-        input_id: `stable-${state}`,
-        idempotency_key: `stable-${state}:user`,
-        run_id: `stable-${state}`,
-        message_json: stableRow.message_json.replaceAll("stable-queued", `stable-${state}`),
-        state,
-        accepted_at: Date.now(),
-      }),
-    );
-    const columns = Object.keys(stableRow);
+    const rows = ["queued", "interrupted", "cancelled"].map(stableRow);
+    const columns = Object.keys(stableRow("queued"));
     const insert = database.db.prepare(`
       INSERT INTO session_pending_inputs (${columns.join(", ")})
       VALUES (${columns.map(() => "?").join(", ")})
@@ -62,10 +49,7 @@ it("keeps latest-stable pending rows visible without replaying missing operator 
     for (const row of rows) {
       insert.run(...Object.values(row));
     }
-    const config: OpenClawConfig = {
-      agents: { entries: { main: {} } },
-      session: { store: database.path },
-    };
+    const config = { agents: { entries: { main: {} } }, session: { store: database.path } };
     setRuntimeConfigSnapshot(config);
     const context = createContext([], () => config);
     const runtime = createMockGatewayRecoveryRuntime();

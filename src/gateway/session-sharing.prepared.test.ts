@@ -8,7 +8,11 @@ import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { prepareGatewayRecipientProfile } from "./expected-profile.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import { prepareProjectedSessionSharing, prepareSessionSharing } from "./session-sharing.js";
-import { sharingPolicyClient, rolePolicyConfig } from "./session-sharing.test-utils.js";
+import {
+  sharingPolicyClient,
+  sharingPolicyTarget,
+  rolePolicyConfig,
+} from "./session-sharing.test-utils.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -25,35 +29,32 @@ it("refreshes retained sharing facts on profile changes and clears them when ide
       role: null,
       githubLogin: null,
     });
-    const stop = onUserProfilesChanged(() => prepareGatewayRecipientProfile(client));
-    try {
-      setUserProfileRole(source.id, "view");
-      expect(client.preparedSessionProfile?.role).toBe("view");
-      setUserProfileRole(target.id, "none");
-      linkEmail("source@example.test", target.id);
-      expect(client.preparedSessionProfile).toEqual({
-        profileId: target.id,
-        aliases: new Set([source.id, target.id]),
-        role: "none",
-        githubLogin: null,
-      });
-      const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
-      const sharing = prepareProjectedSessionSharing({
-        cfg: rolePolicyConfig(),
-        client,
-        isMember: () => false,
-      });
-      expect(sharing.sessionCap).toBe("none");
-      expect(sharing.isCreator({ type: "human", source: "profile", id: source.id })).toBe(true);
-      expect(sharing.entryFilter?.("agent:main:foreign", { visibility: "shared" })).toBe(false);
-      expect(prepare).not.toHaveBeenCalled();
-      prepare.mockRestore();
-      client.authenticatedUserProfile = undefined;
-      prepareGatewayRecipientProfile(client);
-      expect(client.preparedSessionProfile).toBeUndefined();
-    } finally {
-      stop();
-    }
+    using subscription = new DisposableStack();
+    subscription.defer(onUserProfilesChanged(() => prepareGatewayRecipientProfile(client)));
+    setUserProfileRole(source.id, "view");
+    expect(client.preparedSessionProfile?.role).toBe("view");
+    setUserProfileRole(target.id, "none");
+    linkEmail("source@example.test", target.id);
+    expect(client.preparedSessionProfile).toEqual({
+      profileId: target.id,
+      aliases: new Set([source.id, target.id]),
+      role: "none",
+      githubLogin: null,
+    });
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const sharing = prepareProjectedSessionSharing({
+      cfg: rolePolicyConfig(),
+      client,
+      isMember: () => false,
+    });
+    expect(sharing.sessionCap).toBe("none");
+    expect(sharing.isCreator({ type: "human", source: "profile", id: source.id })).toBe(true);
+    expect(sharing.entryFilter?.("agent:main:foreign", { visibility: "shared" })).toBe(false);
+    expect(prepare).not.toHaveBeenCalled();
+    prepare.mockRestore();
+    client.authenticatedUserProfile = undefined;
+    prepareGatewayRecipientProfile(client);
+    expect(client.preparedSessionProfile).toBeUndefined();
   });
 });
 
@@ -61,19 +62,8 @@ it("uses fresh prepared caller, alias, role, and membership facts without queryi
   await withOpenClawTestState({ scenario: "minimal", prepareProfileCatalog: true }, async () => {
     const owner = ensureProfileForEmail("owner@example.test");
     const oldOwner = ensureProfileForEmail("old-owner@example.test");
-    const target = {
-      agentId: "main",
-      canonicalKey: "agent:main:shared",
-      storeKey: "agent:main:shared",
-      storeKeys: ["agent:main:shared"],
-      storePath: "/unused/prepared-sharing",
-      entry: {
-        sessionId: "shared-session",
-        updatedAt: 1,
-        visibility: "shared" as const,
-        createdActor: { type: "human" as const, source: "profile" as const, id: oldOwner.id },
-      },
-    };
+    const target = sharingPolicyTarget({ type: "human", id: oldOwner.id });
+    target.entry.visibility = "shared";
     const client = sharingPolicyClient({ user: owner.id });
     const cfg = rolePolicyConfig();
     const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");

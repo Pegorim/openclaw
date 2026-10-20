@@ -1,6 +1,5 @@
 import { afterEach, expect, it } from "vitest";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
-import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
 import {
   addSessionMember,
   removeSessionMember,
@@ -13,6 +12,7 @@ import {
 } from "./server-methods/sessions-read-cache.test-support.js";
 import type { GatewayClient } from "./server-methods/types.js";
 import { getSessionRowProjection } from "./session-row-projection-access.js";
+import { seedSession } from "./session-sharing.fixture.test-support.js";
 import { canReceiveSessionEvent, prepareProjectedSessionSharing } from "./session-sharing.js";
 import { sharingPolicyClient as client } from "./session-sharing.test-utils.js";
 
@@ -25,37 +25,16 @@ it("filters event recipients by draft ownership, suggestion participation, and r
     const context = requestContext(cfg);
     await initializeSessionReadContext(context);
     const projection = getSessionRowProjection(context)!;
-    for (const [visibility, recipients] of [
-      [
-        "suggest",
-        [
-          [client({ user: "author" }), "session.suggestion", true],
-          [client({ user: "member" }), "session.suggestion", true],
-          [client({ user: "owner" }), "session.suggestion", true],
-          [client({ user: "viewer" }), "session.suggestion", false],
-          [client({}), "session.suggestion", false],
-        ],
-      ],
-      [
-        "draft",
-        [
-          [client({ user: "owner" }), "session.typing", true],
-          [client({ user: "member" }), "session.typing", false],
-          [client({ user: "viewer" }), "session.typing", false],
-          [client({ user: "member" }), "session.message", false],
-          [client({ user: "admin", scopes: ["operator.admin"] }), "session.typing", true],
-          [client({}), "session.typing", false],
-        ],
-      ],
-      [undefined, [[client({ user: "viewer@example.com" }), undefined, false]]],
+    for (const [visibility, eventName, allowed, denied] of [
+      ["suggest", "session.suggestion", ["author", "member", "owner"], ["viewer", undefined]],
+      ["draft", "session.typing", ["owner", "admin"], ["member", "viewer", undefined]],
+      [undefined, undefined, [], ["viewer@example.com"]],
     ] as const) {
       const sessionKey = `agent:main:events-${visibility ?? "deleted"}`;
       const sessionId = `session-${visibility}`;
       const scope = { agentId: "main", sessionKey };
       if (visibility) {
-        await upsertSessionEntryCore(scope, {
-          sessionId,
-          updatedAt: 1,
+        await seedSession(sessionKey, sessionId, {
           createdActor: { type: "human", source: "profile", id: "owner" },
           visibility,
         });
@@ -86,8 +65,20 @@ it("filters event recipients by draft ownership, suggestion participation, and r
             ? { payload: { suggestion: { author: { id: "author" } } } }
             : {}),
         });
-      for (const [recipient, event, visible] of recipients) {
-        expect(check(recipient, event), `${visibility}: ${event}`).toBe(visible);
+      for (const [users, visible] of [
+        [allowed, true],
+        [denied, false],
+      ] as const) {
+        for (const user of users) {
+          const recipient = client({
+            user,
+            ...(user === "admin" ? { scopes: ["operator.admin"] } : {}),
+          });
+          expect(check(recipient, eventName), `${visibility}: ${eventName}: ${user}`).toBe(visible);
+        }
+      }
+      if (visibility === "draft") {
+        expect(check(client({ user: "member" }), "session.message")).toBe(false);
       }
       if (visibility === "suggest") {
         const recipient = client({ user: "author", displayName: "Viewer" });
