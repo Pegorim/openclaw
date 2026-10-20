@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "openclaw/plugin-sdk/memory-core-host-engine-knn";
@@ -13,7 +14,7 @@ import {
   resolveRuntimeWorkerUrl,
 } from "openclaw/plugin-sdk/process-runtime";
 import { openNodeSqliteDatabase } from "openclaw/plugin-sdk/sqlite-runtime";
-import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { vectorKnnParentEntrypoint } from "./manager-search-knn-runtime.test-support.js";
 import type { VectorKnnRequest } from "./manager-search-knn.js";
 import { runVectorKnnInSubprocess, vectorToBlob } from "./manager-search-knn.test-support.js";
@@ -36,9 +37,6 @@ function useFixtureChild() {
   const children: childProcess.ChildProcessWithoutNullStreams[] = [];
   const closedChildren = new Set<childProcess.ChildProcessWithoutNullStreams>();
   const liveChildCounts: number[] = [];
-  const stdinWriteSpies: MockInstance<
-    childProcess.ChildProcessWithoutNullStreams["stdin"]["write"]
-  >[] = [];
   const ready: Promise<unknown[]>[] = [];
   vi.mocked(childProcess.spawn).mockImplementation((_command, _args, options) => {
     const child = spawn(process.execPath, [fileURLToPath(fixtureChildUrl)], {
@@ -48,28 +46,34 @@ function useFixtureChild() {
     children.push(child);
     liveChildCounts.push(children.length - closedChildren.size);
     child.once("close", () => closedChildren.add(child));
-    stdinWriteSpies.push(vi.spyOn(child.stdin, "write"));
     ready.push(once(child.stderr, "data"));
     return child;
   });
-  return { children, closedChildren, liveChildCounts, ready, stdinWriteSpies };
+  return { children, closedChildren, liveChildCounts, ready };
 }
 
-function request(limit: number): VectorKnnRequest {
+function request(limit: number, overrides: Partial<VectorKnnRequest> = {}): VectorKnnRequest {
   return {
     providerModels: ["test-model"],
     queryVec: [1, 0],
     limit,
     snippetMaxChars: 700,
     sourceFilter: { sql: "", params: [] },
+    ...overrides,
   };
 }
 
-function run(limit = 1, options: Partial<Parameters<typeof runVectorKnnInSubprocess>[0]> = {}) {
+function run(
+  limit = 1,
+  options: Omit<Partial<Parameters<typeof runVectorKnnInSubprocess>[0]>, "request"> & {
+    request?: Partial<VectorKnnRequest>;
+  } = {},
+) {
+  const { request: overrides, ...target } = options;
   return runVectorKnnInSubprocess({
     databasePath: "fixture:ok",
-    request: request(limit),
-    ...options,
+    ...target,
+    request: request(limit, overrides),
   });
 }
 
@@ -77,34 +81,21 @@ const emptyResult = { rows: [], fallbackScanRequired: false };
 
 function insertVectorRow(
   db: DatabaseSync,
-  params: {
-    id: string;
-    source: "memory" | "sessions";
-    vector: [number, number];
-    text?: string;
-  },
-): void {
+  id: string,
+  vector: [number, number],
+  source: "memory" | "sessions" = "memory",
+  text = `text ${id}`,
+) {
   db.prepare(
-    "INSERT INTO memory_index_chunks (id, path, start_line, end_line, text, source, model) VALUES (?, ?, 1, 1, ?, ?, ?)",
-  ).run(
-    params.id,
-    `${params.source}/${params.id}.md`,
-    params.text ?? `text ${params.id}`,
-    params.source,
-    "test-model",
-  );
+    "INSERT INTO memory_index_chunks (id, path, start_line, end_line, text, source, model) VALUES (?, ?, 1, 1, ?, ?, 'test-model')",
+  ).run(id, `${source}/${id}.md`, text, source);
   db.prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)").run(
-    params.id,
-    vectorToBlob(params.vector),
+    id,
+    vectorToBlob(vector),
   );
 }
 
-async function createFileBackedVectorDatabase(): Promise<{
-  db: DatabaseSync;
-  databasePath: string;
-  cleanup: () => void;
-  [Symbol.dispose]: () => void;
-}> {
+async function createFileBackedVectorDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-memory-knn-"));
   const databasePath = path.join(directory, "memory.sqlite");
   const db = openNodeSqliteDatabase(databasePath, { allowExtension: true });
@@ -128,7 +119,14 @@ async function createFileBackedVectorDatabase(): Promise<{
       }
       fs.rmSync(directory, { force: true, recursive: true });
     };
-    return { db, databasePath, cleanup, [Symbol.dispose]: cleanup };
+    return {
+      db,
+      databasePath,
+      cleanup,
+      [Symbol.dispose]: cleanup,
+      query: (limit = 1, overrides: Partial<VectorKnnRequest> = {}) =>
+        run(limit, { databasePath, request: overrides }),
+    };
   } catch (error) {
     db.close();
     fs.rmSync(directory, { force: true, recursive: true });
@@ -158,25 +156,25 @@ afterEach(async () => {
 
 describe("memory vector KNN subprocess boundary", () => {
   it("retires an idle child at the SQLite idle deadline and respawns after a crash", async () => {
-    const fixture = useFixtureChild();
+    const { children } = useFixtureChild();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await run(1);
-    const idleClosed = once(fixture.children[0]!, "close");
+    await run();
+    const idleClosed = once(children[0]!, "close");
     vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS - 1);
-    expect(fixture.children[0]!.killed).toBe(false);
+    expect(children[0]!.killed).toBe(false);
     vi.advanceTimersByTime(1);
     await idleClosed;
     vi.useRealTimers();
-    await run(1);
-    const crashed = once(fixture.children[1]!, "close");
-    fixture.children[1]!.kill("SIGKILL");
+    await run();
+    const crashed = once(children[1]!, "close");
+    children[1]!.kill("SIGKILL");
     await crashed;
-    await expect(run(1)).resolves.toEqual(emptyResult);
-    expect(fixture.children).toHaveLength(3);
+    await expect(run()).resolves.toEqual(emptyResult);
+    expect(children).toHaveLength(3);
   });
 
   it("serializes same-database requests without letting a queued abort kill active work", async () => {
-    const fixture = useFixtureChild();
+    const { children } = useFixtureChild();
     const active = run(250);
     const controller = new AbortController();
     const queued = run(1, { signal: controller.signal });
@@ -184,41 +182,38 @@ describe("memory vector KNN subprocess boundary", () => {
     controller.abort(new Error("queued cancellation"));
     await rejected;
     await expect(active).resolves.toEqual(emptyResult);
-    await run(1);
-    expect(fixture.children).toHaveLength(1);
-    expect(fixture.children[0]!.killed).toBe(false);
+    await run();
+    expect(children).toHaveLength(1);
+    expect(children[0]!.killed).toBe(false);
   });
 
   it("waits for an idle child to exit through EOF before reusing its capacity", async () => {
-    const fixture = useFixtureChild();
+    const { children, closedChildren, liveChildCounts } = useFixtureChild();
     for (const databasePath of ["fixture:first", "fixture:second"]) {
       await runVectorKnnInSubprocess({ databasePath, request: request(1) });
     }
     // Make EOF win retirement without changing the real close event.
-    vi.spyOn(fixture.children[0]!, "kill").mockReturnValueOnce(true);
+    vi.spyOn(children[0]!, "kill").mockReturnValueOnce(true);
     await run(1, { databasePath: "fixture:third" });
-    expect(fixture.children).toHaveLength(3);
-    expect(fixture.closedChildren.has(fixture.children[0]!)).toBe(true);
-    expect(fixture.liveChildCounts).toEqual([1, 2, 2]);
-    expect(fixture.children[0]!.exitCode).toBe(0);
-    expect(fixture.children[0]!.signalCode).toBeNull();
+    expect(children).toHaveLength(3);
+    expect(closedChildren.has(children[0]!)).toBe(true);
+    expect(liveChildCounts).toEqual([1, 2, 2]);
+    expect(children[0]).toMatchObject({ exitCode: 0, signalCode: null });
     expect(
-      fixture.children.filter((child) => child.exitCode === null && child.signalCode === null),
+      children.filter((child) => child.exitCode === null && child.signalCode === null),
     ).toHaveLength(2);
   });
 
   it("admits another database after both busy children finish", async () => {
-    const fixture = useFixtureChild();
+    const { children, closedChildren, liveChildCounts } = useFixtureChild();
     await Promise.all(
       ["fixture:first", "fixture:second", "fixture:third"].map((databasePath) =>
         runVectorKnnInSubprocess({ databasePath, request: request(100) }),
       ),
     );
-    expect(fixture.children).toHaveLength(3);
-    expect(fixture.children.slice(0, 2).some((child) => fixture.closedChildren.has(child))).toBe(
-      true,
-    );
-    expect(Math.max(...fixture.liveChildCounts)).toBe(2);
+    expect(children).toHaveLength(3);
+    expect(children.slice(0, 2).some((child) => closedChildren.has(child))).toBe(true);
+    expect(Math.max(...liveChildCounts)).toBe(2);
   });
 
   it("keeps a standalone parent alive through idle expiry and retirement", async () => {
@@ -243,59 +238,48 @@ describe("memory vector KNN subprocess boundary", () => {
   });
 
   it("rejects oversized input without spawning or disturbing an idle child", async () => {
-    const fixture = useFixtureChild();
-    await run(1);
+    const { children } = useFixtureChild();
+    await run();
     await expect(
-      runVectorKnnInSubprocess({
-        databasePath: "fixture:ok",
-        request: { ...request(1), providerModels: ["x".repeat(1024 * 1024)] },
-      }),
+      run(1, { request: { providerModels: ["x".repeat(1024 * 1024)] } }),
     ).rejects.toThrow("input is too large");
-    await run(1);
-    expect(fixture.children).toHaveLength(1);
+    await run();
+    expect(children).toHaveLength(1);
   });
 
   it("hard-kills and reaps a busy child on caller abort, then admits another query", async () => {
-    const fixture = useFixtureChild();
+    const { ready, children } = useFixtureChild();
     const controller = new AbortController();
-    const result = runVectorKnnInSubprocess({
-      databasePath: "fixture:ok",
-      request: request(30_000),
-      signal: controller.signal,
-    });
+    const result = run(30_000, { signal: controller.signal });
     const rejected = expect(result).rejects.toThrow("test KNN deadline");
-    await vi.waitFor(() => expect(fixture.ready).toHaveLength(1));
-    await fixture.ready[0];
-    const closed = once(fixture.children[0]!, "close");
+    await vi.waitFor(() => expect(ready).toHaveLength(1));
+    await ready[0];
+    const closed = once(children[0]!, "close");
     controller.abort(new Error("test KNN deadline"));
     await rejected;
     expect(await closed).toEqual([null, "SIGKILL"]);
-    await expect(run(1)).resolves.toEqual(emptyResult);
+    await expect(run()).resolves.toEqual(emptyResult);
   });
 
   it("retains both admission slots after cleanup timeout until children close", async () => {
-    const fixture = useFixtureChild();
+    const { children, ready } = useFixtureChild();
     const controller = new AbortController();
     const results = [0, 1].map((index) =>
-      runVectorKnnInSubprocess({
-        databasePath: `fixture:ok:${index}`,
-        request: request(30_000),
-        signal: controller.signal,
-      }),
+      run(30_000, { databasePath: `fixture:ok:${index}`, signal: controller.signal }),
     );
     const rejected = results.map((result) =>
       expect(result).rejects.toMatchObject({ code: "termination-timeout" }),
     );
-    await vi.waitFor(() => expect(fixture.children).toHaveLength(2));
-    await Promise.all(fixture.ready);
-    const realKills = fixture.children.map((child) => child.kill.bind(child));
-    const closed = fixture.children.map(
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await Promise.all(ready);
+    const realKills = children.map((child) => child.kill.bind(child));
+    const closed = children.map(
       (child) =>
         new Promise<void>((resolve) => {
           child.once("close", () => resolve());
         }),
     );
-    const killMocks = fixture.children.map((child) =>
+    const killMocks = children.map((child) =>
       vi
         .spyOn(child, "kill")
         .mockReturnValue(false)
@@ -322,10 +306,8 @@ describe("memory vector KNN subprocess boundary", () => {
       const queuedController = new AbortController();
       const queued = run(1, { signal: queuedController.signal });
       const queuedRejection = expect(queued).rejects.toThrow("queued KNN deadline");
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-      expect(fixture.children).toHaveLength(2);
+      await yieldToEventLoop();
+      expect(children).toHaveLength(2);
       queuedController.abort(new Error("queued KNN deadline"));
       await queuedRejection;
     } finally {
@@ -334,7 +316,7 @@ describe("memory vector KNN subprocess boundary", () => {
       realKills.forEach((kill) => kill("SIGKILL"));
       await Promise.all(closed);
     }
-    await expect(run(1)).resolves.toEqual(emptyResult);
+    await expect(run()).resolves.toEqual(emptyResult);
   });
 
   it("queries the real source child across WAL writer visibility and source filters", async () => {
@@ -365,15 +347,12 @@ describe("memory vector KNN subprocess boundary", () => {
     );
     using fixture = await createFileBackedVectorDatabase();
     try {
-      insertVectorRow(fixture.db, { id: "committed", source: "memory", vector: [1, 0] });
+      insertVectorRow(fixture.db, "committed", [1, 0]);
       fixture.db.exec("BEGIN IMMEDIATE");
-      insertVectorRow(fixture.db, { id: "pending", source: "sessions", vector: [0.9, 0.1] });
+      insertVectorRow(fixture.db, "pending", [0.9, 0.1], "sessions");
 
       const searchSource = (source: "memory" | "sessions") =>
-        run(2, {
-          databasePath: fixture.databasePath,
-          request: { ...request(2), sourceFilter: buildMemorySourceFilter("c", [source]) },
-        });
+        fixture.query(2, { sourceFilter: buildMemorySourceFilter("c", [source]) });
       const memoryResult = await searchSource("memory");
       expect(memoryResult.rows.map((row) => row.id)).toEqual(["committed"]);
       expect(memoryResult.fallbackScanRequired).toBe(false);
@@ -403,38 +382,24 @@ describe("memory vector KNN subprocess boundary", () => {
     ["early-exit", "exited before returning a result (code 7, signal none): fixture KNN failure"],
     ["extra", "extra output"],
   ])("respawns after %s without poisoning the next request", async (mode, message) => {
-    const fixture = useFixtureChild();
-    await expect(
-      runVectorKnnInSubprocess({
-        databasePath: "fixture:ok",
-        request: { ...request(1), providerModels: [`fixture:${mode}`] },
-      }),
-    ).rejects.toThrow(message);
-    await expect(
-      runVectorKnnInSubprocess({
-        databasePath: "fixture:ok",
-        request: { ...request(1), providerModels: ["fixture:fragmented"] },
-      }),
-    ).resolves.toEqual(emptyResult);
-    expect(fixture.children).toHaveLength(2);
+    const { children } = useFixtureChild();
+    await expect(run(1, { request: { providerModels: [`fixture:${mode}`] } })).rejects.toThrow(
+      message,
+    );
+    await expect(run(1, { request: { providerModels: ["fixture:fragmented"] } })).resolves.toEqual(
+      emptyResult,
+    );
+    expect(children).toHaveLength(2);
   });
 
   it("bounds NUL-dense native snippets before the subprocess output limit", async () => {
     using fixture = await createFileBackedVectorDatabase();
     fixture.db.exec("BEGIN");
     for (let index = 0; index < 200; index += 1) {
-      insertVectorRow(fixture.db, {
-        id: `nul-${index}`,
-        source: "memory",
-        vector: [1, 0],
-        text: "\0".repeat(3000),
-      });
+      insertVectorRow(fixture.db, `nul-${index}`, [1, 0], "memory", "\0".repeat(3000));
     }
     fixture.db.exec("COMMIT");
-    const result = await runVectorKnnInSubprocess({
-      databasePath: fixture.databasePath,
-      request: request(200),
-    });
+    const result = await fixture.query(200);
     expect(result.fallbackScanRequired).toBe(false);
     expect(result.rows).toHaveLength(200);
     expect(result.rows.every((row) => row.text === "\0".repeat(700))).toBe(true);
@@ -461,34 +426,22 @@ describe("memory vector KNN subprocess boundary", () => {
   it("reopens a replaced database on the next query in the same child", async () => {
     using original = await createFileBackedVectorDatabase();
     using replacement = await createFileBackedVectorDatabase();
-    insertVectorRow(original.db, { id: "original", source: "memory", vector: [1, 0] });
-    insertVectorRow(replacement.db, { id: "replacement", source: "memory", vector: [1, 0] });
-    const params = { databasePath: original.databasePath, request: request(1) };
-    expect((await runVectorKnnInSubprocess(params)).rows[0]?.id).toBe("original");
+    insertVectorRow(original.db, "original", [1, 0]);
+    insertVectorRow(replacement.db, "replacement", [1, 0]);
+    expect((await original.query()).rows[0]?.id).toBe("original");
     original.db.close();
     replacement.db.close();
     fs.renameSync(replacement.databasePath, original.databasePath);
-    expect((await runVectorKnnInSubprocess(params)).rows[0]?.id).toBe("replacement");
+    expect((await original.query()).rows[0]?.id).toBe("replacement");
     expect(childProcess.spawn).toHaveBeenCalledTimes(1);
   });
 
   it("bounds an oversized stored row before child protocol serialization", async () => {
     using fixture = await createFileBackedVectorDatabase();
     const oversizedText = `${"x".repeat(63)}😀${"y".repeat(3 * 1024 * 1024)}`;
-    insertVectorRow(fixture.db, {
-      id: "oversized",
-      source: "memory",
-      vector: [1, 0],
-      text: oversizedText,
-    });
+    insertVectorRow(fixture.db, "oversized", [1, 0], "memory", oversizedText);
 
-    const result = await runVectorKnnInSubprocess({
-      databasePath: fixture.databasePath,
-      request: {
-        ...request(1),
-        snippetMaxChars: 64,
-      },
-    });
+    const result = await fixture.query(1, { snippetMaxChars: 64 });
 
     expect(result).toMatchObject({
       fallbackScanRequired: false,

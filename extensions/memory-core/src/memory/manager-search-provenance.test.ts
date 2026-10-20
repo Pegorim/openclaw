@@ -9,13 +9,10 @@ import {
 } from "./manager-index.test-support.js";
 import * as knnSubprocess from "./manager-search-knn.js";
 
-const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
+const memory = await import("./index.js");
 
 describe("memory search provenance enrichment", () => {
-  const fixture = createManagerIndexFixture({
-    getMemorySearchManager,
-    closeAllMemorySearchManagers,
-  });
+  const fixture = createManagerIndexFixture(memory);
 
   it.each([
     { name: "body keywords", query: "violet", vector: false },
@@ -33,16 +30,17 @@ describe("memory search provenance enrichment", () => {
       ),
     );
     const manager = await fixture.getPersistentManager(
-      fixture.createConfig({ vectorEnabled: entry.vector, minScore: 0 }),
+      fixture.createConfig({ vectorEnabled: entry.vector }),
     );
     await manager.sync({ reason: "test" });
-    const fields = manager as unknown as { db: DatabaseSync; provider: EmbeddingProvider };
-    const db = fields.db;
-    const fixtureWriter = memoryIndexFixtureWriter(manager);
-    const semantic = entry.query === "semantic needle";
-    using embed = vi.spyOn(fields.provider, "embed");
+    const { db, provider } = manager as unknown as {
+      db: DatabaseSync;
+      provider: EmbeddingProvider;
+    };
+    const writer = memoryIndexFixtureWriter(manager);
+    using embed = vi.spyOn(provider, "embed");
     embed.mockResolvedValue([1, 0, 0, 0]);
-    fixtureWriter.exec(`
+    writer.exec(`
       UPDATE memory_index_chunk_provenance
       SET origin_class = 'owner', session_kind = 'interactive', observed_at = 1234,
           supersedes_key = '  tea-preference  ';
@@ -65,7 +63,7 @@ describe("memory search provenance enrichment", () => {
     using queries = vi.spyOn(db, "prepare").mockImplementation(prepare);
     using knn = vi.spyOn(knnSubprocess, "searchMemoryVectorIndex");
     const results = await manager.search(entry.query, {
-      lexicalOnly: !semantic,
+      lexicalOnly: entry.query !== "semantic needle",
       maxResults: entry.name === "exact paths" ? 1 : paths.length,
       minScore: 0,
     });

@@ -30,20 +30,29 @@ async function createDb() {
 function chunkWriter(db: Awaited<ReturnType<typeof createDb>>) {
   const chunk = db.prepare(`INSERT INTO memory_index_chunks
     (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
-    VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, 1)`);
+    VALUES (?, ?, ?, 1, 1, 'hash', ?, 'text', ?, 1)`);
   const vector = db.prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)");
   return (id: string, model = "target", embedding = [1, 0], source = "memory") => {
-    chunk.run(
-      id,
-      `memory/${id}.md`,
-      source,
-      id,
-      model,
-      `text ${id}`,
-      encodeMemoryEmbedding(embedding),
-    );
+    chunk.run(id, `memory/${id}.md`, source, model, encodeMemoryEmbedding(embedding));
     vector.run(id, vectorToBlob(embedding));
   };
+}
+
+function observeVisits(db: Awaited<ReturnType<typeof createDb>>, chunks = false) {
+  const visits = { chunk: 0, vector: 0 };
+  for (const name of chunks ? (["chunk", "vector"] as const) : (["vector"] as const)) {
+    db.function(`visit_${name}`, { varargs: true }, () => {
+      visits[name] += 1;
+      return 1;
+    });
+  }
+  db.exec(`CREATE TEMP VIEW observed_vectors AS
+    SELECT id, embedding, distance, k FROM main.memory_index_chunks_vec WHERE visit_vector(id)`);
+  if (chunks) {
+    db.exec(`CREATE TEMP VIEW memory_index_chunks AS
+      SELECT * FROM main.memory_index_chunks WHERE visit_chunk(id)`);
+  }
+  return visits;
 }
 
 function query(db: Awaited<ReturnType<typeof createDb>>, limit: number, vectorTable?: string) {
@@ -63,8 +72,7 @@ describe("memory vector KNN decision counts", () => {
     const insert = chunkWriter(db);
     db.exec("BEGIN");
     for (let index = 0; index < 100; index += 1) {
-      const id = `chunk-${index}`;
-      insert(id);
+      insert(`chunk-${index}`);
     }
     db.exec("COMMIT; ANALYZE");
 
@@ -74,22 +82,13 @@ describe("memory vector KNN decision counts", () => {
         UPDATE sqlite_stat1 SET stat = '1 1' WHERE tbl = 'memory_index_chunks';
         ANALYZE sqlite_schema;
       `);
-    let vectorVisits = 0;
-    db.function("visit_vector", { varargs: true }, () => {
-      vectorVisits += 1;
-      return 1;
-    });
-    db.exec(`
-        CREATE TEMP VIEW observed_vectors AS
-          SELECT id, embedding, distance, k FROM main.memory_index_chunks_vec
-          WHERE visit_vector(id);
-      `);
+    const visits = observeVisits(db);
 
     const result = await query(db, 5, "observed_vectors");
 
     expect(result.fallbackScanRequired).toBe(false);
     expect(result.rows).toHaveLength(5);
-    expect(vectorVisits).toBe(40);
+    expect(visits.vector).toBe(40);
   });
 
   it("rejects an invalid native row before underfill counts", async () => {
@@ -113,34 +112,16 @@ describe("memory vector KNN decision counts", () => {
       insert(id, model, vector);
     }
     db.exec("COMMIT");
-    let chunkVisits = 0;
-    let vectorVisits = 0;
-    db.function("visit_chunk", { varargs: true }, () => {
-      chunkVisits += 1;
-      return 1;
-    });
-    db.function("visit_vector", { varargs: true }, () => {
-      vectorVisits += 1;
-      return 1;
-    });
-    // Transparent views observe native row visits, including KNN, without
-    // changing stored rows or replacing the real sqlite-vec query engine.
-    db.exec(`
-        CREATE TEMP VIEW memory_index_chunks AS
-          SELECT * FROM main.memory_index_chunks WHERE visit_chunk(id);
-        CREATE TEMP VIEW observed_vectors AS
-          SELECT id, embedding, distance, k FROM main.memory_index_chunks_vec
-          WHERE visit_vector(id);
-      `);
+    const visits = observeVisits(db, true);
     expect(await query(db, 2, "observed_vectors")).toEqual({
       rows: [],
       fallbackScanRequired: true,
     });
     // Two KNN attempts visit at most 16 + 4,096 rows. Decision counts need
     // only two matching chunks and 4,097 vectors, regardless of the tail.
-    expect(chunkVisits).toBeGreaterThan(0);
-    expect(vectorVisits).toBeGreaterThan(0);
-    expect(chunkVisits).toBeLessThanOrEqual(4114);
-    expect(vectorVisits).toBeLessThanOrEqual(8209);
+    expect(visits.chunk).toBeGreaterThan(0);
+    expect(visits.vector).toBeGreaterThan(0);
+    expect(visits.chunk).toBeLessThanOrEqual(4114);
+    expect(visits.vector).toBeLessThanOrEqual(8209);
   });
 });

@@ -36,7 +36,7 @@ type VectorSearchOptions = Omit<Parameters<typeof searchVector>[0], "runFallback
   sourceFilterChunks: Parameters<typeof searchChunksByEmbedding>[0]["sourceFilter"];
 };
 
-function searchVectorFixture(db: DatabaseSync, options: Partial<VectorSearchOptions> = {}) {
+function search(db: DatabaseSync, options: Partial<VectorSearchOptions> = {}) {
   const { sourceFilterChunks = { sql: "", params: [] }, ...overrides } = options;
   const request: Omit<Parameters<typeof searchVector>[0], "runFallback"> = {
     providerModel: "target-model",
@@ -51,11 +51,7 @@ function searchVectorFixture(db: DatabaseSync, options: Partial<VectorSearchOpti
   return searchVector({
     ...request,
     runFallback: () =>
-      searchChunksByEmbedding({
-        ...request,
-        db,
-        sourceFilter: sourceFilterChunks,
-      }),
+      searchChunksByEmbedding({ ...request, db, sourceFilter: sourceFilterChunks }),
   });
 }
 
@@ -77,7 +73,7 @@ describe("searchVector sqlite-vec KNN", () => {
     observeEmbeddings(db);
     const caller = new AbortController();
     const abortReason = new Error("caller stopped memory search");
-    const pending = searchVectorFixture(db, { signal: caller.signal });
+    const pending = search(db, { signal: caller.signal });
     setImmediate(() => caller.abort(abortReason));
 
     await expect(pending).rejects.toBe(abortReason);
@@ -88,7 +84,7 @@ describe("searchVector sqlite-vec KNN", () => {
     await yieldToEventLoop();
     expect(scannedRows).toBe(rowsAtAbort);
 
-    const healthyResults = await searchVectorFixture(db, { limit: 1 });
+    const healthyResults = await search(db, { limit: 1 });
     expect(healthyResults.map((result) => result.id)).toEqual(["chunk-4095"]);
   });
 
@@ -205,14 +201,14 @@ describe("searchVector sqlite-vec KNN", () => {
     insertFallbackChunk(db, "alias", [0.9, 0.1], "/cache/default.gguf");
     insertFallbackChunk(db, "arbitrary", [1, 0], "/other/default.gguf");
 
-    const results = await searchVectorFixture(db, {
+    const results = await search(db, {
       providerModel: "canonical-model",
       providerModelAliases: ["/cache/default.gguf"],
     });
 
     expect(results.map((row) => row.id)).toEqual(["canonical", "alias"]);
     insertFallbackChunk(db, "hidden", [1, 0], "/cache/default.gguf", "sessions");
-    const candidateQuery: Parameters<typeof searchChunksByEmbedding>[0] = {
+    const candidateQuery = {
       db,
       providerModel: "canonical-model",
       providerModelAliases: ["/cache/default.gguf"],
@@ -252,12 +248,10 @@ describe("searchVector sqlite-vec KNN", () => {
     const score = createEmbeddingScorer(queryVec);
     const reference = (blob: Uint8Array) => referenceCosine(queryVec, decodeMemoryEmbedding(blob));
     const blobs: Uint8Array[] = [];
-    // Equal, shorter and longer than the query, plus an empty and an all-zero vector.
     for (const dims of [queryDims, queryDims, 5, 1, queryDims + 9, 0]) {
       blobs.push(encodeMemoryEmbedding(Array.from({ length: dims }, () => random() * 2 - 1)));
     }
     blobs.push(encodeMemoryEmbedding(Array.from({ length: queryDims }, () => 0)));
-    // Odd byte lengths.
     blobs.push(new Uint8Array([1, 2, 3]));
     // Truncated by a stray byte: a whole coordinate is present but the blob is still invalid.
     blobs.push(new Uint8Array([...encodeMemoryEmbedding([0.5, 0.25]), 7]));
@@ -270,7 +264,6 @@ describe("searchVector sqlite-vec KNN", () => {
         blobs.push(bytes);
       }
     }
-    // Large finite coordinates whose squares overflow stay usable, as before.
     blobs.push(encodeMemoryEmbedding(Array.from({ length: queryDims }, () => 1e200)));
     // Blobs that are views into a larger buffer, at aligned and unaligned offsets, and a Buffer.
     const whole = encodeMemoryEmbedding(Array.from({ length: queryDims }, () => random() - 0.5));
@@ -316,7 +309,7 @@ describe("searchVector sqlite-vec KNN", () => {
       .slice(0, limit);
 
     using sqrt = vi.spyOn(Math, "sqrt");
-    const results = await searchVectorFixture(db, { queryVec, limit });
+    const results = await search(db, { queryVec, limit });
     expect(results.map(({ id, score }) => ({ id, score }))).toEqual(expected);
     // Allow one norm per stored vector and one per query prefix, without timing noise.
     expect(sqrt.mock.calls.length).toBeLessThanOrEqual(rowCount + queryDims);
@@ -327,12 +320,10 @@ describe("searchVector sqlite-vec KNN", () => {
     using db = createFallbackDb();
     // 257 baseline rows: first batch sees 256 (score 0 vs. query), second
     // batch would have seen just 1 until our setImmediate insert lands.
-    const baselineCount = 257;
-    for (let i = 0; i < baselineCount; i += 1) {
+    for (let i = 0; i < 257; i += 1) {
       insertFallbackChunk(db, `baseline-${i}`, [0, 1]);
     }
 
-    // Insert winners after the first batch so the next cursor read must see them.
     let inserted = false;
     setImmediate(() => {
       inserted = true;
@@ -340,7 +331,7 @@ describe("searchVector sqlite-vec KNN", () => {
       insertFallbackChunk(db, "winner-B", [0.9, 0.1]);
     });
 
-    const results = await searchVectorFixture(db, { limit: 2 });
+    const results = await search(db, { limit: 2 });
 
     expect(inserted).toBe(true);
     expect(results.map((r) => r.id)).toEqual(["winner-A", "winner-B"]);
@@ -378,7 +369,7 @@ describe("searchVector sqlite-vec KNN", () => {
       });
     });
 
-    const results = await searchVectorFixture(db, { limit: 2, snippetMaxChars: 5 });
+    const results = await search(db, { limit: 2, snippetMaxChars: 5 });
     await changed;
     expect(results).toEqual([expectedChunk("chunk-0", "old "), expectedChunk("chunk-1", "chunk")]);
   });
@@ -402,7 +393,7 @@ describe("searchVector sqlite-vec KNN", () => {
       return embedding;
     });
 
-    const results = await searchVectorFixture(db, { limit: 1 });
+    const results = await search(db, { limit: 1 });
     expect(replaced).toBe(true);
     expect(results[0]).toMatchObject({ id: "winner", score: 1, snippet: "chunk winner" });
     expect(writer.prepare("SELECT text FROM observed_chunks").get()?.text).toBe(
@@ -433,14 +424,16 @@ describe("searchVector sqlite-vec KNN", () => {
     }
     // Read stored text first: the SQLite binding normalizes unpaired surrogates.
     const stored = db.prepare("SELECT id, text FROM memory_index_chunks ORDER BY rowid").all();
-    const expectSnippets = (
-      results: Awaited<ReturnType<typeof searchVectorFixture>>,
-      limit: number,
-    ) =>
+    const expectSnippets = (results: Awaited<ReturnType<typeof search>>, limit: number) =>
       expect(results.map(({ id, snippet }) => ({ id, snippet }))).toEqual(
         stored.map(({ id, text }) => ({ id, snippet: truncateUtf16Safe(String(text), limit) })),
       );
     let fetchedBytes = 0;
+    const observeText = (row: { text?: unknown } | undefined) => {
+      if (typeof row?.text === "string") {
+        fetchedBytes += Buffer.byteLength(row.text);
+      }
+    };
     const prepare = db.prepare.bind(db);
     using prepareSpy = vi.spyOn(db, "prepare");
     prepareSpy.mockImplementation((sql) => {
@@ -448,9 +441,7 @@ describe("searchVector sqlite-vec KNN", () => {
       statement.get = new Proxy(statement.get.bind(statement), {
         apply(get, _receiver, values) {
           const row = get(...values);
-          if (typeof row?.text === "string") {
-            fetchedBytes += Buffer.byteLength(row.text);
-          }
+          observeText(row);
           return row;
         },
       });
@@ -458,22 +449,18 @@ describe("searchVector sqlite-vec KNN", () => {
         apply(all, _receiver, values) {
           const rows = all(...values);
           for (const row of rows) {
-            if (typeof row.text === "string") {
-              fetchedBytes += Buffer.byteLength(row.text);
-            }
+            observeText(row);
           }
           return rows;
         },
       });
       return statement;
     });
+    const checkLimit = async (snippetMaxChars: number) =>
+      expectSnippets(await search(db, { limit: texts.length, snippetMaxChars }), snippetMaxChars);
     const snippetLimits = [1, 2, 3, 4, 7, 700];
     for (const snippetMaxChars of snippetLimits) {
-      const results = await searchVectorFixture(db, {
-        limit: texts.length,
-        snippetMaxChars,
-      });
-      expectSnippets(results, snippetMaxChars);
+      await checkLimit(snippetMaxChars);
     }
     // Allow encoding expansion without materializing complete chunk bodies.
     const totalSnippetLimit = snippetLimits.reduce((sum, limit) => sum + limit, 0);
@@ -487,11 +474,7 @@ describe("searchVector sqlite-vec KNN", () => {
       Number.MAX_SAFE_INTEGER,
       Number.MAX_SAFE_INTEGER + 1,
     ]) {
-      const results = await searchVectorFixture(db, {
-        limit: texts.length,
-        snippetMaxChars,
-      });
-      expectSnippets(results, snippetMaxChars);
+      await checkLimit(snippetMaxChars);
     }
   });
 
@@ -526,11 +509,12 @@ describe("searchVector sqlite-vec KNN", () => {
     addChunk("target", [0.5, 0.5]);
     addChunk("alias", [0.4, 0.6], "alias-model");
 
-    const belowCapResults = await searchVectorFixture(db, {
+    const knnOptions = {
       providerModelAliases: ["alias-model"],
       limit: 2,
       ensureVectorReady: async () => true,
-    });
+    };
+    const belowCapResults = await search(db, knnOptions);
     expect(belowCapResults.map((row) => row.id)).toEqual(["target", "alias"]);
 
     db.exec("BEGIN");
@@ -547,10 +531,8 @@ describe("searchVector sqlite-vec KNN", () => {
       "k value in knn query too large, provided 4097 and the limit is 4096",
     );
 
-    const results = await searchVectorFixture(db, {
-      providerModelAliases: ["alias-model"],
-      limit: 2,
-      ensureVectorReady: async () => true,
+    const results = await search(db, {
+      ...knnOptions,
       sourceFilterVec: { sql: " AND c.source IN (?)", params: ["memory"] },
       sourceFilterChunks: { sql: " AND source IN (?)", params: ["memory"] },
     });
