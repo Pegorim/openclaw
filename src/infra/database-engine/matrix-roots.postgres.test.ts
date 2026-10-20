@@ -179,9 +179,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
             if (entry.isDirectory() && includeOperations) {
               await collectManifests(file, false);
             } else if (entry.name === "manifest.json") {
-              const saved = JSON.parse(
-                await fs.readFile(file, "utf8"),
-              ) as recovery.DatabasePortManifest;
+              const saved = await readManifest(file);
               for (const target of saved.targets) {
                 for (const location of [target.original, target.intended]) {
                   if (location.engine === "postgres") {
@@ -197,9 +195,14 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
     });
   }
 
-  function sqliteEntries(file: string) {
+  function sqliteRows(file: string, sql: string) {
     using db = openNodeSqliteDatabase(file, { readOnly: true });
-    return db.prepare(selectEntries).all();
+    return db.prepare(sql).all();
+  }
+  const sqliteEntries = (file: string) => sqliteRows(file, selectEntries);
+
+  async function readManifest(file: string): Promise<recovery.DatabasePortManifest> {
+    return JSON.parse(await fs.readFile(file, "utf8"));
   }
 
   async function postgresEntries(file: string) {
@@ -323,24 +326,18 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
       });
       const capturedAgent = backup.snapshots.find((entry) => entry.archiveSourcePath === agentPath);
       expect(capturedAgent).toBeDefined();
-      {
-        using database = openNodeSqliteDatabase(capturedAgent!.sourcePath, { readOnly: true });
-        expect(database.prepare("SELECT entry_json FROM session_nodes").get()?.entry_json).toBe(
-          '{"fixture":"registered agent"}',
-        );
-      }
+      expect(sqliteRows(capturedAgent!.sourcePath, "SELECT entry_json FROM session_nodes")).toEqual(
+        [{ entry_json: '{"fixture":"registered agent"}' }],
+      );
       const capturedGlobal = backup.snapshots.find(
         (entry) =>
           entry.archiveSourcePath ===
           `${state.statePath("state", "openclaw.sqlite")}.postgres/database.sqlite`,
       );
       expect(capturedGlobal).toBeDefined();
-      {
-        using database = openNodeSqliteDatabase(capturedGlobal!.sourcePath, { readOnly: true });
-        expect(database.prepare("SELECT agent_id, path FROM agent_databases").all()).toEqual([
-          { agent_id: "retained", path: agentPath },
-        ]);
-      }
+      expect(
+        sqliteRows(capturedGlobal!.sourcePath, "SELECT agent_id, path FROM agent_databases"),
+      ).toEqual([{ agent_id: "retained", path: agentPath }]);
       for (const [index, file] of files.entries()) {
         const directory = state.path(`restored-${index}`, path.basename(`${file}.postgres`));
         await fs.mkdir(directory, { recursive: true });
@@ -404,9 +401,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
         expect(published).toBe(2);
         vi.restoreAllMocks();
         const manifestPath = recovery.databasePortManifestPath(state.stateDir);
-        const saved = JSON.parse(
-          await fs.readFile(manifestPath, "utf8"),
-        ) as recovery.DatabasePortManifest;
+        const saved = await readManifest(manifestPath);
         expect(saved.state).toBe("publishing");
         expect(saved.targets).toHaveLength(files.length + 1);
         expect(new Set(files.map((file) => readBackupEngine(file).engine))).toEqual(

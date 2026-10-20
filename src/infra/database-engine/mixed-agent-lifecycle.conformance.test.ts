@@ -121,18 +121,7 @@ describe.skipIf(!mixedAgentConnection).each(mixedAgentPairs)(
             }),
           );
         });
-        const rejected = await fixture.remove().then(
-          () => undefined,
-          (error: unknown) => error,
-        );
-        if (
-          !(rejected instanceof Error) ||
-          !rejected.message.includes("binding changed before session deletion")
-        ) {
-          throw rejected instanceof Error
-            ? rejected
-            : new Error("A changed binding did not veto session deletion");
-        }
+        await expect(fixture.remove()).rejects.toThrow("binding changed before session deletion");
         expect(vetoReached).toBe(true);
         expect(fixture.readEntry()).toEqual(entry);
         expect(fixture.readBinding()).toMatchObject(binding!);
@@ -161,15 +150,7 @@ describe.skipIf(!mixedAgentConnection).each(mixedAgentPairs)(
             throw refusal;
           }
         });
-        const rejected = await fixture.remove().then(
-          () => undefined,
-          (error: unknown) => error,
-        );
-        if (rejected !== refusal) {
-          throw rejected instanceof Error
-            ? rejected
-            : new Error("Agent commit refusal did not abort session deletion");
-        }
+        await expect(fixture.remove()).rejects.toBe(refusal);
         expect(agentCommit).toBe(true);
         expect(fixture.readEntry()).toEqual(entry);
         expect(fixture.readBinding()).toMatchObject(binding!);

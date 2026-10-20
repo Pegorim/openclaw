@@ -86,6 +86,29 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     GIT_COMMITTER_NAME: "Backup fixture",
     GIT_COMMITTER_EMAIL: "backup@example.invalid",
   };
+  const git = (repository: string, args: string[]) =>
+    requireGitCommand(repository, args, { env: gitEnv });
+  async function commitFixture(repository: string, message: string) {
+    await git(repository, ["add", "."]);
+    await git(repository, ["commit", "-m", message]);
+  }
+  const namespaceRows = async () =>
+    (await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname")).rows;
+  function exportedRows(file: string, sql: string) {
+    using exported = openNodeSqliteDatabase(file, { readOnly: true });
+    return exported.prepare(sql).all();
+  }
+  const ordinaryRows = (file: string) =>
+    exportedRows(
+      file,
+      "SELECT value_json FROM config_machine_state WHERE state_key='ordinary.fixture'",
+    );
+  const fixtureEnvironment = () => ({
+    HOME: root,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
+    OPENCLAW_DISABLE_BUNDLED_PLUGINS: "0",
+  });
 
   beforeAll(async () => {
     await admin.connect();
@@ -111,13 +134,7 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
         },
       },
     };
-    const env = {
-      ...process.env,
-      HOME: root,
-      OPENCLAW_STATE_DIR: stateDir,
-      OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
-      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "0",
-    };
+    const env = { ...process.env, ...fixtureEnvironment() };
     installFixtureEnvironment();
     const stateDescriptor = await statePortProvider.loadDescriptor();
     const agentDescriptor = await agentPortProvider.loadDescriptor();
@@ -197,19 +214,8 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
   }, 120_000);
 
   function installFixtureEnvironment() {
-    const env = {
-      HOME: root,
-      OPENCLAW_STATE_DIR: stateDir,
-      OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
-      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "0",
-    };
-    for (const key of [
-      "HOME",
-      "OPENCLAW_STATE_DIR",
-      "OPENCLAW_CONFIG_PATH",
-      "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
-    ] as const) {
-      vi.stubEnv(key, env[key]);
+    for (const [key, value] of Object.entries(fixtureEnvironment())) {
+      vi.stubEnv(key, value);
     }
   }
 
@@ -271,9 +277,7 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     );
     expect(new Set(ids).size).toBe(6);
     expect(ids).toEqual(expect.arrayContaining(["global", "workboard", "logbook"]));
-    const files = (
-      await requireGitCommand(repositoryPath, ["ls-tree", "-r", "--name-only", "HEAD"])
-    ).split("\n");
+    const files = (await git(repositoryPath, ["ls-tree", "-r", "--name-only", "HEAD"])).split("\n");
     expect(files.filter((file) => /(?:^|\/)manifest.json$/.test(file))).toHaveLength(12);
     const matrix = result.manifests.flatMap((manifest) =>
       manifest.identity.role === "generic" && manifest.identity.id.startsWith("state__matrix__")
@@ -285,27 +289,19 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       expect(manifest.excludedTables).toContain("secret_store_entries");
       expect(manifest.excludedConfigStateKeyPrefixes).toContain("authProfiles.");
       const file = path.join(repositoryPath, "stores", id, "postgres", "database.sqlite");
-      using exported = openNodeSqliteDatabase(file, { readOnly: true });
+      expect(exportedRows(file, "SELECT count(*) AS count FROM secret_store_entries")).toEqual([
+        { count: 0 },
+      ]);
       expect(
-        exported.prepare("SELECT count(*) AS count FROM secret_store_entries").get()?.count,
-      ).toBe(0);
-      expect(
-        exported
-          .prepare(
-            "SELECT state_key FROM config_machine_state WHERE state_key LIKE 'authProfiles.%'",
-          )
-          .all(),
+        exportedRows(
+          file,
+          "SELECT state_key FROM config_machine_state WHERE state_key LIKE 'authProfiles.%'",
+        ),
       ).toEqual([]);
+      expect(ordinaryRows(file)).toEqual([{ value_json: '"retained"' }]);
       expect(
-        exported
-          .prepare("SELECT value_json FROM config_machine_state WHERE state_key='ordinary.fixture'")
-          .get()?.value_json,
-      ).toBe('"retained"');
-      expect(
-        exported
-          .prepare("SELECT value_json FROM plugin_state_entries WHERE plugin_id='matrix'")
-          .get()?.value_json,
-      ).toBe('{"marker":"matrix retained"}');
+        exportedRows(file, "SELECT value_json FROM plugin_state_entries WHERE plugin_id='matrix'"),
+      ).toEqual([{ value_json: '{"marker":"matrix retained"}' }]);
       expect((await fs.readFile(file)).includes(Buffer.from("synthetic-retained-secret"))).toBe(
         false,
       );
@@ -315,12 +311,9 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     for (const file of extras) {
       await fs.writeFile(path.join(repositoryPath, file), "operator document\n");
     }
-    await requireGitCommand(repositoryPath, ["add", "--", ...extras]);
+    await git(repositoryPath, ["add", "--", ...extras]);
     await fs.rm(path.join(stateDir, "matrix/accounts/one/state/openclaw.sqlite"));
-    const previousAgentTree = await requireGitCommand(repositoryPath, [
-      "rev-parse",
-      "HEAD:agents/main",
-    ]);
+    const previousAgentTree = await git(repositoryPath, ["rev-parse", "HEAD:agents/main"]);
     await client.query(`DROP SCHEMA "${namespaces.get(agent)}" CASCADE`);
     await client.query(
       `UPDATE "${namespaces.get(shared)}".config_machine_state SET value_json=$1 WHERE state_key='ordinary.fixture'`,
@@ -338,20 +331,10 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     expect(refreshed.warnings).toEqual([
       expect.stringMatching(/Agent main degraded.*missing namespace/u),
     ]);
-    expect(await requireGitCommand(repositoryPath, ["rev-parse", "HEAD:agents/main"])).toBe(
-      previousAgentTree,
-    );
-    {
-      using exported = openNodeSqliteDatabase(
-        path.join(repositoryPath, "global/postgres/database.sqlite"),
-        { readOnly: true },
-      );
-      expect(
-        exported
-          .prepare("SELECT value_json FROM config_machine_state WHERE state_key='ordinary.fixture'")
-          .get()?.value_json,
-      ).toBe('"refreshed"');
-    }
+    expect(await git(repositoryPath, ["rev-parse", "HEAD:agents/main"])).toBe(previousAgentTree);
+    expect(ordinaryRows(path.join(repositoryPath, "global/postgres/database.sqlite"))).toEqual([
+      { value_json: '"refreshed"' },
+    ]);
     await expect(
       createGitBackup({ repositoryPath, stateDir, databases: [databases[1]!], gitEnv }),
     ).rejects.toThrow("missing namespace");
@@ -375,9 +358,7 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       );
     }
     expect(
-      (await requireGitCommand(repositoryPath, ["diff", "--cached", "--name-only"]))
-        .split("\n")
-        .toSorted(),
+      (await git(repositoryPath, ["diff", "--cached", "--name-only"])).split("\n").toSorted(),
     ).toEqual(extras.toSorted());
   }
 
@@ -402,40 +383,30 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       ],
       gitEnv,
     });
-    const before = (await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname")).rows;
+    const before = await namespaceRows();
     const verified = await verifyGitBackupRef({ repositoryPath, identity });
-    const after = (await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname")).rows;
-    expect(after).toEqual(before);
+    expect(await namespaceRows()).toEqual(before);
     expect(verified.manifest.identity).toEqual(identity);
 
     const manifestPath = path.join(repositoryPath, "global/manifest.json");
     const originalManifest = await fs.readFile(manifestPath, "utf8");
     const legacyManifest: Record<string, unknown> = JSON.parse(originalManifest);
     await fs.writeFile(manifestPath, JSON.stringify({ ...legacyManifest, postgresSource: null }));
-    await requireGitCommand(repositoryPath, ["add", "."]);
-    await requireGitCommand(repositoryPath, ["commit", "-m", "malformed binding fixture"], {
-      env: gitEnv,
-    });
+    await commitFixture(repositoryPath, "malformed binding fixture");
     await expect
       .soft(verifyGitBackupRef({ repositoryPath, identity }))
       .rejects.toThrow("unsupported fields");
     delete legacyManifest.postgresSource;
     await fs.writeFile(manifestPath, JSON.stringify(legacyManifest));
-    await requireGitCommand(repositoryPath, ["add", "."]);
-    await requireGitCommand(repositoryPath, ["commit", "-m", "legacy fixture"], {
-      env: gitEnv,
-    });
+    await commitFixture(repositoryPath, "legacy fixture");
     expect((await verifyGitBackupRef({ repositoryPath, identity })).manifest).not.toHaveProperty(
       "postgresSource",
     );
     const legacyTarget = path.join(root, "legacy-restored.sqlite");
     await restoreGitBackupRef({ repositoryPath, identity, targetPath: legacyTarget });
-    {
-      using anchor = openNodeSqliteDatabase(legacyTarget, { readOnly: true });
-      expect(anchor.prepare("SELECT engine FROM openclaw_engine_anchor").get()?.engine).toBe(
-        "postgres",
-      );
-    }
+    expect(exportedRows(legacyTarget, "SELECT engine FROM openclaw_engine_anchor")).toEqual([
+      { engine: "postgres" },
+    ]);
 
     await fs.writeFile(manifestPath, originalManifest);
     await fs.cp(
@@ -443,12 +414,8 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       path.join(repositoryPath, "global/postgres"),
       { recursive: true },
     );
-    await requireGitCommand(repositoryPath, ["add", "."]);
-    await requireGitCommand(repositoryPath, ["commit", "-m", "swapped capsule fixture"], {
-      env: gitEnv,
-    });
-    const beforeInvalid = (await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname"))
-      .rows;
+    await commitFixture(repositoryPath, "swapped capsule fixture");
+    const beforeInvalid = await namespaceRows();
     await expect
       .soft(verifyGitBackupRef({ repositoryPath, identity }))
       .rejects.toThrow("belongs to a different store");
@@ -457,19 +424,12 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       .soft(restoreGitBackupRef({ repositoryPath, identity, targetPath }))
       .rejects.toThrow("belongs to a different store");
     await expect.soft(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
-    expect
-      .soft((await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname")).rows)
-      .toEqual(beforeInvalid);
+    expect.soft(await namespaceRows()).toEqual(beforeInvalid);
     await fs.appendFile(path.join(repositoryPath, "global/postgres/database.sqlite"), "corrupt");
-    await requireGitCommand(repositoryPath, ["add", "."]);
-    await requireGitCommand(repositoryPath, ["commit", "-m", "corrupt fixture"], {
-      env: gitEnv,
-    });
+    await commitFixture(repositoryPath, "corrupt fixture");
     await expect(verifyGitBackupRef({ repositoryPath, identity })).rejects.toThrow(
       "artifact verification failed",
     );
-    expect((await client.query("SELECT nspname FROM pg_namespace ORDER BY nspname")).rows).toEqual(
-      beforeInvalid,
-    );
+    expect(await namespaceRows()).toEqual(beforeInvalid);
   }
 });

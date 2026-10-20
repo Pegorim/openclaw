@@ -37,18 +37,24 @@ describe
             entries: { [agentId]: {} },
           },
         };
+        const close = async () => {
+          withEngineStoreAdmission(() => closeOpenClawAgentDatabases(stateDir));
+          await cleanupSessionStateForTest({ stateDir });
+        };
+        const prepare = async () => {
+          const log = { info: vi.fn(), warn: vi.fn() };
+          const databases = await prepareGatewayStartupSessions({ cfg, env, log });
+          expect(databases).toHaveLength(1);
+          expect(databases[0]?.database.agentId).toBe(agentId);
+          databases[0]?.assertCurrent();
+          expect(log.warn).not.toHaveBeenCalled();
+        };
         withEngineStoreAdmission(() => {
           openOpenClawAgentDatabase({ agentId, env });
-          closeOpenClawAgentDatabases(stateDir);
         });
-        await cleanupSessionStateForTest({ stateDir });
-        const freshLog = { info: vi.fn(), warn: vi.fn() };
-        const fresh = await prepareGatewayStartupSessions({ cfg, env, log: freshLog });
-        expect(fresh.map(({ database }) => database.agentId)).toEqual([agentId]);
-        fresh[0]?.assertCurrent();
-        expect(freshLog.warn).not.toHaveBeenCalled();
-        withEngineStoreAdmission(() => closeOpenClawAgentDatabases(stateDir));
-        await cleanupSessionStateForTest({ stateDir });
+        await close();
+        await prepare();
+        await close();
         const scope = { agentId, env, sessionKey: `agent:${agentId}:main` };
         const legacyScope = { ...scope, sessionKey: `agent:${agentId}:dashboard:running` };
         await upsertSessionEntryCore(scope, {
@@ -71,16 +77,10 @@ describe
             legacyScope.sessionKey,
           ]);
         });
-        withEngineStoreAdmission(() => closeOpenClawAgentDatabases(stateDir));
-        await cleanupSessionStateForTest({ stateDir });
+        await close();
 
         for (let boot = 0; boot < 2; boot++) {
-          const log = { info: vi.fn(), warn: vi.fn() };
-          const databases = await prepareGatewayStartupSessions({ cfg, env, log });
-          expect(databases).toHaveLength(1);
-          expect(databases[0]?.database.agentId).toBe(agentId);
-          databases[0]?.assertCurrent();
-          expect(log.warn).not.toHaveBeenCalled();
+          await prepare();
           expect(withEngineStoreAdmission(() => loadSessionEntryReadOnly(scope))).toMatchObject({
             sessionId: "retained-startup-session",
           });
@@ -104,8 +104,7 @@ describe
                 .all(),
             ).toEqual([]);
           });
-          withEngineStoreAdmission(() => closeOpenClawAgentDatabases(stateDir));
-          await cleanupSessionStateForTest({ stateDir });
+          await close();
         }
       },
     );

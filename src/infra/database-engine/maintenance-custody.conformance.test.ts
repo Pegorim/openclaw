@@ -2,6 +2,7 @@ import { channel } from "node:diagnostics_channel";
 import fs from "node:fs";
 import path from "node:path";
 import { getEnvironmentData } from "node:worker_threads";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
@@ -81,14 +82,7 @@ describe.skipIf(!connection)("PostgreSQL Doctor maintenance custody", () => {
     const statements: string[] = [];
     const observation = channel("openclaw.database.statement");
     const observe = (event: unknown) => {
-      if (
-        event &&
-        typeof event === "object" &&
-        "engine" in event &&
-        event.engine === "postgres" &&
-        "sql" in event &&
-        typeof event.sql === "string"
-      ) {
+      if (isRecord(event) && event.engine === "postgres" && typeof event.sql === "string") {
         statements.push(event.sql);
       }
     };
@@ -186,12 +180,7 @@ describe.skipIf(!connection)("PostgreSQL Doctor maintenance custody", () => {
             `ALTER TABLE "${namespace}".state_leases ADD COLUMN future_payload text`,
           );
         }
-        let refusal: unknown;
-        try {
-          await maintenanceLock(otherEnv);
-        } catch (error) {
-          refusal = error;
-        }
+        const refusal: unknown = await maintenanceLock(otherEnv).catch((error: unknown) => error);
         expect(refusal).toBeInstanceOf(Error);
         expect(formatGatewayLockFailure(refusal)).toContain("Gateway owner lease is still active");
       }

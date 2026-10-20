@@ -1,21 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
-import { loadDeliveryQueueEntryInDatabase } from "../delivery-queue-sqlite-bound.js";
+import { loadDeliveryQueueEntryInDatabase as loadEntry } from "../delivery-queue-sqlite-bound.js";
 import {
-  prepareDeliveryQueueTerminalEntry,
-  pruneExpiredDeliveryQueueTombstonesInDatabase,
-  terminalizePendingDeliveryQueueEntryInDatabase,
-  upsertDeliveryQueueEntryInDatabase,
+  prepareDeliveryQueueTerminalEntry as prepareTerminal,
+  pruneExpiredDeliveryQueueTombstonesInDatabase as prune,
+  terminalizePendingDeliveryQueueEntryInDatabase as terminalize,
+  upsertDeliveryQueueEntryInDatabase as upsert,
 } from "../delivery-queue-sqlite.kernel.js";
 import { isPostgresSqlConnection } from "../sql-connection.js";
-import { runSqliteImmediateTransactionSync } from "../sqlite-transaction.js";
+import { runSqliteImmediateTransactionSync as transaction } from "../sqlite-transaction.js";
 import { withEngineStoreAdmission } from "./admission-scope.js";
 import { mixedAgentConnection, useMixedAgentPair } from "./mixed-agent.conformance.test-support.js";
 
 const QUEUE = "retention-conformance";
 const NOW = 4_000_000_000;
 const ORDINARY_AGE = 30 * 86_400_000;
+
+function pruneAt(database: OpenClawStateDatabase, time = NOW) {
+  vi.mocked(Date.now).mockReturnValue(time);
+  prune(database);
+}
 
 const contracts: Array<{
   name: string;
@@ -24,13 +29,13 @@ const contracts: Array<{
   {
     name: "orders mixed receipt deadlines and preserves large bounded ages",
     check(database) {
-      runSqliteImmediateTransactionSync(database.db, () => {
+      transaction(database.db, () => {
         for (const [id, enqueuedAt, maxAgeMs] of [
           ["ordinary", NOW - ORDINARY_AGE + 10, undefined],
           ["bounded-sooner", NOW - 100, 105],
           ["bounded-huge", NOW, Number.MAX_SAFE_INTEGER],
         ] as const) {
-          upsertDeliveryQueueEntryInDatabase(
+          upsert(
             {
               queueName: QUEUE,
               status: "completed",
@@ -50,71 +55,58 @@ const contracts: Array<{
           );
         }
       });
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      vi.mocked(Date.now).mockReturnValue(NOW + 6);
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "bounded-sooner")).toBeNull();
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "ordinary")).not.toBeNull();
-      vi.mocked(Date.now).mockReturnValue(NOW + 10);
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "ordinary")).not.toBeNull();
-      vi.mocked(Date.now).mockReturnValue(NOW + 11);
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "ordinary")).toBeNull();
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "bounded-huge")).not.toBeNull();
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, "bounded-huge")).not.toBeNull();
+      pruneAt(database);
+      pruneAt(database, NOW + 6);
+      expect(loadEntry(database, QUEUE, "bounded-sooner")).toBeNull();
+      expect(loadEntry(database, QUEUE, "ordinary")).not.toBeNull();
+      pruneAt(database, NOW + 10);
+      expect(loadEntry(database, QUEUE, "ordinary")).not.toBeNull();
+      pruneAt(database, NOW + 11);
+      expect(loadEntry(database, QUEUE, "ordinary")).toBeNull();
+      expect(loadEntry(database, QUEUE, "bounded-huge")).not.toBeNull();
+      prune(database);
+      expect(loadEntry(database, QUEUE, "bounded-huge")).not.toBeNull();
     },
   },
   {
     name: "expires a new terminal receipt after an empty inventory at its exact boundary",
     check(database) {
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
+      prune(database);
       const entry = {
         id: "terminal-bounded",
         enqueuedAt: NOW,
         retryCount: 0,
         completionRetention: { idPrefix: "terminal-", maxAgeMs: 60_000, maxEntries: 10 },
       };
-      runSqliteImmediateTransactionSync(database.db, () =>
-        upsertDeliveryQueueEntryInDatabase({ queueName: QUEUE, entry }, database),
-      );
+      transaction(database.db, () => upsert({ queueName: QUEUE, entry }, database));
       expect(
-        runSqliteImmediateTransactionSync(database.db, () =>
-          terminalizePendingDeliveryQueueEntryInDatabase(
-            database,
-            prepareDeliveryQueueTerminalEntry({ queueName: QUEUE, id: entry.id, entry }),
-          ),
+        transaction(database.db, () =>
+          terminalize(database, prepareTerminal({ queueName: QUEUE, id: entry.id, entry })),
         ),
       ).toEqual({ status: "terminalized", retained: true });
-      vi.mocked(Date.now).mockReturnValue(NOW + 60_000);
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, entry.id)).not.toBeNull();
-      vi.mocked(Date.now).mockReturnValue(NOW + 60_001);
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, entry.id)).toBeNull();
+      pruneAt(database, NOW + 60_000);
+      expect(loadEntry(database, QUEUE, entry.id)).not.toBeNull();
+      pruneAt(database, NOW + 60_001);
+      expect(loadEntry(database, QUEUE, entry.id)).toBeNull();
     },
   },
   {
     name: "discards an empty expiry published by rolled-back pruning",
     check(database) {
       const entry = { id: "rollback", enqueuedAt: NOW - ORDINARY_AGE - 1, retryCount: 0 };
-      runSqliteImmediateTransactionSync(database.db, () =>
-        upsertDeliveryQueueEntryInDatabase(
-          { queueName: QUEUE, entry, status: "completed" },
-          database,
-        ),
+      transaction(database.db, () =>
+        upsert({ queueName: QUEUE, entry, status: "completed" }, database),
       );
       expect(() =>
-        runSqliteImmediateTransactionSync(database.db, () => {
-          pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-          pruneExpiredDeliveryQueueTombstonesInDatabase(database);
+        transaction(database.db, () => {
+          prune(database);
+          prune(database);
           throw new Error("rollback retention");
         }),
       ).toThrow("rollback retention");
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, entry.id)).not.toBeNull();
-      pruneExpiredDeliveryQueueTombstonesInDatabase(database);
-      expect(loadDeliveryQueueEntryInDatabase(database, QUEUE, entry.id)).toBeNull();
+      expect(loadEntry(database, QUEUE, entry.id)).not.toBeNull();
+      prune(database);
+      expect(loadEntry(database, QUEUE, entry.id)).toBeNull();
     },
   },
 ];
