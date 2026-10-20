@@ -66,16 +66,12 @@ describe("Codex rate-limit cache", () => {
       rateLimitsByLimitId: { codex: codexSnapshot, codex_other: otherSnapshot },
     });
 
-    for (const [limitId, usedPercent, windowDurationMins, resetsAt] of [
-      [null, 90, 300, 5000],
-      ["codex_other", 75, 60, 6000],
+    for (const [limitId, usedPercent] of [
+      [null, 90],
+      ["codex_other", 75],
     ] as const) {
       mergeCodexRateLimitsUpdate(client, {
-        rateLimits: {
-          ...unavailable,
-          limitId,
-          primary: { usedPercent, windowDurationMins, resetsAt },
-        },
+        rateLimits: { ...unavailable, limitId, primary: { usedPercent } },
       });
     }
     expect(readCodexRateLimitsRevision(client)).toBe(2);
@@ -83,7 +79,7 @@ describe("Codex rate-limit cache", () => {
     const mergedCodexSnapshot = {
       ...unavailable,
       limitId: "codex",
-      primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 5000 },
+      primary: { usedPercent: 90 },
       credits: codexSnapshot.credits,
       individualLimit: codexSnapshot.individualLimit,
       planType: "pro",
@@ -91,7 +87,7 @@ describe("Codex rate-limit cache", () => {
     const mergedOtherSnapshot = {
       ...mergedCodexSnapshot,
       limitId: "codex_other",
-      primary: { usedPercent: 75, windowDurationMins: 60, resetsAt: 6000 },
+      primary: { usedPercent: 75 },
     };
     expect(readRecentCodexRateLimits(client)).toEqual({
       rateLimits: mergedCodexSnapshot,

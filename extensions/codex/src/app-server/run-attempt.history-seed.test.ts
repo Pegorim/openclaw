@@ -71,11 +71,13 @@ const unquote = (part: JsonValue) =>
 const historyText = (parts: JsonValue[]) => parts.map(unquote).join("");
 const isImage = (part: JsonValue) => isJsonObject(part) && part.type === "input_image";
 
-function selectedHarness() {
+function selectedHarness(threadId?: string) {
   let starts = 0;
   return createStartedThreadHarness(
     async (method) =>
-      method === "thread/start" ? threadStartResult(`thread-selected-${++starts}`) : undefined,
+      method === "thread/start"
+        ? threadStartResult(threadId ?? `thread-selected-${++starts}`)
+        : undefined,
     { persistedThreads: [] },
   );
 }
@@ -296,11 +298,7 @@ describe("Codex configured assembled-history delivery", () => {
       if (ownership === "reused") {
         expect(uncertain).not.toContain(original);
       }
-      const retry = createStartedThreadHarness(
-        async (method) =>
-          method === "thread/start" ? threadStartResult("thread-retry") : undefined,
-        { persistedThreads: [] },
-      );
+      const retry = selectedHarness("thread-retry");
       const requests = await runTurn(params, retry, "retry", "thread-retry");
       expect(requests.filter(({ method }) => method === "thread/inject_items")).toHaveLength(1);
       const restored = JSON.stringify(selectedItems(requests));

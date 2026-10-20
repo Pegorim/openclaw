@@ -88,18 +88,16 @@ describe("resolveCodexProviderWebSearchSupport", () => {
     expect(request).toHaveBeenCalledTimes(stage === "startup" ? 0 : 1);
   });
 
-  it("uses hosted search for the built-in OpenAI provider override", async () => {
-    await expect(resolveSupport({ modelProviderOverride: " OpenAI " })).resolves.toBe("supported");
-    expect(clientFactory).not.toHaveBeenCalled();
-    expect(request).not.toHaveBeenCalled();
-  });
-
-  it("keeps managed search for provider overrides the capability RPC cannot target", async () => {
-    request.mockResolvedValue({ webSearch: true });
-    for (const modelProviderOverride of ["amazon-bedrock", "custom-provider", "lmstudio"]) {
-      await expect(resolveSupport({ modelProviderOverride })).resolves.toBe("unsupported");
-    }
-    expect(clientFactory).not.toHaveBeenCalled();
-    expect(request).not.toHaveBeenCalled();
-  });
+  it.each([
+    [" OpenAI ", "supported"],
+    ["amazon-bedrock", "unsupported"],
+  ])(
+    "resolves the %s override without probing native capabilities",
+    async (modelProviderOverride, expected) => {
+      request.mockResolvedValue({ webSearch: expected === "unsupported" });
+      await expect(resolveSupport({ modelProviderOverride })).resolves.toBe(expected);
+      expect(clientFactory).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 });
