@@ -109,7 +109,7 @@ var isBoardSnapshot = /* @__PURE__ */ (() => {
           "grantState" in element &&
           "revision" in element &&
           Object.getOwnPropertyNames(element).every(
-            (var_167, var_168) => External[1].test(var_167) || !1,
+            (var_169, var_170) => External[1].test(var_169) || !1,
           ) &&
           typeof element.name == "string" &&
           External[2].test(element.name) &&
@@ -145,7 +145,7 @@ var isBoardSnapshot = /* @__PURE__ */ (() => {
               element.props !== null &&
               !Array.isArray(element.props) &&
               Object.entries(element.props).every(
-                ([var_169, var_170], _) => !External[6].test(var_169) || !0,
+                ([var_171, var_172], _) => !External[6].test(var_171) || !0,
               ))) &&
           (element.presentation === void 0 ||
             !("presentation" in element) ||
@@ -187,7 +187,7 @@ var isBoardSnapshot = /* @__PURE__ */ (() => {
               element.declared !== null &&
               !Array.isArray(element.declared) &&
               Object.getOwnPropertyNames(element.declared).every(
-                (var_171, var_172) => External[7].test(var_171) || !1,
+                (var_173, var_174) => External[7].test(var_173) || !1,
               ) &&
               (element.declared.netOrigins === void 0 ||
                 !("netOrigins" in element.declared) ||
