@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -49,6 +50,13 @@ const sqlitePortConfig = (): OpenClawConfig => ({
   plugins: { enabled: false },
 });
 
+function migrationEntry(
+  pluginId: string,
+  migration: PluginDoctorStateMigration,
+): PluginDoctorStateMigrationEntry {
+  return { pluginId, channelIds: pluginId === "matrix" ? ["matrix"] : [], migration };
+}
+
 describe("database port legacy import preflight", () => {
   it.each([
     { pluginId: "codex", id: "codex-native-task-assignments" },
@@ -64,13 +72,8 @@ describe("database port legacy import preflight", () => {
           ).href
         )) as { stateMigrations: PluginDoctorStateMigration[] };
         const migration = stateMigrations.find((entry) => entry.id === id);
-        expect(migration).toBeDefined();
-        if (!migration) {
-          throw new Error(`Missing ${id}`);
-        }
-        controls.entries = [
-          { pluginId, channelIds: pluginId === "matrix" ? ["matrix"] : [], migration },
-        ];
+        assert(migration, `Missing ${id}`);
+        controls.entries = [migrationEntry(pluginId, migration)];
         const config = sqlitePortConfig();
         await state.writeConfig(config);
         let source: string;
@@ -97,13 +100,7 @@ describe("database port legacy import preflight", () => {
           source = state.statePath("state", "openclaw.sqlite");
         } else {
           source = state.statePath(
-            "matrix",
-            "accounts",
-            "default",
-            "matrix.example.org__bot",
-            "0123456789abcdef",
-            "state",
-            "openclaw.sqlite",
+            "matrix/accounts/default/matrix.example.org__bot/0123456789abcdef/state/openclaw.sqlite",
           );
           await fs.mkdir(path.dirname(source), { recursive: true });
           const roomId = "!room:example.org",
@@ -162,24 +159,20 @@ describe("database port legacy import preflight", () => {
       }
       const migrateLegacyState = vi.fn(() => ({ changes: [], warnings: [] }));
       controls.entries = [
-        {
-          pluginId: "legacy-owner",
-          channelIds: [],
-          migration: {
-            id: "legacy-import",
-            label: "Legacy data",
-            sqliteOnly: { family: "workboard" },
-            doctorOnly: true,
-            phase: "after-session-repair",
-            detectLegacyState: () => {
-              using db = new DatabaseSync(source, { readOnly: true });
-              return db.prepare("SELECT 1 FROM legacy").get()
-                ? { preview: ["Legacy data needs import"] }
-                : null;
-            },
-            migrateLegacyState,
+        migrationEntry("legacy-owner", {
+          id: "legacy-import",
+          label: "Legacy data",
+          sqliteOnly: { family: "workboard" },
+          doctorOnly: true,
+          phase: "after-session-repair",
+          detectLegacyState: () => {
+            using db = new DatabaseSync(source, { readOnly: true });
+            return db.prepare("SELECT 1 FROM legacy").get()
+              ? { preview: ["Legacy data needs import"] }
+              : null;
           },
-        },
+          migrateLegacyState,
+        }),
       ];
       const before = await fs.readFile(source);
       const configBefore = await fs.readFile(state.configPath);
@@ -211,10 +204,8 @@ describe("database port legacy import preflight", () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const detected: string[] = [];
       controls.entries = (["state", "agent", "workboard", "logbook", "team-reports"] as const).map(
-        (family) => ({
-          pluginId: family,
-          channelIds: [],
-          migration: {
+        (family) =>
+          migrationEntry(family, {
             id: `${family}-import`,
             label: family,
             sqliteOnly: { family },
@@ -225,8 +216,7 @@ describe("database port legacy import preflight", () => {
             migrateLegacyState: () => {
               throw new Error("port must never run Doctor migrations");
             },
-          },
-        }),
+          }),
       );
       const gate = portGate(state, { database: { engine: "sqlite" } });
       await gate({
@@ -250,19 +240,15 @@ describe("database port legacy import preflight", () => {
   it("fails closed without exposing detector errors", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       controls.entries = [
-        {
-          pluginId: "source-owner",
-          channelIds: [],
-          migration: {
-            id: "unreadable-import",
-            label: "Unreadable legacy data",
-            sqliteOnly: { family: "state" },
-            detectLegacyState: () => {
-              throw new Error("private legacy payload");
-            },
-            migrateLegacyState: () => ({ changes: [], warnings: [] }),
+        migrationEntry("source-owner", {
+          id: "unreadable-import",
+          label: "Unreadable legacy data",
+          sqliteOnly: { family: "state" },
+          detectLegacyState: () => {
+            throw new Error("private legacy payload");
           },
-        },
+          migrateLegacyState: () => ({ changes: [], warnings: [] }),
+        }),
       ];
       await expect(portGate(state, {})()).rejects.toThrow(
         "Database port could not inspect SQLite migration source-owner/unreadable-import (Unreadable legacy data). Run openclaw doctor --fix first, then retry port.",
