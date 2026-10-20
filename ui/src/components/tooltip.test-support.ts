@@ -26,9 +26,7 @@ export function createRichTooltip(content: string, triggerText = "trigger") {
   return { tooltip, trigger, card };
 }
 
-export function createProvider() {
-  return document.createElement("openclaw-tooltip-provider");
-}
+export const createProvider = () => element("openclaw-tooltip-provider");
 
 export function focusTrigger(trigger: HTMLElement) {
   trigger.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
@@ -76,11 +74,10 @@ export async function settleTooltip(tooltip: TooltipElement) {
 
 export function expectSharedTooltipSkin(tooltip: TooltipElement) {
   const root = tooltip.shadowRoot!;
+  const rules = (root.adoptedStyleSheets ?? []).flatMap((sheet) => Array.from(sheet.cssRules));
   const styles = [
     ...[...root.querySelectorAll("style")].map((style) => style.textContent),
-    ...[...(root.adoptedStyleSheets ?? [])].flatMap((sheet) =>
-      [...sheet.cssRules].map((rule) => rule.cssText),
-    ),
+    ...rules.map((rule) => rule.cssText),
   ].join("\n");
   expect(styles).toContain("--openclaw-tooltip-background-color");
   expect(styles).toContain("--openclaw-tooltip-border-color");
@@ -91,15 +88,13 @@ export function expectSharedTooltipSkin(tooltip: TooltipElement) {
   expect(styles).toContain("var(--overlay-shadow, var(--shadow-md))");
   expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
   if (root.adoptedStyleSheets?.length) {
-    const animationNames = root.adoptedStyleSheets
-      .flatMap((sheet) => Array.from(sheet.cssRules))
-      .filter(
-        (rule): rule is CSSMediaRule =>
-          rule instanceof CSSMediaRule && rule.conditionText === "(prefers-reduced-motion: reduce)",
-      )
-      .flatMap((rule) => Array.from(rule.cssRules))
-      .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule)
-      .map((rule) => rule.style.animationName);
+    const animationNames = rules.flatMap((rule) =>
+      rule instanceof CSSMediaRule && rule.conditionText === "(prefers-reduced-motion: reduce)"
+        ? [...rule.cssRules].flatMap((style) =>
+            style instanceof CSSStyleRule ? [style.style.animationName] : [],
+          )
+        : [],
+    );
     // WebKit serializes the `animation: none` shorthand as `animation: auto`.
     expect(animationNames).toContain("none");
   } else {

@@ -8,10 +8,19 @@ import {
 } from "../lib/identity-avatar-context.ts";
 import { SubagentActivity } from "../pages/chat/components/chat-subagent-activity.tsx";
 import { ChatWorkingIndicator } from "../pages/chat/components/chat-working-indicator.tsx";
-import { cleanupSolid, mountSolid } from "../test-helpers/mount-solid.ts";
+import { mountSolid } from "../test-helpers/mount-solid.ts";
 import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import { PluginThemeArtwork } from "./plugin-theme-artwork.tsx";
 import "../test-helpers/load-styles.ts";
+
+const session = { key: "agent:main:synthetic", kind: "direct", updatedAt: null } as const;
+const row = {
+  key: session.key,
+  label: "Review",
+  status: "running",
+  listed: true,
+  session,
+} as const;
 
 function artwork() {
   return new Response(
@@ -36,7 +45,6 @@ function setupArtwork(responses: Record<string, () => Response | Promise<Respons
     spy.mockRestore();
     setAvatarGatewayOrigin(gateway.origin, gateway.authTokens, gateway.resourceBasePath);
     setCurrentThemeBranding(previous);
-    cleanupSolid();
   });
   return spy;
 }
@@ -55,21 +63,7 @@ it.each([
   );
   const view = mountSolid(() =>
     kind === "subagent" ? (
-      <SubagentActivity
-        rows={[
-          {
-            key: "agent:main:synthetic-subagent",
-            label: "Synthetic review",
-            status: "running",
-            listed: true,
-            session: {
-              key: "agent:main:synthetic-subagent",
-              kind: "direct",
-              updatedAt: null,
-            },
-          },
-        ]}
-      />
+      <SubagentActivity rows={[row]} />
     ) : (
       <ChatWorkingIndicator
         part={{ kind: "reading-indicator", key: "synthetic-brand", startedAt: 1 }}

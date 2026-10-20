@@ -1,11 +1,11 @@
 /* @vitest-environment jsdom */
 import { createSignal } from "solid-js";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   createGatewayRequestMock,
   createTestGatewayClient,
 } from "../test-helpers/gateway-client.ts";
-import { cleanupSolid, mountSolid } from "../test-helpers/mount-solid.ts";
+import { mountSolid } from "../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../test-helpers/solid-settle.ts";
 import { createSkillFileHovercard } from "./skill-file-hovercard.tsx";
 
@@ -19,13 +19,12 @@ const source = () => document.querySelector(".skill-file-hovercard__source");
 
 function setup() {
   const request = createGatewayRequestMock(async () => file);
-  const client = createTestGatewayClient(request);
-  let changeAgent: (value: string) => void = () => {};
+  let changeAgent!: (value: string) => void;
   const view = mountSolid(() => {
     const [agent, setAgent] = createSignal("main");
     changeAgent = setAgent;
     const ref = createSkillFileHovercard({
-      client,
+      client: createTestGatewayClient(request),
       get agentId() {
         return agent();
       },
@@ -51,11 +50,6 @@ async function focus(anchor: HTMLElement) {
   anchor.focus();
   await waitForSolid(() => expect(source()).not.toBeNull());
 }
-
-afterEach(() => {
-  cleanupSolid();
-  vi.restoreAllMocks();
-});
 
 it("loads on intent, renders source as text, and rereads after dismissal", async () => {
   const { anchor, request } = setup();
