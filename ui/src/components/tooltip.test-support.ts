@@ -47,22 +47,16 @@ export function dispatchTouchPointer(target: EventTarget, type: "pointerdown" | 
   target.dispatchEvent(event);
 }
 
-export function hoverTrigger(trigger: HTMLElement) {
-  dispatchMousePointer(trigger, "pointerenter");
-}
+export const hoverTrigger = (trigger: HTMLElement) => dispatchMousePointer(trigger, "pointerenter");
 
-export function tooltipSurface(tooltip: TooltipElement) {
-  return tooltip.shadowRoot?.querySelector<HTMLElement>(".tooltip-surface") ?? null;
-}
+export const tooltipSurface = (tooltip: TooltipElement) =>
+  tooltip.shadowRoot?.querySelector<HTMLElement>(".tooltip-surface") ?? null;
 
 export async function expectOpenCount(count: number) {
-  await Promise.all(
-    [...document.querySelectorAll<TooltipElement>("openclaw-tooltip")].map(settleTooltip),
-  );
+  const tooltips = () => [...document.querySelectorAll<TooltipElement>("openclaw-tooltip")];
+  await Promise.all(tooltips().map(settleTooltip));
   expect(
-    [...document.querySelectorAll<TooltipElement>("openclaw-tooltip")].filter((tooltip) =>
-      tooltipSurface(tooltip)?.matches(":popover-open"),
-    ),
+    tooltips().filter((tooltip) => tooltipSurface(tooltip)?.matches(":popover-open")),
   ).toHaveLength(count);
 }
 

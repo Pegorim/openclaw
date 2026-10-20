@@ -10,7 +10,6 @@ import { Picker } from "./solid/select-picker.tsx";
 
 function mountFilter(
   content: () => JSX.Element,
-  initialFocus: () => HTMLElement | undefined,
   focusTargets: () => readonly HTMLElement[],
   chooseControl?: () => void,
 ) {
@@ -23,7 +22,9 @@ function mountFilter(
   mountSolid(
     () => (
       <SidebarSessionFilterPopover
-        {...{ anchor, initialFocus, focusTargets }}
+        anchor={anchor}
+        focusTargets={focusTargets}
+        initialFocus={() => focusTargets()[0]}
         label="Filter sessions"
         onClose={() => {}}
         content={content()}
@@ -34,33 +35,25 @@ function mountFilter(
   return container;
 }
 
-it.each([false, true])(
-  "places initial focus without overriding a chosen control (%s)",
-  async (chosen) => {
-    let input!: HTMLInputElement;
-    let button!: HTMLButtonElement;
-    const container = mountFilter(
-      () => (
-        <>
-          <div id="sidebar-sessions-status">
-            <input ref={(element) => (input = element)} type="radio" checked />
-          </div>
-          <button ref={(element) => (button = element)}>Sort</button>
-        </>
-      ),
-      () => input,
-      () => [input, button],
-      chosen ? () => button?.focus() : undefined,
-    );
-    await waitForSolid(() => expect(container.querySelector("input")).not.toBeNull());
-    await waitForSolid(() => expect(document.activeElement).toBe(chosen ? button : input));
-    button.focus();
-    container
-      .querySelector(".sidebar-session-filter-panel")!
-      .dispatchEvent(new CustomEvent("overlay-after-show"));
-    expect(document.activeElement).toBe(button);
-  },
-);
+it.each([false, true])("preserves initial or chosen focus (%s)", async (chosen) => {
+  let input!: HTMLInputElement;
+  let button!: HTMLButtonElement;
+  const container = mountFilter(
+    () => (
+      <>
+        <input ref={(element) => (input = element)} type="radio" checked />
+        <button ref={(element) => (button = element)}>Sort</button>
+      </>
+    ),
+    () => [input, button],
+    chosen ? () => button?.focus() : undefined,
+  );
+  await waitForSolid(() => expect(document.activeElement).toBe(chosen ? button : input));
+  button.focus();
+  const panel = container.querySelector(".sidebar-session-filter-panel")!;
+  panel.dispatchEvent(new CustomEvent("overlay-after-show"));
+  expect(document.activeElement).toBe(button);
+});
 
 it("wraps focus from a nested picker's final group control", async () => {
   vi.stubGlobal("matchMedia", () => ({ matches: true }));
@@ -74,14 +67,10 @@ it("wraps focus from a nested picker's final group control", async () => {
         searchable="always"
         groupBy={(option) => ({ id: option.value, label: option.label })}
         focusRef={(handle) => (picker = handle)}
-        options={[
-          { value: "one", label: "One" },
-          { value: "two", label: "Two" },
-        ]}
+        options={["one", "two"].map((value) => ({ value, label: value }))}
         onChange={() => {}}
       />
     ),
-    () => picker?.trigger,
     () => picker?.elements() ?? [],
   );
   await waitForSolid(() => expect(document.activeElement).toBe(picker?.trigger));

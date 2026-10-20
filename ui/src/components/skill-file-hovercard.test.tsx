@@ -9,11 +9,7 @@ import { mountSolid } from "../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../test-helpers/solid-settle.ts";
 import { createSkillFileHovercard } from "./skill-file-hovercard.tsx";
 
-const file = {
-  path: "/skills/release-notes/SKILL.md",
-  name: "release-notes",
-  content: "---\nname: release-notes\n---\n# Release notes\n",
-};
+const file = { path: "/s/SKILL.md", name: "s", content: "---\nname: s\n---\n# Skill\n" };
 const card = () => document.querySelector(".skill-file-hovercard");
 const source = () => document.querySelector(".skill-file-hovercard__source");
 
@@ -34,7 +30,7 @@ function setup() {
     return (
       <div ref={ref}>
         <a href="#" data-file-path={file.path}>
-          release-notes
+          {file.name}
         </a>
         <a href="#" data-file-path="README.md">
           README
@@ -43,7 +39,7 @@ function setup() {
     );
   });
   flush();
-  return { ...view, request, changeAgent, anchor: view.getByText("release-notes") };
+  return { ...view, request, changeAgent, anchor: view.getByText(file.name) };
 }
 
 async function focus(anchor: HTMLElement) {
@@ -63,7 +59,7 @@ it("loads on intent, renders source as text, and rereads after dismissal", async
   anchor.blur();
   await focus(anchor);
   expect(request).toHaveBeenCalledTimes(2);
-  expect(source()?.textContent).toContain("# Release notes");
+  expect(source()?.textContent).toContain("# Skill");
 });
 
 it("retires pending requests when the agent changes or the trigger is removed", async () => {
@@ -79,7 +75,6 @@ it("retires pending requests when the agent changes or the trigger is removed", 
   pending.resolve(file);
   await Promise.resolve();
   expect(card()).toBeNull();
-  request.mockResolvedValue(file);
   anchor.blur();
   await focus(anchor);
   anchor.remove();
@@ -87,14 +82,13 @@ it("retires pending requests when the agent changes or the trigger is removed", 
 });
 
 it("keeps ordinary files untouched and exposes a retry after a failed read", async () => {
-  const view = setup();
-  const { anchor, request } = view;
-  view.getByText("README").focus();
+  const { anchor, request, getByText, getByRole } = setup();
+  getByText("README").focus();
   expect(request).not.toHaveBeenCalled();
   request.mockRejectedValueOnce(new Error("not installed"));
   anchor.click();
   await waitForSolid(() => expect(card()?.textContent).toContain("Skill file unavailable"));
-  view.getByRole("button", { name: "Retry" }).click();
+  getByRole("button", { name: "Retry" }).click();
   await waitForSolid(() => expect(source()).not.toBeNull());
   expect(request).toHaveBeenCalledTimes(2);
 });

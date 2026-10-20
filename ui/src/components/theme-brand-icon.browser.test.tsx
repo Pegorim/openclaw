@@ -13,21 +13,16 @@ import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import { PluginThemeArtwork } from "./plugin-theme-artwork.tsx";
 import "../test-helpers/load-styles.ts";
 
-const session = { key: "agent:main:synthetic", kind: "direct", updatedAt: null } as const;
 const row = {
-  key: session.key,
+  key: "agent:main:synthetic",
   label: "Review",
   status: "running",
   listed: true,
-  session,
+  session: { key: "agent:main:synthetic", kind: "direct", updatedAt: null },
 } as const;
 
-function artwork() {
-  return new Response(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="30" fill="#4169e1"/></svg>',
-    { headers: { "Content-Type": "image/svg+xml" } },
-  );
-}
+const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>';
+const artwork = () => new Response(svg, { headers: { "Content-Type": "image/svg+xml" } });
 
 function setupArtwork(responses: Record<string, () => Response | Promise<Response>>) {
   const previous = currentThemeBranding();
@@ -61,7 +56,7 @@ it.each([
       artwork: { icons: { synthetic: { url: artworkUrl } } },
     }),
   );
-  const view = mountSolid(() =>
+  const { container } = mountSolid(() =>
     kind === "subagent" ? (
       <SubagentActivity rows={[row]} />
     ) : (
@@ -72,7 +67,7 @@ it.each([
     ),
   );
   await vi.dynamicImportSettled();
-  const icon = () => view.container.querySelector<HTMLElement>("openclaw-theme-brand-icon");
+  const icon = () => container.querySelector<HTMLElement>("openclaw-theme-brand-icon");
   await waitForSolid(() => expect(icon()?.querySelector("img")?.naturalWidth).toBe(256));
   expect([icon()!.clientWidth, icon()!.clientHeight]).toEqual([size, size]);
 });
@@ -84,26 +79,24 @@ it("shows the fallback while replacing artwork with a different URL", async () =
   const artworkFetch = setupArtwork({ [firstUrl]: artwork, [nextUrl]: () => next.promise });
   onTestFinished(() => next.resolve(artwork()));
   const [url, setUrl] = createSignal(firstUrl);
-  const view = mountSolid(() => (
-    <PluginThemeArtwork url={url()} class="synthetic-hat" fallback="Loading artwork" />
+  const { container } = mountSolid(() => (
+    <PluginThemeArtwork url={url()} fallback="Loading artwork" />
   ));
-  await waitForSolid(() =>
-    expect(view.container.querySelector<HTMLImageElement>("img")?.naturalWidth).toBe(256),
-  );
-  const firstSource = view.container.querySelector("img")!.src;
+  const image = () => container.querySelector("img");
+  await waitForSolid(() => expect(image()?.naturalWidth).toBe(256));
+  const firstSource = image()!.src;
   setUrl(nextUrl);
   await waitForSolid(() =>
     expect(artworkFetch.mock.calls.some(([input]) => input === nextUrl)).toBe(true),
   );
   await waitForSolid(() => {
-    expect(view.container.textContent).toBe("Loading artwork");
-    expect(view.container.querySelector("img")).toBeNull();
+    expect(container).toMatchObject({ textContent: "Loading artwork" });
+    expect(image()).toBeNull();
   });
   next.resolve(artwork());
   await waitForSolid(() => {
-    const image = view.container.querySelector<HTMLImageElement>("img");
-    expect(image?.naturalWidth).toBe(256);
-    expect(image?.src).not.toBe(firstSource);
-    expect(view.container.textContent).toBe("");
+    expect(image()?.naturalWidth).toBe(256);
+    expect(image()?.src).not.toBe(firstSource);
+    expect(container.textContent).toBe("");
   });
 });

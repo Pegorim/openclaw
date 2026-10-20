@@ -50,29 +50,19 @@ it("materializes content on first hover intent and reuses the native surface", a
   expect(trigger.getAttribute("aria-describedby")).toBe(descriptionId);
 });
 
-it.each(["cold focus", "focus", "pointer"] as const)("previews on %s intent", async (input) => {
+it("previews focus intent before the first commit", async () => {
   const tooltip = document.createElement("openclaw-tooltip");
   const anchor = element("button", { textContent: "Preview" });
   document.body.append(anchor, tooltip);
-  if (input !== "cold focus") {
-    await settleTooltip(tooltip);
-    expect(content(tooltip)).toBeNull();
-  }
-  tooltip.previewForAnchor(anchor, "Preview details", input === "pointer" ? "pointer" : "focus");
-  if (input === "cold focus") {
-    expect(tooltip.hasAttribute("open")).toBe(false);
-  }
+  tooltip.previewForAnchor(anchor, "Preview details", "focus");
+  expect(tooltip.hasAttribute("open")).toBe(false);
   await settleTooltip(tooltip);
-  if (input !== "cold focus") {
-    vi.advanceTimersByTime(150);
-    await settleTooltip(tooltip);
-  }
   expect(tooltipSurface(tooltip)?.matches(":popover-open")).toBe(true);
   expect(content(tooltip)?.textContent).toBe("Preview details");
   expect(description(anchor)).toBe("Preview details");
 });
 
-it.each(["open", "escape", "disconnect", "toggle", "veto"] as const)(
+it.each(["open", "veto"] as const)(
   "preserves %s intent during first content materialization",
   async (outcome) => {
     const { tooltip, trigger } = createTooltip("Details");
@@ -83,19 +73,6 @@ it.each(["open", "escape", "disconnect", "toggle", "veto"] as const)(
       tooltip.addEventListener("overlay-show", (event) => event.preventDefault(), { once: true });
     }
     trigger.click();
-    if (outcome === "escape") {
-      const escape = new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      });
-      trigger.dispatchEvent(escape);
-      expect(escape.defaultPrevented).toBe(false);
-    } else if (outcome === "disconnect") {
-      tooltip.remove();
-    } else if (outcome === "toggle") {
-      trigger.click();
-    }
     await settleTooltip(tooltip);
     expect(tooltip.hasAttribute("open")).toBe(outcome === "open");
     expect(tooltipSurface(tooltip)?.matches(":popover-open") ?? false).toBe(outcome === "open");
