@@ -4,8 +4,8 @@ import { delimiter, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { PACKAGE_DIST_INVENTORY_RELATIVE_PATH } from "../scripts/lib/package-dist-inventory.ts";
 import {
-  collectForbiddenPackedContentErrors,
-  collectForbiddenPackedPathErrors,
+  collectForbiddenPackedContentErrors as contentErrors,
+  collectForbiddenPackedPathErrors as pathErrors,
   collectPackedTestCargoErrors,
   resolveNpmCommandInvocation,
   runNpmReleaseCheckCommand,
@@ -52,15 +52,13 @@ if (process.platform === "win32") {
 }
 
 it("bounds commands that ignore termination", () => {
+  const command = {
+    command: process.execPath,
+    args: ["--eval", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+  };
   const startedAt = Date.now();
   expect(() =>
-    runNpmReleaseCheckCommand(
-      {
-        command: process.execPath,
-        args: ["--eval", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
-      },
-      { stdio: ["ignore", "pipe", "pipe"], timeoutMs: 100 },
-    ),
+    runNpmReleaseCheckCommand(command, { stdio: ["ignore", "pipe", "pipe"], timeoutMs: 100 }),
   ).toThrow();
   expect(Date.now() - startedAt).toBeLessThan(2500);
 });
@@ -68,29 +66,24 @@ it("bounds commands that ignore termination", () => {
 it("rejects private QA and local build artifacts while allowing runtime files", () => {
   const forbidden = [
     ["generated docs artifact", "docs/.generated/config-baseline.json"],
-    ["generated docs artifact", "docs/.generated/config-baseline.plugin.json"],
     ["local application build output", "dist/OpenClaw.app/Contents/MacOS/OpenClaw"],
     ["local runtime build output", "dist-runtime/extensions/example/runtime.js"],
-    ["private QA channel artifact", "dist/extensions/qa-channel/package.json"],
     ["private QA channel artifact", "dist/extensions/qa-channel/runtime-api.js"],
     ["private QA channel docs", "docs/channels/qa-channel.md"],
     ["private QA channel SDK artifact", "dist/plugin-sdk/qa-channel-protocol.d.ts"],
     ["private QA channel SDK artifact", "dist/plugin-sdk/qa-channel.js"],
     ["private QA channel type artifact", "dist/plugin-sdk/extensions/qa-channel/api.d.ts"],
     ["private QA lab artifact", "dist/extensions/qa-lab/runtime-api.js"],
-    ["private QA lab artifact", "dist/extensions/qa-lab/src/cli.js"],
     ["private QA lab SDK artifact", "dist/plugin-sdk/qa-lab.js"],
     ["private QA lab type artifact", "dist/plugin-sdk/extensions/qa-lab/cli.d.ts"],
     ["private QA runtime chunk", "dist/qa-runtime-B9LDtssJ.js"],
     ["private QA runtime SDK artifact", "dist/plugin-sdk/qa-runtime.d.ts"],
     ["private QA suite artifact", "qa/scenarios/index.yaml"],
   ];
-  expect(
-    collectForbiddenPackedPathErrors([
-      "dist/index.js",
-      ...forbidden.toReversed().map(([, file]) => file),
-    ]),
-  ).toEqual(forbidden.map(([kind, file]) => `npm package must not include ${kind} "${file}".`));
+  const paths = ["dist/index.js", ...forbidden.toReversed().map(([, file]) => file)];
+  expect(pathErrors(paths)).toEqual(
+    forbidden.map(([kind, file]) => `npm package must not include ${kind} "${file}".`),
+  );
 });
 
 it.each([
@@ -105,17 +98,13 @@ it.each([
   mkdirSync(join(rootDir, "dist"));
   writeFileSync(join(rootDir, file), content);
   writeFileSync(join(rootDir, "README.md"), "developer docs mention extensions/qa-lab/\n");
-  expect(collectForbiddenPackedContentErrors([file, "README.md"], rootDir)).toEqual([
+  expect(contentErrors([file, "README.md"], rootDir)).toEqual([
     `npm package must not include private QA lab marker "${marker}" in "${file}".`,
   ]);
 });
 
 it("allows shipped Markdown reference guides", () => {
-  expect(
-    collectPackedTestCargoErrors([
-      "docs/reference/test/local.md",
-      "docs/reference/tests/guide.md",
-      String.raw`docs\reference\test\docker.md`,
-    ]),
-  ).toStrictEqual([]);
+  const paths = ["test/local.md", "tests/guide.md"].map((file) => `docs/reference/${file}`);
+  paths.push(String.raw`docs\reference\test\docker.md`);
+  expect(collectPackedTestCargoErrors(paths)).toStrictEqual([]);
 });

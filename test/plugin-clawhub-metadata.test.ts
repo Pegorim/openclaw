@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import { resolveNpmJsonEntries } from "../scripts/lib/npm-json-output.mts";
 import { withAugmentedPluginNpmManifestForPackage } from "../scripts/lib/plugin-npm-package-manifest.mts";
@@ -33,11 +34,11 @@ function fixture({
   writeJsonFile(join(packageDir, "openclaw.plugin.json"), manifest);
   writeJsonFile(join(packageDir, "package.json"), packageJson);
   writeFileSync(join(packageDir, "index.js"), "module.exports = 'frozen runtime';\n");
-  writeJsonFile(join(clawhubMetadataDir, "package.json"), {
-    ...packageJson,
-    version: "2026.9.3",
-  });
-  writeJsonFile(join(clawhubMetadataDir, "openclaw.plugin.json"), {
+  const setMetadata = (value: Record<string, unknown>, name = "@openclaw/demo") => {
+    writeJsonFile(join(clawhubMetadataDir, "package.json"), { name, version: "2026.9.3" });
+    writeJsonFile(join(clawhubMetadataDir, "openclaw.plugin.json"), { id: "demo", ...value });
+  };
+  setMetadata({
     ...manifest,
     categories: metadataCategories,
     description: "Tooling description must not ship",
@@ -50,7 +51,7 @@ function fixture({
     expect(existsSync(staged)).toBe(false);
     expectUnchanged();
   };
-  return { repoRoot, packageDir, clawhubMetadataDir, manifest, expectUnchanged, expectCleaned };
+  return { repoRoot, packageDir, setMetadata, manifest, expectUnchanged, expectCleaned };
 }
 
 function pack(packageDir: string, destination: string) {
@@ -66,12 +67,7 @@ function pack(packageDir: string, destination: string) {
   });
   expect(result.status, result.stderr).toBe(0);
   const [packed] = resolveNpmJsonEntries(JSON.parse(result.stdout));
-  if (
-    !packed ||
-    typeof packed !== "object" ||
-    !("filename" in packed) ||
-    typeof packed.filename !== "string"
-  ) {
+  if (!isRecord(packed) || typeof packed.filename !== "string") {
     throw new Error("npm pack returned no artifact");
   }
   return inspectPackageTarballBytes(readFileSync(join(destination, packed.filename)));
@@ -123,12 +119,7 @@ it.each<[string, { id?: string; categories?: string[] }, string?, string?]>([
   "rejects %s before invoking the packer",
   (_label, manifest, error = "exactly one supported", packageName = "@openclaw/demo") => {
     const input = fixture();
-    writeJsonFile(join(input.clawhubMetadataDir, "openclaw.plugin.json"), {
-      id: "demo",
-      categories: ["web"],
-      ...manifest,
-    });
-    writeJsonFile(join(input.clawhubMetadataDir, "package.json"), { name: packageName });
+    input.setMetadata({ categories: ["web"], ...manifest }, packageName);
     const packer = vi.fn();
     expect(() => withAugmentedPluginNpmManifestForPackage(input, packer)).toThrow(error);
     expect(packer).not.toHaveBeenCalled();
@@ -138,10 +129,7 @@ it.each<[string, { id?: string; categories?: string[] }, string?, string?]>([
 
 it("accepts the shared runtime category and removes isolated staging after pack failure", () => {
   const input = fixture();
-  writeJsonFile(join(input.clawhubMetadataDir, "openclaw.plugin.json"), {
-    id: "demo",
-    categories: ["runtime"],
-  });
+  input.setMetadata({ categories: ["runtime"] });
   let staged = "";
   expect(() =>
     withAugmentedPluginNpmManifestForPackage(input, ({ packageDir, manifest }) => {
