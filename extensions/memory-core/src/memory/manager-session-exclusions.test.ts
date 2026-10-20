@@ -20,28 +20,23 @@ describe("memory session candidate exclusions", () => {
       const schema = ensureMemoryIndexSchema({ db, cacheEnabled: false, ftsEnabled: true });
       expect(schema.ftsAvailable, schema.ftsError).toBe(true);
       const excludedPath = "sessions/a/recall.jsonl";
+      const makeRow = (
+        id: string,
+        source: "memory" | "sessions",
+        text: string,
+        vector: number[],
+        path = excludedPath,
+      ) => ({ id, path, source, text, vector });
       const rows = [
-        {
-          id: "helper",
-          path: excludedPath,
-          source: "sessions" as const,
-          text: "recall",
-          vector: [1, 0],
-        },
-        {
-          id: "memory",
-          path: excludedPath,
-          source: "memory" as const,
-          text: "recall lunch",
-          vector: [0.8, 0.6],
-        },
-        {
-          id: "ordinary",
-          path: "sessions/z/recall.jsonl",
-          source: "sessions" as const,
-          text: "recall lunch tomorrow",
-          vector: [0.9, 0.4],
-        },
+        makeRow("helper", "sessions", "recall", [1, 0]),
+        makeRow("memory", "memory", "recall lunch", [0.8, 0.6]),
+        makeRow(
+          "ordinary",
+          "sessions",
+          "recall lunch tomorrow",
+          [0.9, 0.4],
+          "sessions/z/recall.jsonl",
+        ),
       ];
       for (const row of rows) {
         insertKeywordFixture(db, row);
@@ -66,6 +61,14 @@ describe("memory session candidate exclusions", () => {
         snippetMaxChars: 80,
         sourceFilter,
       };
+      const vector = {
+        db,
+        sourceFilter,
+        providerModel: "mock-embed",
+        queryVec: [1, 0],
+        limit: 2,
+        snippetMaxChars: 80,
+      };
       let results: Array<{ id: string }>;
       if (mode === "path") {
         results = await searchPathKeyword({
@@ -83,14 +86,7 @@ describe("memory session candidate exclusions", () => {
         expect(result.path.error).toBeUndefined();
         results = result.body.rows;
       } else if (mode === "vector-scan") {
-        results = await searchChunksByEmbedding({
-          db,
-          sourceFilter,
-          providerModel: "mock-embed",
-          queryVec: [1, 0],
-          limit: 2,
-          snippetMaxChars: 80,
-        });
+        results = await searchChunksByEmbedding(vector);
       } else {
         const loaded = await loadSqliteVecExtension({ db });
         expect(loaded.ok, loaded.error).toBe(true);
@@ -104,10 +100,8 @@ describe("memory session candidate exclusions", () => {
           insert.run(row.id, vectorToBlob(row.vector));
         }
         const result = await runVectorKnnQuery(db, {
+          ...vector,
           providerModels: ["mock-embed"],
-          queryVec: [1, 0],
-          limit: 2,
-          snippetMaxChars: 80,
           sourceFilter: buildMemorySourceFilter("c", ["memory", "sessions"], excludedPaths),
         });
         expect(result.fallbackScanRequired).toBe(false);

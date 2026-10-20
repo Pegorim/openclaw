@@ -15,27 +15,35 @@ describe("memory search reindex backoff", () => {
     closeAllMemorySearchManagers,
   });
 
+  const oldChunking =
+    "UPDATE memory_index_meta SET value = json_set(value, '$.chunkingVersion', 0) WHERE key = 'memory_index_meta_v1'";
+  async function baseline(provider = "openai") {
+    const manager = await fixture.getPersistentManager(
+      fixture.createConfig({ provider, sources: ["memory"], minScore: 0, cacheEnabled: false }),
+    );
+    await manager.sync({ reason: "baseline", force: true });
+    return manager;
+  }
+  function clock() {
+    const time = { now: Date.now() };
+    vi.spyOn(Date, "now").mockImplementation(() => time.now);
+    return time;
+  }
+  function failEmbedding(message: string) {
+    const embedding = vi.fn(async () => {});
+    fixture.provider.beforeEmbedBatch = embedding;
+    fixture.provider.embedBatchPermanentFailure = new Error(message);
+    return embedding;
+  }
+
   it.each(["openai", "auto"])(
     "keeps failed rebuilds on one retry schedule (%s)",
     async (provider) => {
-      const manager = await fixture.getPersistentManager(
-        fixture.createConfig({
-          provider,
-          sources: ["memory"],
-          minScore: 0,
-          cacheEnabled: false,
-        }),
-      );
-      await manager.sync({ reason: "baseline", force: true });
+      const manager = await baseline(provider);
       const fields = manager as unknown as { awaitManagerIdle(): Promise<void> };
-      memoryIndexFixtureWriter(manager).exec(
-        "UPDATE memory_index_meta SET value = json_set(value, '$.chunkingVersion', 0) WHERE key = 'memory_index_meta_v1'",
-      );
-      let now = Date.now();
-      vi.spyOn(Date, "now").mockImplementation(() => now);
-      const embedding = vi.fn(async () => {});
-      fixture.provider.beforeEmbedBatch = embedding;
-      fixture.provider.embedBatchPermanentFailure = new Error("full rebuild failed");
+      memoryIndexFixtureWriter(manager).exec(oldChunking);
+      const time = clock();
+      const embedding = failEmbedding("full rebuild failed");
       await expect(manager.sync({ force: true })).rejects.toThrow("full rebuild failed");
       expect(embedding).toHaveBeenCalledTimes(1);
       const searchPublished = async () => {
@@ -52,22 +60,22 @@ describe("memory search reindex backoff", () => {
         expect(manager.status().lastSyncError).toContain(
           provider === "auto" ? "Memory sync aborted" : "full rebuild failed",
         );
-        now += delay - 1;
+        time.now += delay - 1;
         await searchPublished();
         expect(embedding).toHaveBeenCalledTimes(attempts);
-        now += 1;
+        time.now += 1;
         await searchPublished();
         expect(embedding).toHaveBeenCalledTimes(attempts + 1);
       }
 
       fixture.provider.embedBatchPermanentFailure = null;
-      now += 1_800_000;
+      time.now += 1_800_000;
       await searchPublished();
       expect(manager.status().lastSyncError).toBeUndefined();
       fixture.provider.embedBatchPermanentFailure = new Error("next rebuild failed");
       await expect(manager.sync({ force: true })).rejects.toThrow("next rebuild failed");
       const attempts = embedding.mock.calls.length;
-      now += 30_000;
+      time.now += 30_000;
       await searchPublished();
       expect(embedding).toHaveBeenCalledTimes(attempts + 1);
     },
@@ -76,35 +84,24 @@ describe("memory search reindex backoff", () => {
   it.each(["missing", "older chunking"])(
     "cools down %s identity repair while preserving explicit CLI repair",
     async (identity) => {
-      const manager = await fixture.getPersistentManager(
-        fixture.createConfig({
-          provider: "openai",
-          sources: ["memory"],
-          minScore: 0,
-          cacheEnabled: false,
-        }),
-      );
-      await manager.sync({ reason: "baseline", force: true });
+      const manager = await baseline();
       memoryIndexFixtureWriter(manager).exec(
         identity === "missing"
           ? "DELETE FROM memory_index_meta WHERE key = 'memory_index_meta_v1'"
-          : "UPDATE memory_index_meta SET value = json_set(value, '$.chunkingVersion', 0) WHERE key = 'memory_index_meta_v1'",
+          : oldChunking,
       );
-      let now = Date.now();
-      vi.spyOn(Date, "now").mockImplementation(() => now);
-      const embedding = vi.fn(async () => {});
-      fixture.provider.beforeEmbedBatch = embedding;
-      fixture.provider.embedBatchPermanentFailure = new Error("identity rebuild failed");
+      const time = clock();
+      const embedding = failEmbedding("identity rebuild failed");
       await manager.search("zebra");
       expect(embedding).toHaveBeenCalledTimes(1);
       await manager.search("zebra");
       expect(embedding).toHaveBeenCalledTimes(1);
       expect(manager.status().lastSyncError).toContain("identity rebuild failed");
 
-      now += 29_000;
+      time.now += 29_000;
       await expect(manager.sync({ reason: "cli" })).rejects.toThrow("identity rebuild failed");
       expect(embedding).toHaveBeenCalledTimes(2);
-      now += 1_000;
+      time.now += 1_000;
       await manager.search("zebra");
       expect(embedding).toHaveBeenCalledTimes(2);
 
@@ -133,13 +130,14 @@ describe("memory search reindex backoff", () => {
         "cli",
       );
       await manager.sync({ reason: "baseline", force: true });
-      await fixture.seedSessionTranscript({
-        sessionId,
-        sessionKey,
-        messages: [{ role: "user", timestamp: 1, content: "Amethyst queue marker." }],
-      });
-      let now = Date.now();
-      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const seed = (timestamp: number, content: string) =>
+        fixture.seedSessionTranscript({
+          sessionId,
+          sessionKey,
+          messages: [{ role: "user", timestamp, content }],
+        });
+      await seed(1, "Amethyst queue marker.");
+      const time = clock();
       const started = createDeferred<void>();
       const release = createDeferred<void>();
       fixture.provider.beforeEmbedBatch = async () => {
@@ -166,15 +164,11 @@ describe("memory search reindex backoff", () => {
       expect(manager.status().lastSyncError).toContain("queued rebuild failed");
       const embedding = vi.fn(async () => {});
       fixture.provider.beforeEmbedBatch = embedding;
-      await fixture.seedSessionTranscript({
-        sessionId,
-        sessionKey,
-        messages: [{ role: "user", timestamp: 2, content: "Jade pending marker." }],
-      });
+      await seed(2, "Jade pending marker.");
       // Scheduled catch-up owns transcript retries; search only reads the published index.
       await manager.sync({ reason: "session-startup-catchup" });
       expect(embedding).not.toHaveBeenCalled();
-      now += 30_000;
+      time.now += 30_000;
       await manager.sync({ reason: "session-startup-catchup" });
       expect(embedding).toHaveBeenCalledTimes(1);
       expect(manager.status().lastSyncError).toBeUndefined();

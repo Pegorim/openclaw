@@ -45,10 +45,8 @@ describe("memory session publication", () => {
       });
       const embeddingEntered = createDeferred<void>();
       fixture.provider.providerRuntimeBatchEntered = () => embeddingEntered.resolve();
-      let releaseEmbedding = () => {};
-      fixture.provider.providerRuntimeBatchGate = new Promise<void>((resolve) => {
-        releaseEmbedding = resolve;
-      });
+      const embeddingReleased = createDeferred<void>();
+      fixture.provider.providerRuntimeBatchGate = embeddingReleased.promise;
       const activeSync = manager.sync({
         reason: "forget-during-embedding",
         ...(force ? { force: true } : { sessions: [{ agentId: "main", sessionId, sessionKey }] }),
@@ -65,28 +63,11 @@ describe("memory session publication", () => {
         await forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] });
         const database = Reflect.get(manager, "db") as DatabaseSync;
         publicationSql = observeHostDataSql();
-        const cpuStart = process.threadCpuUsage();
-        const started = performance.now();
-        releaseEmbedding();
+        embeddingReleased.resolve();
         await expect(activeSync).rejects.toThrow("forgotten while memory indexing");
         const tombstoneSql = publicationSql.queries.filter((sql) =>
           /\bfrom\s+["`]?memory_session_tombstones\b/i.test(sql),
         );
-        if (process.env.OPENCLAW_MEMORY_RETRIEVAL_BENCH === "1") {
-          const cpu = process.threadCpuUsage(cpuStart);
-          console.log(
-            "MEMORY_PUBLICATION_BENCH",
-            JSON.stringify({
-              operation: `forgotten-${provider}-${force ? "full" : "targeted"}`,
-              cohortSqlObservations: tombstoneSql.length,
-              wholeMainSqlCalls: publicationSql.calls
-                .slice(1)
-                .reduce((total, call) => total + call.mock.calls.length, 0),
-              wholeMainCpuMs: (cpu.user + cpu.system) / 1000,
-              endToEndMs: performance.now() - started,
-            }),
-          );
-        }
         expect(tombstoneSql).toEqual([]);
         publicationSql.restore();
         publicationSql = undefined;
@@ -102,7 +83,7 @@ describe("memory session publication", () => {
         ).toEqual({ source: undefined, chunks: [], search: [] });
         expect(manager.status().dirty).toBe(false);
       } finally {
-        releaseEmbedding();
+        embeddingReleased.resolve();
         await activeSync.catch(() => undefined);
         publicationSql?.restore();
         fixture.provider.providerRuntimeBatchGate = null;

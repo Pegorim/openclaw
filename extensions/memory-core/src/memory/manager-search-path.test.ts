@@ -24,6 +24,12 @@ function searchPathKeywordFixture(
   });
 }
 
+function insertPaths(db: DatabaseSync, paths: Record<string, string>) {
+  for (const [id, path] of Object.entries(paths)) {
+    insertKeywordFixture(db, { id, path });
+  }
+}
+
 describe("searchPathKeyword", () => {
   const databases: DatabaseSync[] = [];
   afterEach(() => {
@@ -41,9 +47,11 @@ describe("searchPathKeyword", () => {
 
   it("keeps filename token matching strict so foo.md does not match unrelated .md paths", async () => {
     const db = createDb({ ftsTokenizer: "unicode61" });
-    insertKeywordFixture(db, { id: "target", path: "memory/notes/foo.md" });
-    insertKeywordFixture(db, { id: "other-1", path: "memory/notes/bar.md" });
-    insertKeywordFixture(db, { id: "other-2", path: "memory/notes/baz.md" });
+    insertPaths(db, {
+      target: "memory/notes/foo.md",
+      "other-1": "memory/notes/bar.md",
+      "other-2": "memory/notes/baz.md",
+    });
 
     const results = await searchPathKeywordFixture(db, "foo.md", { limit: 10 });
 
@@ -148,25 +156,12 @@ describe("searchPathKeyword", () => {
 
   it("applies short CJK trigram substring matching to the path table", async () => {
     const db = createDb({ ftsTokenizer: "trigram" });
-    insertKeywordFixture(db, {
-      id: "cjk-path",
-      path: "memory/成语-notes.md",
-    });
-    insertKeywordFixture(db, {
-      id: "cjk-exact",
-      path: "memory/成语.md",
-    });
-    insertKeywordFixture(db, {
-      id: "readme-exact",
-      path: "memory/README.md",
-    });
-    insertKeywordFixture(db, {
-      id: "normalized-exact",
-      path: "memory/Cafe\u0301.md",
-    });
-    insertKeywordFixture(db, {
-      id: "tokenless-exact",
-      path: "memory/🧠.md",
+    insertPaths(db, {
+      "cjk-path": "memory/成语-notes.md",
+      "cjk-exact": "memory/成语.md",
+      "readme-exact": "memory/README.md",
+      "normalized-exact": "memory/Cafe\u0301.md",
+      "tokenless-exact": "memory/🧠.md",
     });
 
     const results = await searchPathKeywordFixture(db, "成语", {
@@ -175,26 +170,21 @@ describe("searchPathKeyword", () => {
     });
 
     expect(results.map((entry) => entry.id)).toEqual(["cjk-exact", "cjk-path"]);
-    await expect(
-      searchPathKeywordFixture(db, "成语.md", { ftsTokenizer: "trigram" }),
-    ).resolves.toMatchObject([{ id: "cjk-exact", exactPathSpecificity: 2 }]);
-    await expect(
-      searchPathKeywordFixture(db, "README.md", { ftsTokenizer: "trigram" }),
-    ).resolves.toMatchObject([{ id: "readme-exact", exactPathSpecificity: 2 }]);
-    await expect(
-      searchPathKeywordFixture(db, "CAFÉ", { ftsTokenizer: "trigram" }),
-    ).resolves.toMatchObject([{ id: "normalized-exact", exactPathSpecificity: 1 }]);
-    await expect(
-      searchPathKeywordFixture(db, "🧠", { ftsTokenizer: "trigram" }),
-    ).resolves.toMatchObject([{ id: "tokenless-exact", exactPathSpecificity: 1 }]);
+    for (const [query, id, exactPathSpecificity] of [
+      ["成语.md", "cjk-exact", 2],
+      ["README.md", "readme-exact", 2],
+      ["CAFÉ", "normalized-exact", 1],
+      ["🧠", "tokenless-exact", 1],
+    ] as const) {
+      await expect(
+        searchPathKeywordFixture(db, query, { ftsTokenizer: "trigram" }),
+      ).resolves.toMatchObject([{ id, exactPathSpecificity }]);
+    }
   });
 
   it("bridges NFC trigram queries to partial NFD path spellings", async () => {
     const db = createDb({ ftsTokenizer: "trigram" });
-    insertKeywordFixture(db, {
-      id: "normalized-partial",
-      path: "memory/Cafe\u0301-notes.md",
-    });
+    insertPaths(db, { "normalized-partial": "memory/Cafe\u0301-notes.md" });
     const search = (query: string) =>
       searchPathKeywordFixture(db, query, {
         ftsTokenizer: "trigram",
@@ -209,10 +199,7 @@ describe("searchPathKeyword", () => {
 
   it("matches partial Unicode path text with the default unicode61 tokenizer", async () => {
     const db = createDb();
-    insertKeywordFixture(db, {
-      id: "unicode61-partial",
-      path: "memory/Café.md",
-    });
+    insertPaths(db, { "unicode61-partial": "memory/Café.md" });
 
     const search = (query: string) => searchPathKeywordFixture(db, query);
 
@@ -228,10 +215,7 @@ describe("searchPathKeyword", () => {
     const db = createDb();
     for (let index = 0; index < 1_000; index += 1) {
       const path = `memory/duplicates/${index.toString().padStart(3, "0")}/README.md`;
-      insertKeywordFixture(db, {
-        id: `duplicate-${index}`,
-        path,
-      });
+      insertKeywordFixture(db, { id: `duplicate-${index}`, path });
     }
     for (let index = 0; index < 6; index += 1) {
       insertKeywordFixture(db, {
