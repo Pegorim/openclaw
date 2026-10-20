@@ -32,6 +32,23 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       (call) => (!method || call.method === method) && String(call.fields.text).includes(text),
     );
 
+  type Scenario = NonNullable<Parameters<typeof dispatchProgressTurn>[1]>;
+  function runTurn(
+    events: Parameters<typeof dispatchProgressTurn>[0],
+    scenario: Partial<Scenario>,
+  ) {
+    return dispatchProgressTurn(events, { mode: "partial", toolProgress: false, ...scenario });
+  }
+  function tool(
+    options: Parameters<typeof emitToolStart>[0],
+    name: string,
+    toolCallId: string,
+    phase: "start" | "update" = "start",
+    args?: Record<string, unknown>,
+  ) {
+    return emitToolStart(options, { name, toolCallId, phase, ...(args ? { args } : {}) });
+  }
+
   it.each([
     ["partial", ""],
     ["block", ""],
@@ -43,9 +60,8 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       const first = "This answer starts here and has enough text to preview. ";
       const chunk = "The next sentence belongs to the same answer. ";
       const finalText = "The authoritative final replaces the streamed draft.";
-      await dispatchProgressTurn(async () => undefined, {
+      await runTurn(async () => undefined, {
         mode,
-        toolProgress: false,
         cfg: { messages: { responsePrefix: prefix.trimEnd() } },
         producer: async ({ dispatcher }) => {
           dispatcher.sendBlockReply({ text: first, textMode: "delta" });
@@ -72,9 +88,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
   it("preserves accumulated ACP answer chunks when a final status notice follows", async () => {
     const first = "First ACP answer chunk with enough text for a preview. ";
     const second = "Second ACP answer chunk completes the answer.";
-    await dispatchProgressTurn(async () => undefined, {
-      mode: "partial",
-      toolProgress: false,
+    await runTurn(async () => undefined, {
       producer: async ({ dispatcher }) => {
         dispatcher.sendBlockReply({ text: first, textMode: "delta" });
         dispatcher.sendBlockReply({ text: second, textMode: "delta" });
@@ -98,14 +112,14 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       }
       return undefined;
     };
-    await dispatchProgressTurn(
+    await runTurn(
       async (options) => {
         await options?.onPartialReply?.({ text: initial });
         await waitForBotApiCall((call) => call.method === "sendMessage");
         await options?.onPartialReply?.({ text: updated });
         await waitForBotApiCall((call) => call.method === "editMessageText");
       },
-      { mode: "partial", toolProgress: false, finalReply: { text: finalText } },
+      { finalReply: { text: finalText } },
     );
     expect(rejected).toBe(true);
     expect(acceptedCalls.filter((call) => call.method === "sendMessage")).toHaveLength(1);
@@ -124,7 +138,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       }),
     });
     initializeGlobalHookRunner(registry);
-    await dispatchProgressTurn(
+    await runTurn(
       async (options, channelOptions) => {
         // This is the channel override consumed by the reply runner, whose
         // default otherwise disables completed-block delivery.
@@ -137,7 +151,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         );
         expect([...visibleMessages.values()]).toEqual(["Checking filtered while work continues."]);
       },
-      { mode, toolProgress: false, finalReply: { text: "Finished fixture-secret." } },
+      { mode, finalReply: { text: "Finished fixture-secret." } },
     );
     expect([...visibleMessages.values()]).toEqual([
       "Checking filtered while work continues.",
@@ -150,13 +164,12 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       ["Opted-out", { telegramCfg: { streaming: { mode, block: { enabled: false } } } }],
       ["Global-off", { cfg: { agents: { defaults: { blockStreamingDefault: "off" } } } }],
     ] as const) {
-      await dispatchProgressTurn(
+      await runTurn(
         async (_options, channelOptions) => {
           expect(channelOptions?.disableBlockStreaming).toBe(true);
         },
         {
           mode,
-          toolProgress: false,
           ...config,
           finalReply: { text: `${label} final fixture-secret.` },
         },
@@ -197,16 +210,13 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       });
     }
     initializeGlobalHookRunner(registry);
-    const dispatched = dispatchProgressTurn(
+    const dispatched = runTurn(
       async (options) => {
         await options?.onPartialReply?.({
           text: "Pre-hook answer containing fixture-secret-answer",
         });
-        await emitToolStart(options, {
-          name: "exec",
-          phase: "start",
-          toolCallId: "private-tool",
-          args: { command: "echo fixture-secret-command" },
+        await tool(options, "exec", "private-tool", "start", {
+          command: "echo fixture-secret-command",
         });
         await options?.onReasoningStream?.({
           text: "<think>Independent reasoning containing fixture-secret-reasoning</think>",
@@ -241,7 +251,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     const context = http.createContext();
     const finalText = "A".repeat(600) + "B".repeat(600) + "C".repeat(600);
     let preview: Array<[number, string]> = [];
-    await dispatchProgressTurn(
+    await runTurn(
       async (options) => {
         await options?.onPartialReply?.({ text: finalText });
         await waitForBotApiCall((call) => call.method === "sendMessage");
@@ -251,7 +261,6 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         mode,
         context,
         replyToMode: "all",
-        toolProgress: false,
         cfg: { agents: { defaults: { blockStreamingDefault: "on" } } },
         telegramCfg: {
           streaming: {
@@ -295,7 +304,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       }
       return undefined;
     };
-    await dispatchProgressTurn(
+    await runTurn(
       async () => {
         await waitForBotApiCall((call) => call.method === "sendChatAction");
         await http.waitForTypingSend();
@@ -314,7 +323,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         // SQLite workers use wall time, not this test's simulated typing clock.
         vi.setSystemTime(vi.getRealSystemTime());
       },
-      { mode: "off", toolProgress: false, finalReply: { text: "Long-running work complete." } },
+      { mode: "off", finalReply: { text: "Long-running work complete." } },
     );
     const settledTypingCount = acceptedTypingAt.length;
     await vi.advanceTimersByTimeAsync(8_000);
@@ -363,7 +372,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
             ? { error_code: 400, description: "Bad Request: reasoning rejected" }
             : undefined;
       }
-      await dispatchProgressTurn(
+      await runTurn(
         async (options) => {
           if (branch === "immediate") {
             await options?.onPartialReply?.({
@@ -391,7 +400,6 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         },
         {
           mode: branch === "control-only" ? "off" : "partial",
-          toolProgress: false,
           cfg: {
             agents: { defaults: { reasoningDefault: branch === "buffered" ? "stream" : "off" } },
           },
@@ -429,100 +437,83 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     },
   );
 
-  it("retires a lazy partial queued immediately before a quiet tool start", async () => {
-    const preamble = "I will inspect the files before answering.";
-    const finalText = "The provider failed. Please try again.";
-    await dispatchProgressTurn(
-      async (options) => {
-        // Core preserves callback start order, not completion order. The partial
-        // is still queued when the tool callback starts and must retire first.
-        const partial = options?.onPartialReply?.({ text: preamble, delta: preamble });
-        const tool = emitToolStart(options, { name: "exec", phase: "start", toolCallId: "first" });
-        await Promise.all([partial, tool]);
-      },
-      { mode: "partial", toolProgress: false, finalReply: { text: finalText, isError: true } },
-    );
-    await expect.poll(() => [...visibleMessages.values()], { timeout: 5_000 }).toEqual([finalText]);
-  });
-
-  it("preserves an interrupted answer when an existing tool only updates", async () => {
+  it.each([
+    ["retires a lazy partial queued immediately before a quiet tool start", false],
+    ["preserves an interrupted answer when an existing tool only updates", true],
+  ] as const)("%s", async (_name, update) => {
     const answer = "The first result is ready, and the remaining work is still running.";
     const failure = "The provider failed. Please try again.";
-    await dispatchProgressTurn(
+    await runTurn(
       async (options) => {
-        await emitToolStart(options, { name: "exec", phase: "start", toolCallId: "first" });
-        await options?.onAssistantMessageStart?.();
-        await options?.onPartialReply?.({ text: answer, delta: answer });
-        await waitForText(answer, "sendMessage");
-        await emitToolStart(options, { name: "exec", phase: "update", toolCallId: "first" });
+        if (update) {
+          await tool(options, "exec", "first");
+          await options?.onAssistantMessageStart?.();
+          await options?.onPartialReply?.({ text: answer, delta: answer });
+          await waitForText(answer, "sendMessage");
+          await tool(options, "exec", "first", "update");
+        } else {
+          // Callback start order matters: the queued partial must retire before the tool.
+          const partial = options?.onPartialReply?.({ text: answer, delta: answer });
+          const started = tool(options, "exec", "first");
+          await Promise.all([partial, started]);
+        }
       },
-      { mode: "partial", toolProgress: false, finalReply: { text: failure, isError: true } },
+      { finalReply: { text: failure, isError: true } },
     );
-    expect([...visibleMessages.values()]).toEqual([`${answer}\n\n${failure}`]);
+    if (update) {
+      expect(texts()).toEqual([`${answer}\n\n${failure}`]);
+    } else {
+      await expect.poll(texts, { timeout: 5_000 }).toEqual([failure]);
+    }
   });
 
-  it("preserves distinct indexed assistant blocks as separate preview messages", async () => {
+  it.each([
+    ["preserves distinct indexed assistant blocks as separate preview messages", false],
+    ["retires a skipped indexed block preview before the next assistant answer", true],
+  ] as const)("%s", async (_name, skip) => {
+    const firstText = "The first assistant answer reports the findings from site A.";
+    const answer = "The second assistant answer reports different findings from site B.";
     const first = setReplyPayloadMetadata(
-      { text: "The first assistant answer reports the findings from site A." },
-      { assistantMessageIndex: 0 },
+      { text: skip ? "NO_REPLY" : firstText },
+      { assistantMessageIndex: 0, ...(skip ? { silentReply: true } : {}) },
     );
-    const second = setReplyPayloadMetadata(
-      { text: "The second assistant answer reports different findings from site B." },
-      { assistantMessageIndex: 1 },
-    );
-    let firstPreviewId: number | undefined;
-    await dispatchProgressTurn(async () => undefined, {
-      mode: "partial",
-      toolProgress: false,
+    const second = setReplyPayloadMetadata({ text: answer }, { assistantMessageIndex: 1 });
+    let previewId: number | undefined;
+    await runTurn(async () => undefined, {
       producer: async ({ dispatcher, replyOptions }) => {
-        await replyOptions?.onBlockReplyQueued?.(first, { assistantMessageIndex: 0 });
-        await replyOptions?.onBlockReplyQueued?.(second, { assistantMessageIndex: 1 });
-        dispatcher.sendBlockReply(first);
-        await waitForText(first.text!, "sendMessage");
-        firstPreviewId = [...visibleMessages.keys()][0];
-        dispatcher.sendBlockReply(second);
-        dispatcher.sendFinalReply(second);
+        if (skip) {
+          await replyOptions?.onPartialReply?.({ text: firstText });
+          await waitForText(firstText, "sendMessage");
+          previewId = [...visibleMessages.keys()][0];
+          await replyOptions?.onBlockReplyQueued?.(first, { assistantMessageIndex: 0 });
+          await replyOptions?.onAssistantMessageStart?.();
+          dispatcher.sendBlockReply(first);
+          await replyOptions?.onPartialReply?.({ text: answer });
+        } else {
+          await replyOptions?.onBlockReplyQueued?.(first, { assistantMessageIndex: 0 });
+          await replyOptions?.onBlockReplyQueued?.(second, { assistantMessageIndex: 1 });
+          dispatcher.sendBlockReply(first);
+          await waitForText(firstText, "sendMessage");
+          previewId = [...visibleMessages.keys()][0];
+          dispatcher.sendBlockReply(second);
+        }
+        dispatcher.sendFinalReply(skip ? { text: answer } : second);
         const counts = dispatcher.getQueuedCounts();
         return { queuedFinal: counts.final > 0, counts };
       },
     });
-    expect([...visibleMessages.values()]).toEqual([first.text, second.text]);
-    expect(visibleMessages.get(firstPreviewId!)).toBe(first.text);
-    expect(sentTexts()).toEqual([first.text, second.text]);
-  });
-
-  it("retires a skipped indexed block preview before the next assistant answer", async () => {
-    const discarded = "An unaccepted preview from the assistant that chose not to reply.";
-    const answer = "The next assistant supplies the answer that must remain visible.";
-    const skipped = setReplyPayloadMetadata(
-      { text: "NO_REPLY" },
-      { assistantMessageIndex: 0, silentReply: true },
-    );
-    let discardedPreviewId: number | undefined;
-    await dispatchProgressTurn(async () => undefined, {
-      mode: "partial",
-      toolProgress: false,
-      producer: async ({ dispatcher, replyOptions }) => {
-        await replyOptions?.onPartialReply?.({ text: discarded });
-        await waitForText(discarded, "sendMessage");
-        discardedPreviewId = [...visibleMessages.keys()][0];
-        await replyOptions?.onBlockReplyQueued?.(skipped, { assistantMessageIndex: 0 });
-        await replyOptions?.onAssistantMessageStart?.();
-        dispatcher.sendBlockReply(skipped);
-        await replyOptions?.onPartialReply?.({ text: answer });
-        dispatcher.sendFinalReply({ text: answer });
-        const counts = dispatcher.getQueuedCounts();
-        return { queuedFinal: counts.final > 0, counts };
-      },
-    });
-    expect([...visibleMessages.values()]).toEqual([answer]);
-    expect(visibleMessages.has(discardedPreviewId!)).toBe(false);
-    expect(
-      acceptedCalls
-        .filter((call) => call.method === "deleteMessage")
-        .map((call) => Number(call.fields.message_id)),
-    ).toEqual([discardedPreviewId]);
-    expect(sentTexts()).toEqual([discarded, answer]);
+    expect(texts()).toEqual(skip ? [answer] : [firstText, answer]);
+    expect(sentTexts()).toEqual([firstText, answer]);
+    if (skip) {
+      expect(visibleMessages.has(previewId!)).toBe(false);
+      expect(
+        acceptedCalls
+          .filter((call) => call.method === "deleteMessage")
+          .map((call) => Number(call.fields.message_id)),
+      ).toEqual([previewId]);
+    } else {
+      expect(visibleMessages.get(previewId!)).toBe(firstText);
+    }
   });
 
   it.each([false, true])(
@@ -542,7 +533,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         SessionKey: context.route.sessionKey,
         WasMentioned: true,
       });
-      await dispatchProgressTurn(
+      await runTurn(
         async (options) => {
           if (terminalFailure) {
             options?.onAgentRunTerminalOutcome?.("failed");
@@ -552,7 +543,6 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         {
           context,
           mode: "off",
-          toolProgress: false,
           cfg: { messages: { groupChat: { visibleReplies: "message_tool" } } },
           telegramCfg: { silentErrorReplies: true },
           suppressFailureFallback: true,
@@ -570,14 +560,9 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     },
   );
   it("preserves structured command detail against summaries with status privacy", async () => {
-    await dispatchProgressTurn(
+    await runTurn(
       async (options, channelOptions) => {
-        await emitToolStart(options, {
-          name: "exec",
-          phase: "start",
-          toolCallId: "exec-1",
-          args: { command: "echo fixture-private-token" },
-        });
+        await tool(options, "exec", "exec-1", "start", { command: "echo fixture-private-token" });
         await waitForContaining("Exec", "sendMessage");
         expect(
           await channelOptions?.onToolResult?.({
@@ -627,7 +612,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
   it.each(["progress", "off"] as const)(
     "reports tool-result acceptance without duplicate notices (%s)",
     async (mode) => {
-      await dispatchProgressTurn(
+      await runTurn(
         async (options, channelOptions) => {
           const beforeEmpty = calls.length;
           expect(await channelOptions?.onToolResult?.({ text: " \n " })).toBe(false);
@@ -655,11 +640,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
                 channelData: { openclawToolProgressId: "tool:dynamic-1" },
               }),
             ).toBe(true);
-            await emitToolStart(options, {
-              name: "agents_list",
-              phase: "start",
-              toolCallId: "dynamic-1",
-            });
+            await tool(options, "agents_list", "dynamic-1");
           }
           expect(
             await channelOptions?.onToolResult?.({
@@ -703,7 +684,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     async ({ verbose, mode, toolProgress, visible, preamble }) => {
       const diagnostic =
         verbose === "full" ? "fixture stdout line one\nfixture stdout line two" : "Exec";
-      await dispatchProgressTurn(
+      await runTurn(
         async (options) => {
           if (preamble) {
             await options?.onItemEvent?.({
@@ -713,7 +694,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
               progressText: "Inspecting the requested files",
             });
           }
-          await emitToolStart(options, { name: "exec", phase: "start", toolCallId: "stdout" });
+          await tool(options, "exec", "stdout");
           await options?.onToolResult?.({ text: diagnostic });
           if (mode === "progress") {
             await vi.advanceTimersByTimeAsync(2_000);

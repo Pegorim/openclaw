@@ -34,9 +34,7 @@ function sentMessage() {
 it("registers and dispatches session /dashboard separately from owner-only /controlui", async () => {
   const cfg: OpenClawConfig = {
     commands: { native: true, text: true },
-    channels: {
-      telegram: { dmPolicy: "open", allowFrom: ["*"], streaming: { mode: "off" } },
-    },
+    channels: { telegram: { dmPolicy: "open", allowFrom: ["*"], streaming: { mode: "off" } } },
   };
   const launchTickets = createTelegramMiniAppLaunchTickets();
   const runtime = getTelegramRuntime();
@@ -97,11 +95,7 @@ it("registers and dispatches session /dashboard separately from owner-only /cont
   ).toBe(true);
   expect(harness.replySpy).not.toHaveBeenCalled();
 
-  await bot.handleUpdate({
-    update_id: 1003,
-    message: commandMessage("/dashboard release health"),
-  });
-  // Session dashboard creation belongs to the shared reply command owner after native fall-through.
+  await bot.handleUpdate({ update_id: 1003, message: commandMessage("/dashboard release health") });
   expect(harness.replySpy).toHaveBeenCalledOnce();
   expect(harness.replySpy.mock.calls[0]?.[0]).toMatchObject({
     CommandSource: "native",

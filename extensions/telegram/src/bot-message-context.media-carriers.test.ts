@@ -1,17 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildTelegramMessageContextForTest } from "./bot-message-context.test-harness.js";
+import { buildTelegramMessageContextForTest as build } from "./bot-message-context.test-harness.js";
 
 const { vision } = vi.hoisted(() => ({ vision: vi.fn(async () => false) }));
+vi.mock("./sticker-vision.runtime.js", () => ({ resolveStickerVisionSupportRuntime: vision }));
 
-vi.mock("./sticker-vision.runtime.js", () => ({
-  resolveStickerVisionSupportRuntime: vision,
-}));
+const directChat = { id: 42, type: "private", first_name: "Ada" };
+const groupChat = { id: -1001, type: "supergroup", title: "Ops" };
+const sender = { id: 1, is_bot: false, first_name: "Ada" };
+const bot = { id: 7, is_bot: true, first_name: "Bot" };
+const stickerIds = { file_id: "sticker-1", file_unique_id: "sticker-u1" };
+const reply = (chat: { id: number; type: string }, media: Record<string, unknown>) => ({
+  message_id: 10,
+  date: 1_699_999_999,
+  chat,
+  from: bot,
+  ...media,
+});
 
 describe("buildTelegramMessageContext media carriers", () => {
   it("preserves direct conversation facts for policy admission after a topic-bound message", async () => {
-    const context = await buildTelegramMessageContextForTest({
+    const context = await build({
       message: {
-        chat: { id: 42, type: "private", first_name: "Ada" },
+        chat: directChat,
         from: { id: 42, is_bot: false, first_name: "Ada", username: "ada" },
         message_thread_id: 7,
         is_topic_message: true,
@@ -20,14 +30,11 @@ describe("buildTelegramMessageContext media carriers", () => {
       resolveTelegramGroupConfig: () => ({
         groupConfig: {
           tools: { deny: ["write"] },
-          toolsBySender: {
-            "channel:telegram:42": { deny: ["exec"] },
-          },
+          toolsBySender: { "channel:telegram:42": { deny: ["exec"] } },
         },
         topicConfig: { agentId: "support" },
       }),
     });
-
     expect(context?.ctxPayload).toMatchObject({
       ChatId: "42",
       ChatType: "direct",
@@ -38,11 +45,8 @@ describe("buildTelegramMessageContext media carriers", () => {
   });
 
   it("keeps immediate native sticker kind ahead of MIME and deeper reply media", async () => {
-    const context = await buildTelegramMessageContextForTest({
-      message: {
-        chat: { id: 42, type: "private", first_name: "Ada" },
-        text: "What was that?",
-      },
+    const context = await build({
+      message: { chat: directChat, text: "What was that?" },
       replyChain: [
         {
           messageId: "10",
@@ -54,7 +58,6 @@ describe("buildTelegramMessageContext media carriers", () => {
         { messageId: "9", sender: "Sam", mediaType: "document" },
       ],
     });
-
     expect(context?.ctxPayload.ReplyToBody).toBe("<media:sticker>");
     expect(context?.ctxPayload.Body).toContain("[Reply chain - nearest first]");
     expect(context?.ctxPayload.Body).toContain("<media:sticker>");
@@ -62,29 +65,23 @@ describe("buildTelegramMessageContext media carriers", () => {
   });
 
   it("keeps the native reply kind when a cached chain is filtered out", async () => {
-    const context = await buildTelegramMessageContextForTest({
+    const context = await build({
       message: {
-        chat: { id: -1001, type: "supergroup", title: "Ops" },
-        from: { id: 1, is_bot: false, first_name: "Ada" },
+        chat: groupChat,
+        from: sender,
         text: "What was that?",
-        reply_to_message: {
-          message_id: 10,
-          date: 1_699_999_999,
-          chat: { id: -1001, type: "supergroup", title: "Ops" },
-          from: { id: 1, is_bot: false, first_name: "Ada" },
+        reply_to_message: reply(groupChat, {
+          from: sender,
           photo: [{ file_id: "photo-1", file_unique_id: "photo-u1", width: 1, height: 1 }],
-        },
+        }),
       },
-      cfg: {
-        channels: { telegram: { groupPolicy: "allowlist", contextVisibility: "allowlist" } },
-      },
+      cfg: { channels: { telegram: { groupPolicy: "allowlist", contextVisibility: "allowlist" } } },
       resolveTelegramGroupConfig: () => ({
         groupConfig: { requireMention: false, allowFrom: ["1"], tools: { deny: ["exec"] } },
         topicConfig: undefined,
       }),
       replyChain: [{ messageId: "10", sender: "Hidden", senderId: "999", mediaType: "image" }],
     });
-
     expect(context?.ctxPayload.ConversationToolPolicy).toBeUndefined();
     expect(context?.ctxPayload.ReplyToBody).toBe("<media:image>");
     expect(context?.ctxPayload.media?.map((fact) => fact.kind)).toEqual(["image"]);
@@ -97,15 +94,11 @@ describe("buildTelegramMessageContext media carriers", () => {
     "preserves hydrated $contentType reply media and Telegram's selected quote",
     async ({ fileName, kind, contentType }) => {
       const mediaPath = `/tmp/openclaw/media/inbound/${fileName}`;
-      const context = await buildTelegramMessageContextForTest({
+      const context = await build({
         message: {
-          chat: { id: 42, type: "private", first_name: "Ada" },
+          chat: directChat,
           text: "What does it show?",
-          reply_to_message: {
-            message_id: 10,
-            date: 1_699_999_999,
-            chat: { id: 42, type: "private", first_name: "Ada" },
-            from: { id: 7, is_bot: true, first_name: "Bot" },
+          reply_to_message: reply(directChat, {
             caption: "Weekly chart",
             document: {
               file_id: "doc-1",
@@ -113,7 +106,7 @@ describe("buildTelegramMessageContext media carriers", () => {
               file_name: fileName,
               mime_type: contentType,
             },
-          },
+          }),
           quote: { text: "Weekly", position: 0 },
         },
         replyChain: [
@@ -128,7 +121,6 @@ describe("buildTelegramMessageContext media carriers", () => {
           },
         ],
       });
-
       expect(context?.ctxPayload.media).toEqual([
         expect.objectContaining({ path: mediaPath, kind, contentType }),
       ]);
@@ -142,104 +134,88 @@ describe("buildTelegramMessageContext media carriers", () => {
   );
 
   it("keeps mixed aggregate media out of command text and preserves voice modality", async () => {
-    const context = await buildTelegramMessageContextForTest({
+    const context = await build({
       message: {
-        chat: { id: -1001, type: "supergroup", title: "Ops" },
+        chat: groupChat,
         text: undefined,
         voice: { file_id: "audio-1", file_unique_id: "audio-u1", duration: 1 },
       },
       allMedia: [{ kind: "audio" }, { kind: "image" }, { kind: "document" }],
       historyLimit: 5,
     });
-
-    expect(context?.ctxPayload.RawBody).toBe("");
-    expect(context?.ctxPayload.BodyForAgent).toBe("");
-    expect(context?.ctxPayload.CommandBody).toBe("");
+    expect(context?.ctxPayload).toMatchObject({
+      RawBody: "",
+      BodyForAgent: "",
+      CommandBody: "",
+      SourceModality: "voice",
+    });
     expect(context?.ctxPayload.CommandSource).toBeUndefined();
     expect(context?.ctxPayload.media?.map((fact) => fact.kind)).toEqual([
       "audio",
       "image",
       "document",
     ]);
-    expect(context?.ctxPayload.SourceModality).toBe("voice");
   });
 
   it.each([
-    { is_animated: false, is_video: true, emoji: "😭", expected: "😭" },
-    { is_animated: true, is_video: false, emoji: undefined, expected: "<media:sticker>" },
-  ])(
-    "keeps an unavailable sticker meaningful to the agent: $expected ($is_video)",
-    async ({ is_animated, is_video, emoji, expected }) => {
-      const context = await buildTelegramMessageContextForTest({
+    [false, true, "😭", false, "😭"],
+    [true, false, undefined, false, "<media:sticker>"],
+    [false, false, undefined, true, "[Sticker] A waving sticker"],
+  ] as const)(
+    "keeps stickers meaningful without visual understanding (animated %s, video %s, emoji %s, cached %s)",
+    async (animated, video, emoji, cached, expected) => {
+      const context = await build({
         message: {
-          chat: { id: -1001, type: "supergroup", title: "Stickers" },
+          chat: { ...groupChat, id: cached ? -1002 : groupChat.id },
           text: undefined,
-          reply_to_message: {
-            message_id: 10,
-            date: 1_700_000_000,
-            chat: { id: -1001, type: "supergroup", title: "Stickers" },
-            from: { id: 7, is_bot: true, first_name: "Bot" },
-            text: "No Sunday-only tickets yet.",
-          },
+          ...(!cached && {
+            reply_to_message: reply(groupChat, { text: "No Sunday-only tickets yet." }),
+          }),
           sticker: {
-            file_id: "sticker-1",
-            file_unique_id: "sticker-u1",
+            ...stickerIds,
             type: "regular",
             width: 1,
             height: 1,
-            is_animated,
-            is_video,
+            is_animated: animated,
+            is_video: video,
             emoji,
           },
         },
-        allMedia: [{ kind: "sticker" }],
+        allMedia: cached
+          ? [
+              {
+                kind: "sticker",
+                path: "/tmp/sticker.webp",
+                contentType: "image/webp",
+                stickerMetadata: {
+                  fileId: stickerIds.file_id,
+                  fileUniqueId: stickerIds.file_unique_id,
+                  cachedDescription: "A waving sticker",
+                },
+              },
+            ]
+          : [{ kind: "sticker" }],
         resolveTelegramGroupConfig: () => ({
-          groupConfig: { requireMention: true },
+          groupConfig: { requireMention: !cached },
           topicConfig: undefined,
         }),
+        historyLimit: cached ? 5 : 0,
       });
-
       expect(context?.ctxPayload.BodyForAgent).toBe(expected);
-      expect(context?.ctxPayload.ReplyToBody).toBe("No Sunday-only tickets yet.");
-      expect(context?.ctxPayload.WasMentioned).toBe(true);
+      if (cached) {
+        expect(context?.ctxPayload.media).toEqual([
+          expect.objectContaining({ path: "/tmp/sticker.webp", contentType: "image/webp" }),
+        ]);
+        expect(context?.ctxPayload).toMatchObject({
+          StickerMediaIncluded: true,
+          SkipStickerMediaUnderstanding: true,
+        });
+      } else {
+        expect(context?.ctxPayload).toMatchObject({
+          ReplyToBody: "No Sunday-only tickets yet.",
+          WasMentioned: true,
+        });
+      }
     },
   );
-
-  it("uses the cached sticker description without visual understanding", async () => {
-    const context = await buildTelegramMessageContextForTest({
-      message: {
-        chat: { id: -1002, type: "supergroup", title: "Stickers" },
-        text: undefined,
-        sticker: {
-          file_id: "sticker-2",
-          file_unique_id: "sticker-u2",
-          type: "regular",
-          width: 1,
-          height: 1,
-          is_animated: false,
-          is_video: false,
-        },
-      },
-      allMedia: [
-        {
-          kind: "sticker",
-          path: "/tmp/sticker.webp",
-          contentType: "image/webp",
-          stickerMetadata: {
-            fileId: "sticker-2",
-            fileUniqueId: "sticker-u2",
-            cachedDescription: "A waving sticker",
-          },
-        },
-      ],
-      historyLimit: 5,
-    });
-
-    expect(context?.ctxPayload.BodyForAgent).toBe("[Sticker] A waving sticker");
-    expect(context?.ctxPayload.media).toEqual([
-      expect.objectContaining({ path: "/tmp/sticker.webp", contentType: "image/webp" }),
-    ]);
-    expect(context?.ctxPayload.StickerMediaIncluded).toBe(true);
-    expect(context?.ctxPayload.SkipStickerMediaUnderstanding).toBe(true);
-  });
 });

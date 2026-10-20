@@ -8,11 +8,7 @@ export function createConfiguredAcpTopicBinding(boundSessionKey: string) {
     parentConversationId: "-1001234567890",
   } as const;
   return {
-    spec: {
-      ...conversation,
-      agentId: "codex",
-      mode: "persistent",
-    },
+    spec: { ...conversation, agentId: "codex", mode: "persistent" },
     record: {
       bindingId: "config:acp:telegram:default:-1001234567890:topic:42",
       targetSessionKey: boundSessionKey,
@@ -50,14 +46,9 @@ export function createConfiguredBindingRoute(
           match: {
             channel: "telegram",
             accountId,
-            peer: {
-              kind: "group" as const,
-              id: conversationId,
-            },
+            peer: { kind: "group" as const, id: conversationId },
           },
-          acp: {
-            mode,
-          },
+          acp: { mode },
         },
         bindingConversationId: conversationId,
         target,

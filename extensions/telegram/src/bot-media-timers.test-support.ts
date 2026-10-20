@@ -8,24 +8,17 @@ export async function withTelegramGetFileRetryClock(
   error: string,
   dispatch: (getFile: () => Promise<never>) => Promise<void>,
 ) {
-  const retries = [
-    { admitted: createDeferred<void>(), delayMs: 1_000 },
-    { admitted: createDeferred<void>(), delayMs: 2_000 },
-  ];
+  const retries = [1_000, 2_000].map((delayMs) => ({ admitted: createDeferred<void>(), delayMs }));
   let attempt = 0;
-  let clockInstalled = false;
   const getFile = vi.fn(async () => {
-    if (!clockInstalled) {
+    if (attempt === 0) {
       // Admission stays native; the already-armed getFile deadline must still be cleared.
       vi.useFakeTimers({
         toFake: ["setTimeout", "clearTimeout"],
         shouldClearNativeTimers: true,
       });
-      clockInstalled = true;
     }
-    const retry = retries[attempt];
-    attempt += 1;
-    retry?.admitted.resolve();
+    retries[attempt++]?.admitted.resolve();
     throw new Error(error);
   });
   const handling = Promise.resolve().then(() => dispatch(getFile));
@@ -55,7 +48,7 @@ export async function withTelegramGetFileRetryClock(
   } finally {
     // The handler owns real state work after the last retry and before clock restoration.
     await settled;
-    if (clockInstalled) {
+    if (attempt > 0) {
       vi.useRealTimers();
     }
   }
@@ -64,8 +57,7 @@ export async function withTelegramGetFileRetryClock(
 export function holdTelegramMediaTimeouts(delayMs: number) {
   return vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
     const handle = scheduleTimeout(callback, delay, ...args);
-    // Only media deadlines are flushed manually; worker timers keep their
-    // native scheduling and handles, including ref/unref lifecycle methods.
+    // Hold media deadlines without changing native worker handles or ref/unref behavior.
     if (delay === delayMs) {
       cancelTimeout(handle);
     }
