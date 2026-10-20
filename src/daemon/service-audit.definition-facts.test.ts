@@ -45,15 +45,16 @@ beforeEach(() => {
   runtimePinStateDir = dirs.make("definition-facts-runtime-pin-");
 });
 
+type AuditOptions = Parameters<typeof inspectGatewayServiceConfig>[0];
 async function auditGatewayServiceConfig(
-  options: Parameters<typeof inspectGatewayServiceConfig>[0],
+  options: Omit<AuditOptions, "platform"> & { platform?: NodeJS.Platform },
 ) {
   const env = {
     ...options.env,
     OPENCLAW_STATE_DIR: options.env.OPENCLAW_STATE_DIR ?? runtimePinStateDir,
   };
   await seedCompletedRuntimePinMigration(env);
-  return inspectGatewayServiceConfig({ ...options, env });
+  return inspectGatewayServiceConfig({ platform: "linux", ...options, env });
 }
 
 const staleServiceEnvironment = {
@@ -126,7 +127,7 @@ it("audits missing KillMode separately from effective manager policy", async () 
     stdout:
       "LoadState=loaded\nAfter=network-online.target\nWants=network-online.target\nRestartUSec=5s\nKillMode=mixed\nTimeoutStopUSec=330s\n",
   });
-  const result = await auditGatewayServiceConfig({ ...fixture, platform: "linux" });
+  const result = await auditGatewayServiceConfig(fixture);
   expect(result.ok).toBe(true);
   expect(result.issues).toEqual([]);
   expect(result.definitionDrift).toEqual([
@@ -158,7 +159,6 @@ it.each(["drop-in-dependency", "description"])(
     );
     const result = await auditGatewayServiceConfig({
       ...fixture,
-      platform: "linux",
       ...(description ? { expectedCommand: fixture.command } : {}),
     });
     expect(result.definitionDrift).toContainEqual(
@@ -183,10 +183,7 @@ it.each(["other-source", "unreadable-drop-in"])(
       fixture.command.definitionPaths = [fixture.command.sourcePath];
       await fs.unlink(fixture.sourcePath);
     }
-    const result = await auditGatewayServiceConfig({
-      ...fixture,
-      platform: "linux",
-    });
+    const result = await auditGatewayServiceConfig(fixture);
     expect(result.definitionDrift).toBeUndefined();
     expect(result.definitionDriftError).toEqual(expect.any(String));
     if (state === "unreadable-drop-in") {
@@ -377,12 +374,11 @@ it.each(discardedSettings)(
       workingDirectory: cwd,
       environment: { ...fixture.command.environment, ...environment },
     };
-    const before = await auditGatewayServiceConfig({ ...fixture, command, platform: "linux" });
+    const before = await auditGatewayServiceConfig({ ...fixture, command });
     expect(before.definitionDrift).toBeUndefined();
     const result = await auditGatewayServiceConfig({
       ...fixture,
       command,
-      platform: "linux",
       expectedCommand: fixture.command,
     });
     expect(result.definitionDrift).toContainEqual(drift("unknown-edit", key));
@@ -424,7 +420,6 @@ it("accepts retained heap aliases, custom environment and owned environment rege
   const result = await auditGatewayServiceConfig({
     ...fixture,
     command,
-    platform: "linux",
     expectedCommand: {
       programArguments: [
         "/new/node",
@@ -477,7 +472,6 @@ it("reports a missing managed value when no drop-in supplies it", async () => {
       ...managedDefinition,
       environment: { ...managedDefinition.environment, [key]: "30000" },
     },
-    platform: "linux",
   });
   expect(result.definitionDrift).toEqual([
     drift("outdated", `Environment.${key}`, {

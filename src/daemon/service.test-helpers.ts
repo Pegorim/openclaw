@@ -1,24 +1,20 @@
-/** Test helpers for exercising generic daemon service orchestration. */
 import os from "node:os";
 import { vi } from "vitest";
 import type { GatewayService } from "./service.js";
 
 export function pathLikeToString(pathname: unknown): string {
-  if (typeof pathname === "string") {
-    return pathname;
-  }
   if (pathname instanceof URL) {
     return pathname.pathname;
   }
-  if (pathname instanceof Uint8Array) {
-    return Buffer.from(pathname).toString("utf8");
-  }
-  return "";
+  return typeof pathname === "string"
+    ? pathname
+    : pathname instanceof Uint8Array
+      ? Buffer.from(pathname).toString("utf8")
+      : "";
 }
 
 // Keep OS-account fixtures out of the SDK-exposed spy barrel: node:os mock factories
 // import that barrel, so importing node:os there would deadlock test collection.
-/** Keep service policy real while giving isolated HOME scopes an OS account identity. */
 export function mockSystemAccountHome(): void {
   const account = os.userInfo();
   // Native OS home APIs read the parent environment in Node worker threads.
@@ -71,7 +67,6 @@ export function buildSystemdUnitPropertyOutput(
   ].join("\n");
 }
 
-/** Creates a mock gateway service implementation for daemon service tests. */
 export function createMockGatewayService(overrides: Partial<GatewayService> = {}): GatewayService {
   return {
     label: "LaunchAgent",
@@ -100,31 +95,25 @@ export const managerlessPreflightCases = [
       portSource: "env" as const,
     })),
   ),
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "installed" },
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "node absent" },
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "node installed" },
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "global definition" },
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "unreadable" },
-  { updateInstallKind: "package" as const, shouldRestart: true, condition: "manager" },
-  {
+  ...[
+    "installed",
+    "node absent",
+    "node installed",
+    "global definition",
+    "unreadable",
+    "manager",
+  ].map((condition) => ({ updateInstallKind: "package" as const, shouldRestart: true, condition })),
+  ...(
+    [
+      ["busy port", "busy", "env"],
+      ["configured busy port", "busy", "config"],
+      ["unknown port", "unknown", "env"],
+    ] as const
+  ).map(([condition, portUsage, portSource]) => ({
     updateInstallKind: "package" as const,
     shouldRestart: true,
-    condition: "busy port",
-    portUsage: "busy" as const,
-    portSource: "env" as const,
-  },
-  {
-    updateInstallKind: "package" as const,
-    shouldRestart: true,
-    condition: "configured busy port",
-    portUsage: "busy" as const,
-    portSource: "config" as const,
-  },
-  {
-    updateInstallKind: "package" as const,
-    shouldRestart: true,
-    condition: "unknown port",
-    portUsage: "unknown" as const,
-    portSource: "env" as const,
-  },
+    condition,
+    portUsage,
+    portSource,
+  })),
 ];

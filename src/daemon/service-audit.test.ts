@@ -358,18 +358,20 @@ describe("auditGatewayServiceConfig environment sources", () => {
 });
 
 describe("checkTokenDrift", () => {
-  it("normalizes whitespace before comparing tokens", () => {
-    expect(
-      checkTokenDrift({ serviceToken: "same-token\r\n", configToken: " same-token " }),
-    ).toBeNull();
-  });
-  it("detects token drift without choosing an installation action", () => {
-    expect(checkTokenDrift({ serviceToken: "old-token", configToken: "new-token" })).toStrictEqual({
-      code: codes.gatewayTokenDrift,
-      message:
-        "Config token differs from service token. The daemon will use the old token after restart.",
-      level: "recommended",
-    });
+  it.each([
+    ["same-token\r\n", " same-token ", false],
+    ["old-token", "new-token", true],
+  ] as const)("compares normalized service token %s", (serviceToken, configToken, changed) => {
+    expect(checkTokenDrift({ serviceToken, configToken })).toStrictEqual(
+      changed
+        ? {
+            code: codes.gatewayTokenDrift,
+            message:
+              "Config token differs from service token. The daemon will use the old token after restart.",
+            level: "recommended",
+          }
+        : null,
+    );
   });
 });
 
@@ -382,6 +384,7 @@ describe("auditGatewayServiceConfig systemd", () => {
   });
   const env = () => ({ HOME: home, OPENCLAW_SYSTEMD_UNIT: "openclaw-audit.service" });
   const auditUnit = (timeoutMs?: number) => audit({}, { env: env(), timeoutMs });
+  const network = ["After=network-online.target", "Wants=network-online.target", "RestartSec=5"];
   async function writeUnit(lines: string[]) {
     await fs.mkdir(path.dirname(unitPath), { recursive: true });
     await fs.writeFile(
@@ -464,12 +467,7 @@ describe("auditGatewayServiceConfig systemd", () => {
   it.each(["none", ""])(
     "warns about base-unit KillMode=%s when the manager is unavailable",
     async (killMode) => {
-      await writeUnit([
-        "After=network-online.target",
-        "Wants=network-online.target",
-        "RestartSec=5",
-        `KillMode=${killMode}`,
-      ]);
+      await writeUnit([...network, `KillMode=${killMode}`]);
       const result = await auditUnit();
       expect(
         hasIssue(
@@ -500,12 +498,7 @@ describe("auditGatewayServiceConfig systemd", () => {
   });
 
   it("flags permissive backup modes without embedded credentials", async () => {
-    await writeUnit([
-      "After=network-online.target",
-      "Wants=network-online.target",
-      "RestartSec=5",
-      "KillMode=control-group",
-    ]);
+    await writeUnit([...network, "KillMode=control-group"]);
     await fs.writeFile(`${unitPath}.bak`, "Environment=OPERATOR_SETTING=kept\n");
     await fs.chmod(`${unitPath}.bak`, 0o644);
     const result = await auditUnit();
@@ -516,13 +509,7 @@ describe("auditGatewayServiceConfig systemd", () => {
   });
 
   it.each(["EACCES", "EIO"])("reports a backup inspection failure (%s)", async (code) => {
-    await writeUnit([
-      "After=network-online.target",
-      "Wants=network-online.target",
-      "RestartSec=5",
-      "KillMode=mixed",
-      "TimeoutStopSec=330",
-    ]);
+    await writeUnit([...network, "KillMode=mixed", "TimeoutStopSec=330"]);
     const backupPath = `${unitPath}.bak`;
     const lstat = fs.lstat;
     const inspection = vi
@@ -544,33 +531,15 @@ describe("auditGatewayServiceConfig systemd", () => {
       inspection.mockRestore();
     }
   });
-});
-
-describe("systemd shutdown timeout audit", () => {
   it.each([
     { name: "unlimited base timeout", base: "infinity", expected: false },
     { name: "disabled base timeout", base: "0", expected: false },
     { name: "invalid base timeout", base: "invalid", expected: true },
   ])("reports a drain requirement for $name", async ({ base, expected }) => {
-    const home = tempDirs.make("openclaw-stop-timeout-audit-");
-    const unitPath = path.join(home, ".config/systemd/user/openclaw-gateway.service");
-    await fs.mkdir(path.dirname(unitPath), { recursive: true });
-    await fs.writeFile(
-      unitPath,
-      [
-        "[Unit]",
-        "After=network-online.target",
-        "Wants=network-online.target",
-        "[Service]",
-        "ExecStart=/usr/bin/node gateway",
-        "RestartSec=5",
-        "KillMode=mixed",
-        `TimeoutStopSec=${base}`,
-      ].join("\n"),
-    );
+    await writeUnit([...network, "KillMode=mixed", `TimeoutStopSec=${base}`]);
 
     const result = await auditGatewayServiceConfig({
-      env: { HOME: home },
+      env: env(),
       platform: "linux",
       command: null,
     });

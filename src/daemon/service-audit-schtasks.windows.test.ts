@@ -5,6 +5,25 @@ import { buildScheduledTaskXml } from "./schtasks-xml.js";
 import { auditGatewayServiceConfig } from "./service-audit.js";
 import { fixture, native } from "./service-definition-backup.test-support.js";
 
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+function taskXml(f: Fixture, options: Partial<Parameters<typeof buildScheduledTaskXml>[0]> = {}) {
+  return buildScheduledTaskXml({
+    taskDescription: "OpenClaw Gateway",
+    taskUser: "operator",
+    launchPath: f.sourcePath,
+    ...options,
+  });
+}
+async function auditXml(f: Fixture, xml: string, env = f.env) {
+  f.setTask(xml);
+  native.task.mockClear();
+  const result = await auditGatewayServiceConfig({ ...f, env, platform: "win32" });
+  expect(result.definitionDriftError).toBeUndefined();
+  expect(f.task()).toBe(xml);
+  expect(native.task.mock.calls.every(([args]) => args[0] === "/Query")).toBe(true);
+  return result;
+}
+
 // Task Scheduler may omit these default-valued fields when exporting a registered task.
 function omitDefaults(xml: string): string {
   return xml.replaceAll(
@@ -17,10 +36,8 @@ it.each(["omitted", "disabled-task", "disabled-trigger", "native-defaults", "mis
   "audits the effective Windows task enabled state: %s",
   async (kind) => {
     const f = await fixture("win32");
-    const xml = buildScheduledTaskXml({
-      taskDescription: "OpenClaw Gateway",
+    const xml = taskXml(f, {
       taskUser: kind === "missing-trigger" ? null : "operator",
-      launchPath: f.sourcePath,
     });
     const installed =
       kind === "missing-trigger"
@@ -43,13 +60,11 @@ it.each(["omitted", "disabled-task", "disabled-trigger", "native-defaults", "mis
                   (parent) => `${parent}<Enabled>false</Enabled>`,
                 )
                 .replaceAll("<Enabled>true</Enabled>", "");
-    f.setTask(installed);
-    const result = await auditGatewayServiceConfig({
-      ...f,
-      env: kind === "missing-trigger" ? { ...f.env, USERNAME: undefined } : f.env,
-      platform: "win32",
-    });
-    expect(result.definitionDriftError).toBeUndefined();
+    const result = await auditXml(
+      f,
+      installed,
+      kind === "missing-trigger" ? { ...f.env, USERNAME: undefined } : f.env,
+    );
     expect(result.definitionDrift ?? []).toEqual(
       kind === "omitted" || kind === "native-defaults"
         ? []
@@ -92,14 +107,9 @@ it.each([
 ])("audits a qualified logon account with $kind", async ({ kind, account, sid }) => {
   const f = await fixture("win32");
   const expectedSid = "S-1-5-21-1-2-3-1001";
-  const xml = buildScheduledTaskXml({
-    taskDescription: "OpenClaw Gateway",
-    taskUser: "operator",
-    launchPath: f.sourcePath,
-  })
+  const xml = taskXml(f)
     .replace("<UserId>operator</UserId>", `<UserId>${account}</UserId>`)
     .replace("<UserId>operator</UserId>", `<UserId>${expectedSid}</UserId>`);
-  f.setTask(xml);
   const identity = {
     code: 0,
     stdout: `${expectedSid}\n`,
@@ -112,15 +122,7 @@ it.each([
     stdout: sid ? `${sid}\n` : "",
     stderr: sid ? "" : `Cannot resolve ${account}`,
   });
-  native.task.mockClear();
-
-  const result = await auditGatewayServiceConfig({
-    ...f,
-    env: { ...f.env, USERDOMAIN: "WORKGROUP" },
-    platform: "win32",
-  });
-
-  expect(result.definitionDriftError).toBeUndefined();
+  const result = await auditXml(f, xml, { ...f.env, USERDOMAIN: "WORKGROUP" });
   expect(result.definitionDrift ?? []).toEqual(
     kind === "same SID"
       ? []
@@ -132,8 +134,6 @@ it.each([
         ],
   );
   expect(JSON.stringify(result)).not.toContain(account);
-  expect(f.task()).toBe(xml);
-  expect(native.task.mock.calls.every(([args]) => args[0] === "/Query")).toBe(true);
 });
 
 it.each([
@@ -146,9 +146,7 @@ it.each([
   async ({ kind, key, classification }) => {
     const f = await fixture("win32");
     const hiddenPath = f.sourcePath.replace(/\.cmd$/u, ".vbs");
-    let xml = buildScheduledTaskXml({
-      taskDescription: "OpenClaw Gateway",
-      taskUser: "operator",
+    let xml = taskXml(f, {
       launchPath: kind === "legacy-wscript" ? hiddenPath : f.sourcePath,
       interactive: kind === "legacy-wscript",
     });
@@ -167,15 +165,10 @@ it.each([
         "<WorkingDirectory>operator-private</WorkingDirectory>",
       );
     }
-    f.setTask(xml);
-    native.task.mockClear();
-    const result = await auditGatewayServiceConfig({ ...f, platform: "win32" });
-    expect(result.definitionDriftError).toBeUndefined();
+    const result = await auditXml(f, xml);
     expect(result.definitionDrift).toContainEqual(
       expect.objectContaining({ kind: classification, key }),
     );
     expect(JSON.stringify(result.definitionDrift)).not.toContain("operator-private");
-    expect(f.task()).toBe(xml);
-    expect(native.task.mock.calls.every(([args]) => args[0] === "/Query")).toBe(true);
   },
 );
