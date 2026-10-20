@@ -24,10 +24,7 @@ beforeEach(() => {
   for (const dir of ["tmp", "state", "dist"]) {
     fs.mkdirSync(path.join(root, dir), { mode: 0o700 });
   }
-  fs.writeFileSync(
-    path.join(root, "package.json"),
-    JSON.stringify({ name: "openclaw", version: "1.0.1" }),
-  );
+  fs.writeFileSync(path.join(root, "package.json"), '{"name":"openclaw","version":"1.0.1"}');
   fs.writeFileSync(path.join(root, "dist", "index.js"), "");
   fs.writeFileSync(path.join(root, "state", "openclaw.json"), "{}\n");
   env = {
@@ -69,7 +66,6 @@ it.each(["package", "artifact", "git"] as const)(
     const run: NonNullable<UpdateCommandOptions["run"]> = { runId, env };
     params.opts.run = run;
     let admitted: UpdateRecoveryFence | undefined;
-    let activated = false;
     let doctorAdmitted = false;
     await withUpdateCommandExecutor(runId, async (executor) => {
       mocks.prepareMutableUpdate.mockImplementation(async (_env, _timeout, admitExecutor) => {
@@ -89,7 +85,6 @@ it.each(["package", "artifact", "git"] as const)(
       mocks.runPackageUpdate.mockImplementation(async (options: PackageInstallUpdateParams) => {
         await options.validateCandidate(root);
         await options.beforeActivate();
-        activated = true;
         doctor(options.getDoctorContext?.());
         return successfulUpdate;
       });
@@ -98,15 +93,15 @@ it.each(["package", "artifact", "git"] as const)(
           await options.inspectGitTarget?.({ schemaVersions: { state: 15, agent: 19 } });
           await options.validateCandidate?.(root);
           await options.beforeGitMutation?.({ schemaVersions: { state: 15, agent: 19 } });
-          activated = true;
           doctor(options.getDoctorContext?.());
           return { ...successfulUpdate, mode: "git" };
         },
       );
       const result = await executeMutableUpdate(await bindExecutionGuards(params));
-      expect(result?.result.status, JSON.stringify(mocks.runtimeError.mock.calls)).toBe("ok");
-      expect(result?.mutationStarted).toBe(true);
-      expect(activated).toBe(true);
+      expect(result, JSON.stringify(mocks.runtimeError.mock.calls)).toMatchObject({
+        result: { status: "ok" },
+        mutationStarted: true,
+      });
       expect(doctorAdmitted).toBe(true);
       expect(admitted).toBeDefined();
       admitted?.assertCurrent();
@@ -150,8 +145,7 @@ it.each([
           admitted = true;
         });
         const result = await executeMutableUpdate(await bindExecutionGuards(params));
-        expect(result?.result.status).toBe("error");
-        expect(result?.mutationStarted).toBe(false);
+        expect(result).toMatchObject({ result: { status: "error" }, mutationStarted: false });
         expect(admitted).toBe(false);
         expect(mocks.runPackageUpdate).not.toHaveBeenCalled();
         expect(mocks.serviceStopped).toBe(false);

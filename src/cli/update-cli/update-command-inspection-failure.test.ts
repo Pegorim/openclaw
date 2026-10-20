@@ -11,6 +11,7 @@ import { withUpdateCommandTerminalResult } from "./update-command-terminal.js";
 import { withUpdateCommandRecoveryUnwind } from "./update-command-unwind.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterEach);
+const { objectContaining: partial, arrayContaining: includes } = expect;
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
   vi.restoreAllMocks();
@@ -47,8 +48,7 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
     inspect.mockRejectedValueOnce(original);
     const output = vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => undefined);
     vi.spyOn(defaultRuntime, "error").mockImplementation(() => undefined);
-    let failure: unknown;
-    await withUpdateCommandTerminalResult(
+    const failure: unknown = await withUpdateCommandTerminalResult(
       (registerRun) => {
         registerRun(run);
         return withUpdateCommandRecoveryUnwind(
@@ -65,15 +65,13 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
         });
       },
       { json: true },
-    ).catch((error: unknown) => {
-      failure = error;
-    });
+    ).catch((error: unknown) => error);
 
     const reported =
       outcome === "settlement-failed" && failure instanceof AggregateError
         ? failure.cause
         : failure;
-    const failureFacts = [expect.objectContaining({ message: original.message })];
+    const failureFacts = [partial({ message: original.message })];
     expect(reported).toMatchObject({
       result: { status: "error", steps: [{ failureFacts }] },
     });
@@ -83,17 +81,12 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
         status: "failed",
         reason: "update-failed",
         origin: { nextAction: expect.stringContaining("openclaw triage") },
-        steps: expect.arrayContaining([
-          expect.objectContaining({
-            step: "requested",
-            status: "failed",
-            failureFacts,
-          }),
-        ]),
+        steps: includes([partial({ step: "requested", status: "failed", failureFacts })]),
       });
       expect(recorded?.origin.nextAction).toContain("Retry the same update command");
-      expect(output).toHaveBeenCalledOnce();
-      expect(output.mock.calls[0]?.[0]).toMatchObject({ status: "error", runId: run.runId });
+      expect(output).toHaveBeenCalledExactlyOnceWith(
+        partial({ status: "error", runId: run.runId }),
+      );
     } else {
       expect(recorded?.status).toBe("running");
       expect(output).not.toHaveBeenCalled();

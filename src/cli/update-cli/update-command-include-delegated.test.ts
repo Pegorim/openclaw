@@ -20,6 +20,8 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 const receiverUrl = resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.includeDelegated);
+type CommandResult = Awaited<ReturnType<typeof runUtf8CommandWithTimeout>>;
+const read = (file: string) => fs.readFileSync(file, "utf8");
 
 it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as const)(
   "delegated candidate include effect retains original owner and directory: %s",
@@ -39,7 +41,7 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
       const fragment = path.join(fragmentDir, "channel.json");
       const original = '{"channel":"stable"}\n';
       fs.writeFileSync(fragment, original);
-      const rootRaw = fs.readFileSync(state.configPath, "utf8");
+      const rootRaw = read(state.configPath);
       const proceed = state.path("proceed");
       const ready = createDeferred<{
         pid: number;
@@ -50,12 +52,9 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
       let stdout = "";
       const runId = randomUUID();
       let boundPid: number | undefined;
-      let commandResult: Awaited<ReturnType<typeof runUtf8CommandWithTimeout>> | undefined;
+      let commandResult: CommandResult | undefined;
       let commandError: unknown;
-      let outcome:
-        | { value: Awaited<ReturnType<typeof runUtf8CommandWithTimeout>> }
-        | { error: unknown }
-        | undefined = undefined;
+      let failure: unknown;
       onTestFailed(() => {
         console.error(
           JSON.stringify({
@@ -65,10 +64,7 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
             candidate: receiverUrl.href,
             command: commandResult,
             commandError: commandError === undefined ? undefined : formatErrorMessage(commandError),
-            error:
-              outcome !== undefined && "error" in outcome
-                ? formatErrorMessage(outcome.error)
-                : undefined,
+            error: failure === undefined ? undefined : formatErrorMessage(failure),
             stdout,
           }),
         );
@@ -91,11 +87,11 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
                 requireProcessTreeExtinction: true,
                 onOutputChunk: (chunk) => {
                   stdout += String(chunk);
-                  const lines = stdout.split("\n");
-                  const line = lines.find((value) => value.startsWith('{"ready":true'));
+                  const line = stdout
+                    .split("\n")
+                    .find((value) => value.startsWith('{"ready":true'));
                   if (line) {
-                    const binding = JSON.parse(line);
-                    ready.resolve(binding);
+                    ready.resolve(JSON.parse(line));
                   }
                 },
               },
@@ -114,21 +110,19 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
               throw new Error(result.stderr || stdout || "child exited before include preparation");
             }),
           ]);
-          expect(binding.pid).toBe(boundPid);
+          expect(binding).toMatchObject({
+            pid: boundPid,
+            parentPid: process.pid,
+            candidate: receiverUrl.href,
+          });
           expect(binding.pid).not.toBe(process.pid);
-          expect(binding.parentPid).toBe(process.pid);
-          expect(binding.candidate).toBe(receiverUrl.href);
           expect(binding.parentOwner.length).toBeGreaterThan(0);
           if (fault === "original-owner-replaced") {
-            const db = new DatabaseSync(path.join(control, "managed-update-handoffs.sqlite"));
-            try {
-              db.prepare("UPDATE managed_update_handoffs SET owner=? WHERE install_root=?").run(
-                "replacement",
-                root,
-              );
-            } finally {
-              db.close();
-            }
+            using db = new DatabaseSync(path.join(control, "managed-update-handoffs.sqlite"));
+            db.prepare("UPDATE managed_update_handoffs SET owner=? WHERE install_root=?").run(
+              "replacement",
+              root,
+            );
           }
           if (fault === "include-parent-replaced") {
             fs.renameSync(fragmentDir, `${fragmentDir}-old`);
@@ -140,25 +134,22 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
         }
         return await pending;
       });
-      outcome = await work.then(
-        (value) => ({ value }),
-        (error: unknown) => ({ error }),
-      );
+      const outcome = await work.catch((error: unknown) => {
+        failure = error;
+      });
       if (fault === "healthy") {
-        expect("value" in outcome && outcome.value.code === 0, stdout).toBe(true);
-        expect(JSON.parse(fs.readFileSync(fragment, "utf8")).channel).toBe("beta");
-        expect(fs.readFileSync(`${fragment}.bak`, "utf8")).toBe(original);
+        expect(outcome, stdout).toMatchObject({ code: 0 });
+        expect(JSON.parse(read(fragment))).toMatchObject({ channel: "beta" });
+        expect(read(`${fragment}.bak`)).toBe(original);
       } else {
         expect(stdout).toContain('"result":"refused"');
-        expect(fs.readFileSync(fragment, "utf8")).toBe(original);
+        expect(read(fragment)).toBe(original);
         expect(fs.existsSync(`${fragment}.bak`)).toBe(false);
         if (fault === "include-parent-replaced") {
-          expect(fs.readFileSync(path.join(`${fragmentDir}-old`, "channel.json"), "utf8")).toBe(
-            original,
-          );
+          expect(read(path.join(`${fragmentDir}-old`, "channel.json"))).toBe(original);
         }
       }
-      expect(fs.readFileSync(state.configPath, "utf8")).toBe(rootRaw);
+      expect(read(state.configPath)).toBe(rootRaw);
     });
   },
 );

@@ -8,6 +8,10 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../../config/types.plugins.js";
 import type { PostCorePluginUpdateResult } from "./update-command-plugins.js";
 
+const readJson = async (file: string) => JSON.parse(await fs.readFile(file, "utf8"));
+const outputJson = (value: unknown, suffix = "") =>
+  process.stdout.write(JSON.stringify(value) + suffix);
+
 export type LeaseScenario = {
   lane: "resume" | "fresh-process" | "current-process" | "repair";
   pluginUpdate?: PostCorePluginUpdateResult;
@@ -86,29 +90,24 @@ async function runUpdateLeaseScenario(): Promise<void> {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   const configPath = process.env.OPENCLAW_CONFIG_PATH;
   assert.ok(stateDir && configPath);
-  const scenario = JSON.parse(
-    await fs.readFile(path.join(stateDir, "scenario.json"), "utf8"),
-  ) as LeaseScenario;
+  const scenario = (await readJson(path.join(stateDir, "scenario.json"))) as LeaseScenario;
   const record = async (event: string) =>
     fs.appendFile(
       path.join(stateDir, "events.jsonl"),
       `${JSON.stringify({ event, pid: process.pid })}\n`,
     );
-  const publish = async () => {
-    assert.ok(scenario.writerConfig && scenario.writerRecords);
-    const { seedInstalledPluginIndex } =
-      await import("../../plugins/test-helpers/installed-plugin-index.js");
-    await fs.writeFile(configPath, JSON.stringify(scenario.writerConfig));
-    await seedInstalledPluginIndex(scenario.writerRecords, {
-      config: scenario.writerConfig,
-    });
-    await record("writer-committed");
+  const writeWarnings = async (warnings: string[]) => {
+    const resultPath = process.env.OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH;
+    assert.ok(resultPath);
+    const { writeUpdatePostInstallDoctorResult } =
+      await import("../../infra/update-doctor-result.js");
+    await writeUpdatePostInstallDoctorResult({ resultPath, result: { status: "ok", warnings } });
   };
   const command = process.argv[2];
   if (scenario.runtimeRoot && (command === "doctor" || command === "runtime-proof")) {
     const runtimeRoot = path.join(scenario.runtimeRoot, "dist-runtime", "extensions", "demo");
     const runtime = await import(pathToFileURL(path.join(runtimeRoot, "index.js")).href);
-    const metadata = JSON.parse(await fs.readFile(path.join(runtimeRoot, "package.json"), "utf8"));
+    const metadata = await readJson(path.join(runtimeRoot, "package.json"));
     const sdk = await import(
       pathToFileURL(
         path.join(scenario.runtimeRoot, "dist/extensions/node_modules/openclaw/plugin-sdk/demo.js"),
@@ -126,12 +125,10 @@ async function runUpdateLeaseScenario(): Promise<void> {
     assert.deepEqual(process.argv.slice(2), ["config", "validate", "--json"]);
     assert.equal(process.env.OPENCLAW_UPDATE_IN_PROGRESS, "0");
     await record("validate");
-    process.stdout.write(
-      JSON.stringify(
-        scenario.invalidConfig
-          ? { valid: false, issues: [{ path: "gateway.port", message: "Invalid port" }] }
-          : { valid: true },
-      ),
+    outputJson(
+      scenario.invalidConfig
+        ? { valid: false, issues: [{ path: "gateway.port", message: "Invalid port" }] }
+        : { valid: true },
     );
     process.exitCode = scenario.invalidConfig ? 1 : 0;
     return;
@@ -155,14 +152,7 @@ async function runUpdateLeaseScenario(): Promise<void> {
             },
           ]
         : [];
-    process.stdout.write(
-      `${JSON.stringify({
-        ok: findings.length === 0,
-        checksRun: 1,
-        checksSkipped: 0,
-        findings,
-      })}\n`,
-    );
+    outputJson({ ok: findings.length === 0, checksRun: 1, checksSkipped: 0, findings }, "\n");
     process.exitCode = findings.length === 0 ? 0 : 1;
     return;
   }
@@ -171,13 +161,10 @@ async function runUpdateLeaseScenario(): Promise<void> {
     assert.equal(scenario.lane, "fresh-process");
     const resultPath = process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH;
     assert.ok(resultPath && scenario.pluginUpdate);
-    assert.deepEqual(
-      JSON.parse(await fs.readFile(path.join(path.dirname(resultPath), "handoff.json"), "utf8")),
-      {
-        completionOwner: "parent",
-        timeout: { version: 1, serialized: "15", operator: null },
-      },
-    );
+    assert.deepEqual(await readJson(path.join(path.dirname(resultPath), "handoff.json")), {
+      completionOwner: "parent",
+      timeout: { version: 1, serialized: "15", operator: null },
+    });
     await withPluginLifecycleLease({ waitMs: 0 }, async () => record("packages-acquired"));
     await record("packages-released");
     const { readConfigFileSnapshot } = await import("../../config/config.js");
@@ -221,13 +208,9 @@ async function runUpdateLeaseScenario(): Promise<void> {
         await import("../../state/openclaw-state-db.paths.js");
       const { inspectUpdateRepairDriverAdmission } =
         await import("../../infra/update-run-activity.js");
-      const database = new DatabaseSync(resolveOpenClawStateSqlitePath(), { readOnly: true });
       const run = (() => {
-        try {
-          return readUpdateRunRecord(database, runId);
-        } finally {
-          database.close();
-        }
+        using database = new DatabaseSync(resolveOpenClawStateSqlitePath(), { readOnly: true });
+        return readUpdateRunRecord(database, runId);
       })();
       assert.ok(run, "Doctor lost its invoking repair run");
       const admission = inspectUpdateRepairDriverAdmission([run], runId);
@@ -307,27 +290,10 @@ async function runUpdateLeaseScenario(): Promise<void> {
         .split("\n")
         .map((line) => JSON.parse(line) as { event: string })
         .filter(({ event }) => event === "pre-attempt" || event === "post-attempt");
-      const resultPath = process.env.OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH;
-      assert.ok(resultPath);
-      const { writeUpdatePostInstallDoctorResult } =
-        await import("../../infra/update-doctor-result.js");
-      await writeUpdatePostInstallDoctorResult({
-        resultPath,
-        result: {
-          status: "ok",
-          warnings: scenario.doctorWarningsByInvocation[attempts.length - 1] ?? [],
-        },
-      });
+      await writeWarnings(scenario.doctorWarningsByInvocation[attempts.length - 1] ?? []);
     }
     if (scenario.doctorWarnings?.length) {
-      const { UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV, writeUpdatePostInstallDoctorResult } =
-        await import("../../infra/update-doctor-result.js");
-      const resultPath = process.env[UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV];
-      assert.ok(resultPath);
-      await writeUpdatePostInstallDoctorResult({
-        resultPath,
-        result: { status: "ok", warnings: scenario.doctorWarnings },
-      });
+      await writeWarnings(scenario.doctorWarnings);
     }
     if (phase === "pre" && scenario.completeDeferredPluginMigration) {
       const { recordDeferredPluginMigrations } =
@@ -358,7 +324,12 @@ async function runUpdateLeaseScenario(): Promise<void> {
     const release = once(process, "message");
     process.send?.("acquired");
     await release;
-    await publish();
+    assert.ok(scenario.writerConfig && scenario.writerRecords);
+    const { seedInstalledPluginIndex } =
+      await import("../../plugins/test-helpers/installed-plugin-index.js");
+    await fs.writeFile(configPath, JSON.stringify(scenario.writerConfig));
+    await seedInstalledPluginIndex(scenario.writerRecords, { config: scenario.writerConfig });
+    await record("writer-committed");
   });
   process.disconnect?.();
 }
