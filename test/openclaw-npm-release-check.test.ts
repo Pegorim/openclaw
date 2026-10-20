@@ -13,16 +13,12 @@ import {
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const npmArgs = ["view", "openclaw@beta", "version"];
+const npmInvocation = (npmExecPath = "", comSpec = process.env.ComSpec ?? "cmd.exe") =>
+  resolveNpmCommandInvocation({ npmExecPath, comSpec, npmArgs, platform: "win32" });
 
 it("wraps bare Windows npm_execpath through npm.cmd", () => {
-  expect(
-    resolveNpmCommandInvocation({
-      comSpec: "C:\\Windows\\System32\\cmd.exe",
-      npmArgs: ["view", "openclaw@beta", "version"],
-      npmExecPath: "npm",
-      platform: "win32",
-    }),
-  ).toEqual({
+  expect(npmInvocation("npm", "C:\\Windows\\System32\\cmd.exe")).toEqual({
     command: "C:\\Windows\\System32\\cmd.exe",
     args: ["/d", "/s", "/c", "npm.cmd view openclaw@beta version"],
     windowsVerbatimArguments: true,
@@ -41,12 +37,7 @@ if (process.platform === "win32") {
       join(dir, "npm.cmd"),
       `@echo off\r\n"${process.execPath}" "%~dp0fake-npm.js" %*\r\n`,
     );
-    const invocation = resolveNpmCommandInvocation({
-      comSpec: process.env.ComSpec ?? "cmd.exe",
-      npmArgs: ["view", "openclaw@beta", "version"],
-      npmExecPath: "",
-      platform: "win32",
-    });
+    const invocation = npmInvocation();
     execFileSync(invocation.command, invocation.args, {
       cwd: dir,
       env: {
@@ -56,11 +47,7 @@ if (process.platform === "win32") {
       },
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     } as { cwd: string; env: NodeJS.ProcessEnv });
-    expect(JSON.parse(readFileSync(outputPath, "utf8"))).toEqual([
-      "view",
-      "openclaw@beta",
-      "version",
-    ]);
+    expect(JSON.parse(readFileSync(outputPath, "utf8"))).toEqual(npmArgs);
   });
 }
 

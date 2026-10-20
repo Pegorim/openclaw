@@ -14,11 +14,11 @@ import { build } from "tsdown";
 import { describe, expect, it, vi } from "vitest";
 import { createRuntimeDependencyOwnershipBuildPlugin } from "../scripts/lib/runtime-dependency-ownership-build-plugin.mts";
 import {
-  collectInstalledContextEngineRuntimeErrors,
-  collectInstalledRootDependencyManifestErrors,
+  collectInstalledContextEngineRuntimeErrors as contextErrors,
+  collectInstalledRootDependencyManifestErrors as dependencyErrors,
   collectInstalledPackageErrors,
   fetchRegistryJson,
-  resolvePublishedInstallSourceVerification,
+  resolvePublishedInstallSourceVerification as verifySource,
   resolveInstalledBinaryCommandInvocation,
   retryNpmRegistryProvenanceRead,
   verifyAttestedReleasePublishWorkflow,
@@ -39,7 +39,13 @@ import { createScriptTestHarness } from "./scripts/test-helpers.js";
 import { toolingTsEntrypoints } from "./scripts/tooling-ts-runtime.test-support.js";
 
 const { createTempDir } = createScriptTestHarness();
-const makeInstalledPackageRoot = () => createTempDir("openclaw-postpublish-");
+const makeInstalledPackageRoot = (manifest?: unknown) => {
+  const root = createTempDir("openclaw-postpublish-");
+  if (manifest !== undefined) {
+    writePackageFile(root, "package.json", manifest);
+  }
+  return root;
+};
 const INSTALLED_ROOT_DIST_JS_FILE_SCAN_LIMIT = 20_000;
 const INSTALLED_WORKER_DIST_JS_FILE_SCAN_LIMIT = 10_000;
 
@@ -52,6 +58,10 @@ function writeInstalledFile(root: string, relativePath: string, source = "export
 
 function writePackageFile(root: string, relativePath: string, value: unknown): void {
   writeInstalledFile(root, relativePath, JSON.stringify(value));
+}
+
+function expectDependencyErrors(root: string, ...fragments: string[]) {
+  expect(dependencyErrors(root)).toEqual(fragments.map((part) => expect.stringContaining(part)));
 }
 
 function installedPackageErrors(packageRoot: string) {
@@ -84,13 +94,13 @@ describe("resolvePublishedInstallSourceVerification", () => {
       dependencies: { "@discordjs/voice": "0.19.2" },
     });
 
-    expect(resolvePublishedInstallSourceVerification(sourceRoot, "2026.8.34")).toEqual({
+    expect(verifySource(sourceRoot, "2026.8.34")).toEqual({
       additionalCompanionManifestRoots: [join(sourceRoot, "extensions")],
       allowLegacyGeneratedOwnership: true,
     });
 
     writeInstalledFile(sourceRoot, "scripts/lib/runtime-dependency-ownership-build-plugin.mts");
-    expect(resolvePublishedInstallSourceVerification(sourceRoot, "2026.8.34")).toEqual({
+    expect(verifySource(sourceRoot, "2026.8.34")).toEqual({
       additionalCompanionManifestRoots: [join(sourceRoot, "extensions")],
       allowLegacyGeneratedOwnership: false,
     });
@@ -103,9 +113,7 @@ describe("resolvePublishedInstallSourceVerification", () => {
       version: "2026.9.7",
     });
 
-    expect(() => resolvePublishedInstallSourceVerification(sourceRoot, "2026.8.34")).toThrow(
-      "source checkout version mismatch",
-    );
+    expect(() => verifySource(sourceRoot, "2026.8.34")).toThrow("source checkout version mismatch");
   });
 });
 
@@ -117,42 +125,32 @@ describe("npm registry provenance verification", () => {
     releaseVersion: string,
     workflowRef: string,
     workflowSha?: string,
-  ) => ({
-    subject: [
+  ) => {
+    const workflow = {
+      repository: "https://github.com/openclaw/openclaw",
+      path: ".github/workflows/openclaw-npm-release.yml",
+      ref: workflowRef,
+    };
+    const resolvedDependencies = [
       {
-        name: `pkg:npm/${packageName}@${releaseVersion}`,
-        digest: {
-          sha512: Buffer.from(integrity.slice("sha512-".length), "base64").toString("hex"),
-        },
+        uri: `git+https://github.com/openclaw/openclaw@${workflowRef}`,
+        digest: { gitCommit: workflowSha },
       },
-    ],
-    predicate: {
-      buildDefinition: {
-        externalParameters: {
-          workflow: {
-            repository: "https://github.com/openclaw/openclaw",
-            path: ".github/workflows/openclaw-npm-release.yml",
-            ref: workflowRef,
-          },
+    ];
+    const digest = {
+      sha512: Buffer.from(integrity.slice("sha512-".length), "base64").toString("hex"),
+    };
+    return {
+      subject: [{ name: `pkg:npm/${packageName}@${releaseVersion}`, digest }],
+      predicate: {
+        buildDefinition: {
+          externalParameters: { workflow },
+          ...(workflowSha ? { resolvedDependencies } : {}),
         },
-        ...(workflowSha
-          ? {
-              resolvedDependencies: [
-                {
-                  uri: `git+https://github.com/openclaw/openclaw@${workflowRef}`,
-                  digest: { gitCommit: workflowSha },
-                },
-              ],
-            }
-          : {}),
+        runDetails: { builder: { id: "https://github.com/actions/runner/github-hosted" } },
       },
-      runDetails: {
-        builder: {
-          id: "https://github.com/actions/runner/github-hosted",
-        },
-      },
-    },
-  });
+    };
+  };
   const provenancePayload = buildProvenancePayload(version, "refs/heads/release/2026.3.23");
   const attestationsFor = (payload: unknown) => [
     {
@@ -177,14 +175,16 @@ describe("npm registry provenance verification", () => {
   function verifyProvenance(
     overrides: Partial<Parameters<typeof verifyNpmProvenanceAttestation>[0]> = {},
   ) {
-    return verifyNpmProvenanceAttestation({
-      packageName,
-      version,
-      integrity,
-      attestations: attestationsFor(provenancePayload),
-      verifyBundle: async () => undefined,
-      ...overrides,
-    });
+    return expect(
+      verifyNpmProvenanceAttestation({
+        packageName,
+        version,
+        integrity,
+        attestations: attestationsFor(provenancePayload),
+        verifyBundle: async () => undefined,
+        ...overrides,
+      }),
+    );
   }
 
   it("bounds oversized npm registry response bodies", async () => {
@@ -213,7 +213,7 @@ describe("npm registry provenance verification", () => {
 
   it("requires a trusted GitHub release identity for the exact SLSA provenance attestation", async () => {
     const verifyBundle = makeBundleVerifier();
-    await expect(verifyProvenance({ verifyBundle })).resolves.toBeUndefined();
+    await verifyProvenance({ verifyBundle }).resolves.toBeUndefined();
     expect(verifyBundle.mock.calls[0]?.[1]).toEqual(
       releaseIdentity("refs/heads/release/2026.3.23"),
     );
@@ -226,21 +226,17 @@ describe("npm registry provenance verification", () => {
       expectedWorkflowSha: sha,
       verifyBundle,
     };
-    await expect(verifyProvenance(pinned)).resolves.toBeUndefined();
+    await verifyProvenance(pinned).resolves.toBeUndefined();
     expect(verifyBundle.mock.calls[1]?.[1]).toEqual(releaseIdentity(ref));
-    await expect(
-      verifyProvenance({ ...pinned, expectedWorkflowSha: "b".repeat(40) }),
-    ).rejects.toThrow(
+    await verifyProvenance({ ...pinned, expectedWorkflowSha: "b".repeat(40) }).rejects.toThrow(
       "npm provenance SHA-pinned release-publish ref does not match the approved workflow ref and SHA",
     );
-    await expect(
-      verifyProvenance({
-        attestations: attestationsFor({
-          ...provenancePayload,
-          subject: [{ name: "pkg:npm/openclaw@2026.3.24", digest: {} }],
-        }),
+    await verifyProvenance({
+      attestations: attestationsFor({
+        ...provenancePayload,
+        subject: [{ name: "pkg:npm/openclaw@2026.3.24", digest: {} }],
       }),
-    ).rejects.toThrow("does not match");
+    }).rejects.toThrow("does not match");
   });
 
   it("derives attested release-publish tooling only after the trusted-source check", async () => {
@@ -250,37 +246,37 @@ describe("npm registry provenance verification", () => {
     const verifyBundle = makeBundleVerifier();
     const verifyDerivedWorkflow = vi.fn();
 
-    await expect(
-      verifyProvenance({ attestations, verifyBundle, verifyDerivedWorkflow }),
-    ).resolves.toBeUndefined();
+    await verifyProvenance({
+      attestations,
+      verifyBundle,
+      verifyDerivedWorkflow,
+    }).resolves.toBeUndefined();
     expect(verifyDerivedWorkflow).toHaveBeenCalledExactlyOnceWith({ ref, sha });
     expect(verifyBundle.mock.calls[0]?.[1]).toEqual(releaseIdentity(ref));
 
     verifyBundle.mockClear();
-    await expect(
-      verifyProvenance({
-        attestations,
-        verifyBundle,
-        verifyDerivedWorkflow: () => {
-          throw new Error("protected release tooling tag is missing or unreadable.");
-        },
-      }),
-    ).rejects.toThrow("protected release tooling tag is missing or unreadable.");
+    await verifyProvenance({
+      attestations,
+      verifyBundle,
+      verifyDerivedWorkflow: () => {
+        throw new Error("protected release tooling tag is missing or unreadable.");
+      },
+    }).rejects.toThrow("protected release tooling tag is missing or unreadable.");
     expect(verifyBundle).not.toHaveBeenCalled();
 
     // An attested commit that does not match the tag's SHA prefix is never derived.
-    await expect(
-      verifyProvenance({
-        attestations: attestationsFor(buildProvenancePayload(version, ref, "b".repeat(40))),
-        verifyDerivedWorkflow,
-      }),
-    ).rejects.toThrow("has no matching workflow revision to verify");
+    await verifyProvenance({
+      attestations: attestationsFor(buildProvenancePayload(version, ref, "b".repeat(40))),
+      verifyDerivedWorkflow,
+    }).rejects.toThrow("has no matching workflow revision to verify");
 
     // A partial explicit override stays strict instead of falling back to derivation.
     verifyDerivedWorkflow.mockClear();
-    await expect(
-      verifyProvenance({ attestations, expectedWorkflowRef: ref, verifyDerivedWorkflow }),
-    ).rejects.toThrow("does not match the approved workflow ref and SHA");
+    await verifyProvenance({
+      attestations,
+      expectedWorkflowRef: ref,
+      verifyDerivedWorkflow,
+    }).rejects.toThrow("does not match the approved workflow ref and SHA");
     expect(verifyDerivedWorkflow).not.toHaveBeenCalled();
   });
 
@@ -308,26 +304,22 @@ describe("npm registry provenance verification", () => {
   ])("rejects untrusted release provenance for %s", async (_label, releaseVersion, workflowRef) => {
     const verifyBundle = makeBundleVerifier();
 
-    await expect(
-      verifyProvenance({
-        version: releaseVersion,
-        attestations: attestationsFor(buildProvenancePayload(releaseVersion, workflowRef)),
-        verifyBundle,
-      }),
-    ).rejects.toThrow(
+    await verifyProvenance({
+      version: releaseVersion,
+      attestations: attestationsFor(buildProvenancePayload(releaseVersion, workflowRef)),
+      verifyBundle,
+    }).rejects.toThrow(
       `does not bind ${releaseVersion} to the trusted OpenClaw GitHub release workflow`,
     );
     expect(verifyBundle).not.toHaveBeenCalled();
   });
 
   it("rejects a matching provenance payload when Sigstore cannot verify its bundle", async () => {
-    await expect(
-      verifyProvenance({
-        verifyBundle: async () => {
-          throw new Error("forged bundle");
-        },
-      }),
-    ).rejects.toThrow("failed Sigstore verification");
+    await verifyProvenance({
+      verifyBundle: async () => {
+        throw new Error("forged bundle");
+      },
+    }).rejects.toThrow("failed Sigstore verification");
   });
 
   it("retries incomplete or briefly stale provenance while npm publish propagates", async () => {
@@ -426,27 +418,27 @@ describe("collectInstalledPackageErrors", () => {
 });
 
 describe("collectInstalledContextEngineRuntimeErrors", () => {
-  it("refuses unbounded packaged dist scans", () => {
+  it.each([
+    ["root", INSTALLED_ROOT_DIST_JS_FILE_SCAN_LIMIT + 1],
+    ["worker", INSTALLED_WORKER_DIST_JS_FILE_SCAN_LIMIT],
+  ] as const)("bounds the %s packaged dist scan", (scope, count) => {
     const packageRoot = makeInstalledPackageRoot();
-
-    for (let index = 0; index <= INSTALLED_ROOT_DIST_JS_FILE_SCAN_LIMIT; index += 1) {
-      writeInstalledFile(packageRoot, `dist/chunk-${index}.js`);
+    if (scope === "worker") {
+      writeInstalledFile(packageRoot, "dist/root.js");
     }
-
-    expect(collectInstalledContextEngineRuntimeErrors(packageRoot)).toEqual([
-      `installed package root dist contains more than ${INSTALLED_ROOT_DIST_JS_FILE_SCAN_LIMIT} JavaScript files; refusing to scan unbounded package contents.`,
-    ]);
-  });
-
-  it("keeps split worker chunks within their own bounded scan", () => {
-    const packageRoot = makeInstalledPackageRoot();
-
-    writeInstalledFile(packageRoot, "dist/root.js");
-    for (let index = 0; index < INSTALLED_WORKER_DIST_JS_FILE_SCAN_LIMIT; index += 1) {
-      writeInstalledFile(packageRoot, `dist/worker/worker-chunk-${index}.mjs`);
+    for (let index = 0; index < count; index += 1) {
+      writeInstalledFile(
+        packageRoot,
+        scope === "root" ? `dist/chunk-${index}.js` : `dist/worker/worker-chunk-${index}.mjs`,
+      );
     }
-
-    expect(collectInstalledContextEngineRuntimeErrors(packageRoot)).toStrictEqual([]);
+    expect(contextErrors(packageRoot)).toStrictEqual(
+      scope === "worker"
+        ? []
+        : [
+            `installed package root dist contains more than ${INSTALLED_ROOT_DIST_JS_FILE_SCAN_LIMIT} JavaScript files; refusing to scan unbounded package contents.`,
+          ],
+    );
   });
 });
 
@@ -476,8 +468,7 @@ describe("resolveInstalledBinaryCommandInvocation", () => {
 
 describe("collectInstalledRootDependencyManifestErrors", () => {
   it("finishes vendor call graphs while retaining root dependency checks", () => {
-    const packageRoot = makeInstalledPackageRoot();
-    writePackageFile(packageRoot, "package.json", { name: "openclaw", dependencies: {} });
+    const packageRoot = makeInstalledPackageRoot({ name: "openclaw", dependencies: {} });
     const calls = ["const value0 = opaque();"];
     for (let index = 1; index <= 28; index++) {
       calls.push(`const value${index} = opaque(value${index - 1}, value${index - 1});`);
@@ -510,7 +501,7 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
   function makeCompanionImportFixture(params: {
     source?: string;
     fileName?: string;
-    companions?: Array<{ id: string; name?: string; dependencies: Record<string, string> }>;
+    companion?: boolean;
     ownership?: unknown;
   }): { installRoot: string; packageRoot: string } {
     const installRoot = makeInstalledPackageRoot();
@@ -522,13 +513,8 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     if (params.ownership !== undefined) {
       writePackageFile(packageRoot, RUNTIME_DEPENDENCY_OWNERSHIP_RELATIVE_PATH, params.ownership);
     }
-    for (const companion of params.companions ?? [
-      { id: "discord", dependencies: { "@discordjs/voice": "0.19.2" } },
-    ]) {
-      writePackageFile(installRoot, `@openclaw/${companion.id}/package.json`, {
-        name: companion.name ?? `@openclaw/${companion.id}`,
-        dependencies: companion.dependencies,
-      });
+    if (params.companion !== false) {
+      writePackageFile(installRoot, "@openclaw/discord/package.json", discordManifest);
     }
     writeInstalledFile(
       packageRoot,
@@ -539,21 +525,21 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
   }
 
   it("accepts Bun built-in modules without npm dependency declarations", () => {
-    const packageRoot = makeInstalledPackageRoot();
-
-    writePackageFile(packageRoot, "package.json", {
-      dependencies: {},
-    });
+    const packageRoot = makeInstalledPackageRoot({ dependencies: {} });
     writeInstalledFile(
       packageRoot,
       "dist/bun-sqlite-library.js",
       'import { Database } from "bun:sqlite";\nconst { dlopen } = require("bun:ffi");\nexport { Database, dlopen };\n',
     );
 
-    expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toStrictEqual([]);
+    expect(dependencyErrors(packageRoot)).toStrictEqual([]);
   });
 
   const companionSource = 'const voice = require("@discordjs/voice");\nexport { voice };\n';
+  const discordManifest = {
+    name: "@openclaw/discord",
+    dependencies: { "@discordjs/voice": "0.19.2" },
+  };
   const companionOwnership = {
     chunks: {
       "companion-runtime.js": {
@@ -570,26 +556,17 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     "export { voice };",
     "",
   ].join("\n");
-  const writeTrustedDiscordManifest = (installRoot: string) => {
-    const manifestRoot = join(installRoot, "trusted-extensions");
-    writePackageFile(manifestRoot, "discord/package.json", {
-      name: "@openclaw/discord",
-      dependencies: { "@discordjs/voice": "0.19.2" },
-    });
-    return manifestRoot;
-  };
-
   function makeLegacyFixture(source = legacyCompanionSource, fileName?: string) {
     const { installRoot, packageRoot } = makeCompanionImportFixture({
-      companions: [],
+      companion: false,
       source,
       fileName,
     });
-    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
+    const trustedManifestRoot = join(installRoot, "trusted-extensions");
+    writePackageFile(trustedManifestRoot, "discord/package.json", discordManifest);
     return {
       packageRoot,
-      legacyErrors: () =>
-        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
+      legacyErrors: () => dependencyErrors(packageRoot, [trustedManifestRoot], true),
     };
   }
 
@@ -598,7 +575,7 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     const missingDependency =
       "installed package root is missing declared runtime dependency '@discordjs/voice' for dist importers: companion-runtime.js. Add it to package.json dependencies/optionalDependencies.";
 
-    expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toEqual([missingDependency]);
+    expect(dependencyErrors(packageRoot)).toEqual([missingDependency]);
     expect(legacyErrors()).toStrictEqual([]);
   });
 
@@ -621,28 +598,21 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     ]);
   });
 
-  it.each([{ main: "dist/nested", fileName: "nested/index.js" }])(
-    "keeps legacy public entrypoints root-owned: %j",
-    ({ fileName, ...entrypoints }) => {
-      const { packageRoot, legacyErrors } = makeLegacyFixture(undefined, fileName);
-      writePackageFile(packageRoot, "package.json", { name: "openclaw", ...entrypoints });
-      expect(legacyErrors()).toEqual([expect.stringContaining("@discordjs/voice")]);
-    },
-  );
+  it("keeps legacy directory entrypoints root-owned", () => {
+    const { packageRoot, legacyErrors } = makeLegacyFixture(undefined, "nested/index.js");
+    writePackageFile(packageRoot, "package.json", { name: "openclaw", main: "dist/nested" });
+    expect(legacyErrors()).toEqual([expect.stringContaining("@discordjs/voice")]);
+  });
 
-  it.each([
-    {
-      name: "a loader bound inside a plugin region and used outside",
-      source: [
-        'import { createRequire } from "node:module";',
-        "//#region extensions/discord/src/runtime.ts",
-        "const load = createRequire(import.meta.url);",
-        'const voice = load("@discordjs/voice");',
-        "//#endregion",
-        'load("@discordjs/voice");',
-      ].join("\n"),
-    },
-  ])("rejects legacy ownership for $name", ({ source }) => {
+  it("rejects legacy ownership for a loader used outside its plugin region", () => {
+    const source = [
+      'import { createRequire } from "node:module";',
+      "//#region extensions/discord/src/runtime.ts",
+      "const load = createRequire(import.meta.url);",
+      'const voice = load("@discordjs/voice");',
+      "//#endregion",
+      'load("@discordjs/voice");',
+    ].join("\n");
     const { legacyErrors } = makeLegacyFixture(source);
     expect(legacyErrors()).toEqual([expect.stringContaining("@discordjs/voice")]);
   });
@@ -653,9 +623,7 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
       source: `${companionSource}export const changed = true;\n`,
     });
 
-    expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toEqual([
-      expect.stringContaining("companion-runtime.js"),
-    ]);
+    expectDependencyErrors(packageRoot, "companion-runtime.js");
   });
 
   it("rejects malformed emitted ownership metadata", () => {
@@ -670,114 +638,72 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
       },
     });
 
-    expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toEqual([
-      expect.stringContaining("installed package runtime dependency ownership is invalid"),
-    ]);
+    expectDependencyErrors(
+      packageRoot,
+      "installed package runtime dependency ownership is invalid",
+    );
   });
 
-  it.each<[string, string, string[]?]>([
-    [
-      "assigned destructured binding",
-      'import { createRequire } from "node:module"; let { load } = loaders; load = createRequire(import.meta.url); load("root-runtime");',
-    ],
-    [
-      "factory with alternative root alias",
-      'import { createRequire } from "node:module"; const root = createRequire(import.meta.url); let make = createRequire; const load = make(import.meta.url); make = root; load("root-runtime");',
-    ],
-    [
-      "conditional roots",
-      'import { createRequire } from "node:module"; const require = usePlugin ? createRequire(pluginPath) : createRequire(import.meta.url); require("root-runtime");',
-    ],
-    [
-      "comma factory",
-      'import { createRequire } from "node:module"; const require = (0, createRequire)(import.meta.url); require("root-runtime");',
-    ],
-    [
-      "quoted namespace",
-      'import * as module from "node:module"; const require = module["createRequire"](import.meta["url"]); require("root-runtime");',
-    ],
-    [
-      "quoted factory binding",
-      'const { "createRequire": make } = require("node:module"); const load = make(__filename); load("root-runtime");',
-    ],
-    [
-      "awaited builtin",
-      'const { createRequire: make } = await import("node:module"); const require = make(import.meta.url); require("root-runtime");',
-    ],
-    [
-      "process namespace accessor",
-      'const processNamespace = require("node:process"); const load = processNamespace.getBuiltinModule("node:module").createRequire(__filename); load("root-runtime");',
-    ],
-    [
-      "caller-derived package anchor",
-      'import { createRequire } from "node:module"; import fs from "node:fs/promises"; import path from "node:path"; async function build(opts) { const root = await fs.realpath(path.resolve(opts.root ?? process.cwd())); const require = createRequire(path.join(root, "package.json")); require("plugin-build-tool"); }',
-      [],
-    ],
-    [
-      "unknown dynamic caller property",
-      'import { createRequire } from "node:module"; function build(opts, key, choose) { const selection = choose ? opts : opaqueOptions(); const require = createRequire(selection[key]); require("root-runtime"); }',
-    ],
-    [
-      "array destructuring loader write",
-      'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); [require] = [createRequire(import.meta.url)]; require("root-runtime"); }',
-    ],
-    [
-      "iteration loader write",
-      'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); for (require of [createRequire(import.meta.url)]) { require("root-runtime"); } }',
-    ],
-    [
-      "function wrapper remains unknown",
-      'import { createRequire as make } from "node:module"; const load = make(import.meta.url); function require(name) { return load(name); } require("root-runtime");',
-    ],
-    [
-      "unknown supplied loader with caller default",
-      'import { createRequire } from "node:module"; function build(root, loaders) { const [require = createRequire(root)] = loaders; require("root-runtime"); }',
-    ],
-    [
-      "initialized CommonJS require before assignment",
-      'require("root-runtime"); var require = process.getBuiltinModule("module").createRequire(process.cwd() + "/package.json");',
-    ],
-    [
-      "opaque projected input default",
-      'import { createRequire } from "node:module"; function build(options) { let alias; ({ alias = options } = {}); normalize(alias); const require = createRequire(options.filename); require("root-runtime"); }',
-    ],
-    [
-      "raw caller after loop remains conservative",
-      'import { createRequire } from "node:module"; function build(options) { for (const key in options) consume(key); const require = createRequire(options.filename); require("plugin-build-tool"); }',
-      ["plugin-build-tool"],
-    ],
-    [
-      "nested parameter default remains unknown",
-      'import { createRequire } from "node:module"; function build({ nested: { filename } = { filename: import.meta.url } }) { const require = createRequire(filename); require("root-runtime"); }',
-    ],
-    [
-      "locally changed cwd",
-      'import { createRequire } from "node:module"; import path from "node:path"; import { fileURLToPath } from "node:url"; process.chdir(path.dirname(fileURLToPath(import.meta.url))); const require = createRequire(path.resolve("bridge.cjs")); require("root-runtime");',
-    ],
-    [
-      "template coercion before snapshot",
-      'import { createRequire } from "node:module"; function build(options) { const unused = `${options}`; const require = createRequire(options.filename); require("root-runtime"); }',
-    ],
-    [
-      "effectful parameter default before snapshot",
-      'import { createRequire } from "node:module"; import path from "node:path"; function build(options, ignored = Object.assign(options, { filename: import.meta.url })) { const root = path.resolve(options.filename); const require = createRequire(root); require("root-runtime"); }',
-    ],
-    [
-      "ignored factory argument effect",
-      'import { createRequire } from "node:module"; function build(location) { const require = createRequire(location, location.href = import.meta.url); require("root-runtime"); }',
-    ],
-    [
-      "pending normalization is not a string snapshot",
-      'import { createRequire } from "node:module"; import fs from "node:fs/promises"; function build(options) { const pending = fs.realpath(options.filename); normalize(pending); return (async () => { const root = await pending; const require = createRequire(root); require("root-runtime"); })(); }',
-    ],
-  ])("follows lexical require ownership: %s", (_name, source, dependencies = ["root-runtime"]) => {
-    const packageRoot = makeInstalledPackageRoot();
-    writePackageFile(packageRoot, "package.json", { dependencies: {} });
+  const expectedDependencies: Record<string, string[]> = {
+    "caller-derived package anchor": [],
+    "raw caller after loop remains conservative": ["plugin-build-tool"],
+  };
+  it.each(
+    Object.entries({
+      "assigned destructured binding":
+        'import { createRequire } from "node:module"; let { load } = loaders; load = createRequire(import.meta.url); load("root-runtime");',
+      "factory with alternative root alias":
+        'import { createRequire } from "node:module"; const root = createRequire(import.meta.url); let make = createRequire; const load = make(import.meta.url); make = root; load("root-runtime");',
+      "conditional roots":
+        'import { createRequire } from "node:module"; const require = usePlugin ? createRequire(pluginPath) : createRequire(import.meta.url); require("root-runtime");',
+      "comma factory":
+        'import { createRequire } from "node:module"; const require = (0, createRequire)(import.meta.url); require("root-runtime");',
+      "quoted namespace":
+        'import * as module from "node:module"; const require = module["createRequire"](import.meta["url"]); require("root-runtime");',
+      "quoted factory binding":
+        'const { "createRequire": make } = require("node:module"); const load = make(__filename); load("root-runtime");',
+      "awaited builtin":
+        'const { createRequire: make } = await import("node:module"); const require = make(import.meta.url); require("root-runtime");',
+      "process namespace accessor":
+        'const processNamespace = require("node:process"); const load = processNamespace.getBuiltinModule("node:module").createRequire(__filename); load("root-runtime");',
+      "caller-derived package anchor":
+        'import { createRequire } from "node:module"; import fs from "node:fs/promises"; import path from "node:path"; async function build(opts) { const root = await fs.realpath(path.resolve(opts.root ?? process.cwd())); const require = createRequire(path.join(root, "package.json")); require("plugin-build-tool"); }',
+      "unknown dynamic caller property":
+        'import { createRequire } from "node:module"; function build(opts, key, choose) { const selection = choose ? opts : opaqueOptions(); const require = createRequire(selection[key]); require("root-runtime"); }',
+      "array destructuring loader write":
+        'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); [require] = [createRequire(import.meta.url)]; require("root-runtime"); }',
+      "iteration loader write":
+        'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); for (require of [createRequire(import.meta.url)]) { require("root-runtime"); } }',
+      "function wrapper remains unknown":
+        'import { createRequire as make } from "node:module"; const load = make(import.meta.url); function require(name) { return load(name); } require("root-runtime");',
+      "unknown supplied loader with caller default":
+        'import { createRequire } from "node:module"; function build(root, loaders) { const [require = createRequire(root)] = loaders; require("root-runtime"); }',
+      "initialized CommonJS require before assignment":
+        'require("root-runtime"); var require = process.getBuiltinModule("module").createRequire(process.cwd() + "/package.json");',
+      "opaque projected input default":
+        'import { createRequire } from "node:module"; function build(options) { let alias; ({ alias = options } = {}); normalize(alias); const require = createRequire(options.filename); require("root-runtime"); }',
+      "raw caller after loop remains conservative":
+        'import { createRequire } from "node:module"; function build(options) { for (const key in options) consume(key); const require = createRequire(options.filename); require("plugin-build-tool"); }',
+      "nested parameter default remains unknown":
+        'import { createRequire } from "node:module"; function build({ nested: { filename } = { filename: import.meta.url } }) { const require = createRequire(filename); require("root-runtime"); }',
+      "locally changed cwd":
+        'import { createRequire } from "node:module"; import path from "node:path"; import { fileURLToPath } from "node:url"; process.chdir(path.dirname(fileURLToPath(import.meta.url))); const require = createRequire(path.resolve("bridge.cjs")); require("root-runtime");',
+      "template coercion before snapshot":
+        'import { createRequire } from "node:module"; function build(options) { const unused = `${options}`; const require = createRequire(options.filename); require("root-runtime"); }',
+      "effectful parameter default before snapshot":
+        'import { createRequire } from "node:module"; import path from "node:path"; function build(options, ignored = Object.assign(options, { filename: import.meta.url })) { const root = path.resolve(options.filename); const require = createRequire(root); require("root-runtime"); }',
+      "ignored factory argument effect":
+        'import { createRequire } from "node:module"; function build(location) { const require = createRequire(location, location.href = import.meta.url); require("root-runtime"); }',
+      "pending normalization is not a string snapshot":
+        'import { createRequire } from "node:module"; import fs from "node:fs/promises"; function build(options) { const pending = fs.realpath(options.filename); normalize(pending); return (async () => { const root = await pending; const require = createRequire(root); require("root-runtime"); })(); }',
+    }),
+  )("follows lexical require ownership: %s", (name, source) => {
+    const packageRoot = makeInstalledPackageRoot({ dependencies: {} });
     writeInstalledFile(packageRoot, "dist/runtime.js", source);
-    expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toEqual(
-      dependencies.map(
-        (name) =>
-          `installed package root is missing declared runtime dependency '${name}' for dist importers: runtime.js. Add it to package.json dependencies/optionalDependencies.`,
+    expect(dependencyErrors(packageRoot)).toEqual(
+      (expectedDependencies[name] ?? ["root-runtime"]).map(
+        (dependency) =>
+          `installed package root is missing declared runtime dependency '${dependency}' for dist importers: runtime.js. Add it to package.json dependencies/optionalDependencies.`,
       ),
     );
   });
@@ -849,7 +775,7 @@ describe("runtime dependency ownership build contract", () => {
       `,
       "extensions/example/downstream.runtime.js": 'export { lazy } from "fixture-lazy";',
     });
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([]);
+    expectDependencyErrors(root);
 
     rewriteRootRuntimeImportsToStableAliases({ rootDir: root });
     writeStableRootRuntimeAliases({ rootDir: root });
@@ -860,26 +786,13 @@ describe("runtime dependency ownership build contract", () => {
     expect(readFileSync(join(dist, sharedChunk!), "utf8")).toContain('"./downstream.runtime.js"');
     expect(existsSync(join(dist, "shared.runtime.js"))).toBe(true);
     expect(existsSync(join(dist, "downstream.runtime.js"))).toBe(true);
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([]);
+    expectDependencyErrors(root);
   });
 
-  it("verifies real static and dynamic plugin chunks against their owning manifest", async () => {
-    const root = await buildInstalledFixture("export const ready = true;");
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([]);
-
-    writeFileSync(
-      join(root, "dist/extensions/example/package.json"),
-      JSON.stringify({ name: "@openclaw/example", dependencies: {} }),
-    );
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([
-      expect.stringContaining("missing declared runtime dependency 'fixture-lazy'"),
-      expect.stringContaining("missing declared runtime dependency 'fixture-runtime'"),
-    ]);
-  });
-
-  it("retains every plugin owner across repeated entries and cyclic shared chunks", async () => {
-    const root = await buildInstalledFixture(
-      "export const ready = true;",
+  it.each<[string, Record<string, string>, Record<string, string>]>([
+    ["example", {}, {}],
+    [
+      "other",
       {
         "extensions/other/index.js": 'export { value } from "../../src/shared.js";',
         "src/shared.js": `
@@ -892,28 +805,29 @@ describe("runtime dependency ownership build contract", () => {
         `,
       },
       { "extensions/other/index": "extensions/other/index.js" },
-    );
-    const manifestPath = "dist/extensions/other/package.json";
-    writePackageFile(root, manifestPath, {
-      name: "@openclaw/other",
-      dependencies: { "fixture-runtime": "1.0.0", "fixture-lazy": "1.0.0" },
-    });
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([]);
+    ],
+  ])(
+    "checks static, dynamic and cyclic chunk ownership for %s",
+    async (owner, sources, entries) => {
+      const root = await buildInstalledFixture("export const ready = true;", sources, entries);
+      const manifestPath = `dist/extensions/${owner}/package.json`;
+      writePackageFile(root, manifestPath, {
+        name: `@openclaw/${owner}`,
+        dependencies: { "fixture-runtime": "1.0.0", "fixture-lazy": "1.0.0" },
+      });
+      expectDependencyErrors(root);
 
-    writePackageFile(root, manifestPath, { name: "@openclaw/other", dependencies: {} });
-    expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([
-      expect.stringContaining("missing declared runtime dependency 'fixture-lazy'"),
-      expect.stringContaining("missing declared runtime dependency 'fixture-runtime'"),
-    ]);
-  });
-
-  it.each([["root-shared chunk", 'export { value } from "./shared.js";']])(
-    "rejects a root %s even when a plugin owns the same dependency",
-    async (_name, source) => {
-      const root = await buildInstalledFixture(source);
-      expect(collectInstalledRootDependencyManifestErrors(root)).toEqual([
-        expect.stringContaining("missing declared runtime dependency 'fixture-runtime'"),
-      ]);
+      writePackageFile(root, manifestPath, { name: `@openclaw/${owner}`, dependencies: {} });
+      expectDependencyErrors(
+        root,
+        "missing declared runtime dependency 'fixture-lazy'",
+        "missing declared runtime dependency 'fixture-runtime'",
+      );
     },
   );
+
+  it("rejects a root-shared chunk even when a plugin owns the same dependency", async () => {
+    const root = await buildInstalledFixture('export { value } from "./shared.js";');
+    expectDependencyErrors(root, "missing declared runtime dependency 'fixture-runtime'");
+  });
 });

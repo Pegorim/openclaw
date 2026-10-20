@@ -1,6 +1,6 @@
 // Root-owned integration combines shared delivery with public plugin surfaces.
 import { expectDefined } from "@openclaw/normalization-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { googlechatPlugin } from "../extensions/googlechat/api.js";
 import { ircPlugin } from "../extensions/irc/api.js";
 import { telegramOutbound } from "../extensions/telegram/api.js";
@@ -15,6 +15,7 @@ import { setActivePluginRegistry } from "../src/plugins/runtime.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../src/test-utils/channel-plugins.js";
 
 const literalCode = '`<p class="literal">code</p>`';
+const angleText = "<https://example.com/a.pdf|Manual>";
 const fixtures = [
   {
     text: `before<p title="a>b">inside</p>after\n\n${literalCode}`,
@@ -28,9 +29,9 @@ const fixtures = [
     text: 'before<a href="`hidden`">click</a> then `visible`',
     plainText: "beforeclick then `visible`",
   },
+  { text: angleText, plainText: "Manual" },
 ];
 const payloads = fixtures.map(({ text }) => ({ text }));
-const angleLink = [{ text: "<https://example.com/a.pdf|Manual>" }];
 
 async function deliver(params: Parameters<typeof prepareOutboundPayloadBatch>[0]) {
   const preparedBatch = await prepareOutboundPayloadBatch(params);
@@ -44,9 +45,7 @@ const sharedPlainTextSiblings: Array<[string, Sanitizer]> = [
   ["whatsapp", expectDefined(whatsappPlugin.outbound, "whatsappPlugin.outbound")],
 ];
 
-afterEach(() => {
-  setActivePluginRegistry(createEmptyPluginRegistry());
-});
+afterEach(() => setActivePluginRegistry(createEmptyPluginRegistry()));
 
 function register(channel: string, outbound: ChannelOutboundAdapter) {
   setActivePluginRegistry(
@@ -82,61 +81,39 @@ function createTextDelivery(mode: "default Telegram" | "rich Telegram" | "direct
   return { send, params: { cfg, channel, to: "12345", deps: { telegram: send } } };
 }
 
-describe("HTML sanitization through outbound delivery", () => {
-  it.each(["default Telegram", "rich Telegram", "direct text/media"] as const)(
-    "preserves the %s transport contract",
-    async (mode) => {
-      const { send, params: base } = createTextDelivery(mode);
-      expect(await deliver({ ...base, payloads })).toHaveLength(payloads.length);
-      expect(send.mock.calls.map(([to, text]) => ({ to, text }))).toEqual(
-        fixtures.map(({ text, plainText }) => ({
-          to: "12345",
-          text: mode === "rich Telegram" ? text : plainText,
-        })),
-      );
-    },
-  );
+it.each(["default Telegram", "rich Telegram", "direct text/media"] as const)(
+  "preserves the %s transport contract",
+  async (mode) => {
+    const { send, params: base } = createTextDelivery(mode);
+    expect(await deliver({ ...base, payloads })).toHaveLength(payloads.length);
+    expect(send.mock.calls.map(([to, text]) => [to, text])).toEqual(
+      fixtures.map(({ text, plainText }) => ["12345", mode === "rich Telegram" ? text : plainText]),
+    );
+  },
+);
 
-  it.each(["default Telegram", "direct text/media"] as const)(
-    "keeps the unspaced angle-link label on the %s delivery boundary",
-    async (mode) => {
-      const { send, params: base } = createTextDelivery(mode);
-      expect(await deliver({ ...base, payloads: angleLink })).toHaveLength(1);
-      expect(send.mock.calls.map(([to, text]) => ({ to, text }))).toEqual([
-        { to: "12345", text: "Manual" },
-      ]);
-    },
-  );
-
-  it.each(sharedPlainTextSiblings)(
-    "keeps the unspaced angle-link label on the %s outbound delivery boundary",
-    async (channel, source) => {
-      const send = vi.fn(
-        async (params: Parameters<NonNullable<ChannelOutboundAdapter["sendText"]>>[0]) => ({
-          channel,
-          messageId: "fixture-message",
-          to: params.to,
-          text: params.text,
-        }),
-      );
-      const outbound: ChannelOutboundAdapter = {
-        deliveryMode: "direct",
-        ...(source.sanitizeText ? { sanitizeText: source.sanitizeText } : {}),
-        ...(source.normalizePayload ? { normalizePayload: source.normalizePayload } : {}),
-        sendText: send,
-      };
-      register(channel, outbound);
-      expect(
-        await deliver({
-          cfg: {} satisfies OpenClawConfig,
-          channel,
-          to: "12345",
-          payloads: angleLink,
-        }),
-      ).toHaveLength(1);
-      expect(send.mock.calls.map(([call]) => ({ to: call.to, text: call.text }))).toEqual([
-        { to: "12345", text: "Manual" },
-      ]);
-    },
-  );
-});
+it.each(sharedPlainTextSiblings)(
+  "keeps the unspaced angle-link label on the %s outbound delivery boundary",
+  async (channel, source) => {
+    const send = vi.fn<NonNullable<ChannelOutboundAdapter["sendText"]>>(async () => ({
+      channel,
+      messageId: "fixture-message",
+    }));
+    const outbound: ChannelOutboundAdapter = {
+      deliveryMode: "direct",
+      sanitizeText: source.sanitizeText,
+      normalizePayload: source.normalizePayload,
+      sendText: send,
+    };
+    register(channel, outbound);
+    expect(
+      await deliver({
+        cfg: {} satisfies OpenClawConfig,
+        channel,
+        to: "12345",
+        payloads: [{ text: angleText }],
+      }),
+    ).toHaveLength(1);
+    expect(send.mock.calls.map(([call]) => [call.to, call.text])).toEqual([["12345", "Manual"]]);
+  },
+);
