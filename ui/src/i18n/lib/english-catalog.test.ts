@@ -50,12 +50,12 @@ it.each([
       flush();
       expect(labels).toEqual([[activeText, `board.widget.${fallbackKey}`]]);
 
-      registerEnglishCatalog(register);
+      registerEnglishCatalog<ReturnType<typeof register>>(register);
       flush();
       expect(labels.at(-1)).toEqual([activeText, fallbackText]);
       expect(en.board.widget).toBe(widget);
       const count = labels.length;
-      registerEnglishCatalog(register);
+      registerEnglishCatalog<ReturnType<typeof register>>(register);
       flush();
       expect(labels).toHaveLength(count);
     } finally {
