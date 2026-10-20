@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import { projectAnthropicTools } from "./anthropic-tool-projection.js";
 import { publishRuntimeToolInputSchema } from "./tool-schema-json-projection.js";
 
+const tool = (
+  name: string,
+  parameters: Record<string, unknown> = { type: "object", properties: {} },
+  description = name,
+) => ({ name, parameters, description });
+
 describe("projectAnthropicTools", () => {
   it("retains same-original duplicates while sorting their descriptions", () => {
     const projection = projectAnthropicTools(
-      ["Zulu", "Alpha"].map((description) => ({
-        name: "Read",
-        description,
-        parameters: { type: "object", properties: {} },
-      })),
+      ["Zulu", "Alpha"].map((description) => tool("Read", undefined, description)),
       (name) => name.toLowerCase(),
     );
 
@@ -25,102 +27,77 @@ describe("projectAnthropicTools", () => {
     );
   });
 
-  it.each([{ names: ["Read", "Read", "read"], first: "Read", last: "read" }])(
-    "keeps the first accepted spelling in a collision after $first duplicates",
-    ({ names, first, last }) => {
-      expect(() =>
-        projectAnthropicTools(
-          names.map((name) => ({ name, description: name, parameters: { type: "object" } })),
-          () => "Read",
-        ),
-      ).toThrow(`Anthropic tool names "${first}" and "${last}" both map to "Read"`);
-    },
-  );
+  it("keeps the first accepted spelling in a collision after Read duplicates", () => {
+    expect(() =>
+      projectAnthropicTools(
+        ["Read", "Read", "read"].map((name) => tool(name, { type: "object" })),
+        () => "Read",
+      ),
+    ).toThrow('Anthropic tool names "Read" and "read" both map to "Read"');
+  });
 
   it.each(
-    [
-      { name: "implicit dialect", dialect: undefined, definitionsKey: "$defs" },
-      {
-        name: "explicit draft-07",
-        dialect: "http://json-schema.org/draft-07/schema#",
-        definitionsKey: "definitions",
-      },
-    ].flatMap(({ name, dialect, definitionsKey }) =>
-      ["runtime", "published"].map((mode) => ({ name, dialect, definitionsKey, mode })),
+    [undefined, "http://json-schema.org/draft-07/schema#"].flatMap((dialect) =>
+      ["runtime", "published"].map((mode) => ({ dialect, mode })),
     ),
-  )(
-    "preserves root constraints and tuple definitions for $name ($mode)",
-    ({ dialect, definitionsKey, mode }) => {
-      const parameters = {
-        ...(dialect ? { $schema: dialect } : {}),
-        type: "object",
-        properties: { range: { $ref: `#/${definitionsKey}/Range` } },
-        required: ["range"],
-        additionalProperties: false,
-        allOf: [{ propertyNames: { enum: ["range"] } }],
-        [definitionsKey]: {
-          Range: {
-            ...(dialect ? { $schema: dialect } : {}),
-            type: "array",
-            items: [{ type: "integer" }, { type: "integer" }],
-            additionalItems: false,
-          },
-          Trailing: {
-            ...(dialect ? { $schema: dialect } : {}),
-            type: "array",
-            items: [],
-          },
-        },
-      };
-      const original = structuredClone(parameters);
-      const source =
-        mode === "published" ? publishRuntimeToolInputSchema(parameters).schema : parameters;
-      const tools = [{ name: "select_range", description: "Select a range", parameters: source }];
-      const projection = projectAnthropicTools(tools, (name) => name);
+  )("preserves constraints and tuples ($dialect, $mode)", ({ dialect, mode }) => {
+    const definitionsKey = dialect ? "definitions" : "$defs";
+    const root = {
+      type: "object",
+      properties: { range: { $ref: `#/${definitionsKey}/Range` } },
+      required: ["range"],
+      additionalProperties: false,
+      allOf: [{ propertyNames: { enum: ["range"] } }],
+    };
+    const tuple = (items: Record<string, string>[]) => ({
+      ...(dialect ? { $schema: dialect } : {}),
+      type: "array",
+      items,
+    });
+    const parameters = {
+      ...root,
+      ...(dialect ? { $schema: dialect } : {}),
+      [definitionsKey]: {
+        Range: { ...tuple([{ type: "integer" }, { type: "integer" }]), additionalItems: false },
+        Trailing: tuple([]),
+      },
+    };
+    const original = structuredClone(parameters);
+    const source =
+      mode === "published" ? publishRuntimeToolInputSchema(parameters).schema : parameters;
+    const tools = [tool("select_range", source)];
+    const projection = projectAnthropicTools(tools, (name) => name);
 
-      expect(projection.tools[0]?.inputSchema).toEqual({
-        type: "object",
-        properties: parameters.properties,
-        required: ["range"],
-        additionalProperties: false,
-        allOf: parameters.allOf,
-        [definitionsKey]: {
-          Range: {
-            type: "array",
-            prefixItems: [{ type: "integer" }, { type: "integer" }],
-            items: false,
-          },
-          Trailing: { type: "array", prefixItems: [] },
+    expect(projection.tools[0]?.inputSchema).toEqual({
+      ...root,
+      [definitionsKey]: {
+        Range: {
+          type: "array",
+          prefixItems: [{ type: "integer" }, { type: "integer" }],
+          items: false,
         },
-      });
-      expect(parameters).toEqual(original);
-      if (mode === "published") {
-        expect(projectAnthropicTools(tools, (name) => name).tools[0]?.inputSchema).toBe(
-          projection.tools[0]?.inputSchema,
-        );
-        expect(source).toEqual(original);
-      }
-    },
-  );
+        Trailing: { type: "array", prefixItems: [] },
+      },
+    });
+    expect(parameters).toEqual(original);
+    if (mode === "published") {
+      expect(projectAnthropicTools(tools, (name) => name).tools[0]?.inputSchema).toBe(
+        projection.tools[0]?.inputSchema,
+      );
+      expect(source).toEqual(original);
+    }
+  });
 
   it("quarantines Anthropic tools with non-finite numeric schema values", () => {
     const projection = projectAnthropicTools(
       [
-        {
-          name: "BadLimits",
-          description: "Read a numeric value",
-          parameters: {
-            type: "object",
-            properties: {
-              amount: { type: "number", maximum: Number.POSITIVE_INFINITY },
-            },
+        tool("BadLimits", {
+          type: "object",
+          properties: {
+            amount: { type: "number", maximum: Number.POSITIVE_INFINITY },
           },
-        },
-        {
-          name: "Lookup",
-          description: "Lookup a value",
-          parameters: { type: "object", properties: {} },
-        },
+        }),
+        tool("Lookup"),
       ],
       (name) => name.toLowerCase(),
     );

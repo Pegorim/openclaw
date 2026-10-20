@@ -26,6 +26,11 @@ const contextParts = (...texts: string[]) => ({
   role: "user",
   parts: [contextStart, ...texts.map((text) => ({ text })), contextEnd],
 });
+const runtime = (
+  content: RuntimeContextMessage["content"],
+  retained = false,
+  timestamp = 2,
+): RuntimeContextMessage => ({ role: "user", content, timestamp, runtimeContext: { retained } });
 const request = { role: "user", content: "Run pwd, then read README.md.", timestamp: 1 } as const;
 const reply: AssistantMessage = {
   role: "assistant",
@@ -62,63 +67,37 @@ describe.each(["managed", "signed-parts"] as const)("Google runtime context (%s)
     );
   });
 
-  it("does not rewrite earlier user or assistant bytes when turn-scoped context expires", () => {
-    const first = convert([
-      request,
-      { role: "user", content: temporalContext, timestamp: 2, runtimeContext: { retained: false } },
-    ]);
-    const later = convert([
-      request,
-      reply,
-      { role: "user", content: "Summarize it.", timestamp: 4 },
-      {
-        role: "user",
-        content: laterContext,
-        timestamp: 5,
-        runtimeContext: { retained: false },
-      },
-    ]);
-
-    expect(JSON.stringify(later[0])).toBe(JSON.stringify(first[0]));
-    expect(later).toEqual([
-      userParts(request.content),
-      { role: "model", parts: [{ text: "The README describes the project." }] },
-      userParts("Summarize it."),
-      contextParts(laterContext),
-    ]);
-  });
-
-  it("replays retained context byte-for-byte when later runtime facts change", () => {
-    const retained: RuntimeContextMessage = {
-      role: "user",
-      content: [
-        { type: "text", text: temporalContext },
-        { type: "text", text: "Active exec: 1" },
-      ],
-      timestamp: 2,
-      runtimeContext: { retained: true },
-    };
-    const first = convert([request, retained]);
-    const later = convert([
-      request,
-      retained,
-      reply,
-      { role: "user", content: "What is still running?", timestamp: 4 },
-      {
-        role: "user",
-        content: "Current date: 2026-10-15\nActive exec: none",
-        timestamp: 5,
-        runtimeContext: { retained: true },
-      },
-    ]);
-
-    expect(first).toEqual([
-      userParts(request.content),
-      contextParts(temporalContext, "Active exec: 1"),
-    ]);
-    expect(JSON.stringify(later.slice(0, first.length))).toBe(JSON.stringify(first));
-    expect(later.at(-1)).toEqual(contextParts("Current date: 2026-10-15\nActive exec: none"));
-  });
+  it.each([false, true])(
+    "preserves conversation bytes across retained=%s context updates",
+    (retained) => {
+      const originalTexts = retained ? [temporalContext, "Active exec: 1"] : [temporalContext];
+      const original = runtime(
+        retained ? originalTexts.map((text) => ({ type: "text", text })) : temporalContext,
+        retained,
+      );
+      const nextText = retained ? "Current date: 2026-10-15\nActive exec: none" : laterContext;
+      const prompt = retained ? "What is still running?" : "Summarize it.";
+      const first = convert([request, original]);
+      const later = convert([
+        request,
+        ...(retained ? [original] : []),
+        reply,
+        { role: "user", content: prompt, timestamp: 4 },
+        runtime(nextText, retained, 5),
+      ]);
+      expect(first).toEqual([userParts(request.content), contextParts(...originalTexts)]);
+      expect(JSON.stringify(later.slice(0, retained ? first.length : 1))).toBe(
+        JSON.stringify(retained ? first : first.slice(0, 1)),
+      );
+      expect(later).toEqual([
+        userParts(request.content),
+        ...(retained ? [contextParts(...originalTexts)] : []),
+        { role: "model", parts: [{ text: "The README describes the project." }] },
+        userParts(prompt),
+        contextParts(nextText),
+      ]);
+    },
+  );
 
   it("does not interpret user-authored runtime-context labels as trusted metadata", () => {
     expect(convert([{ role: "user", content: temporalContext, timestamp: 1 }])).toEqual([

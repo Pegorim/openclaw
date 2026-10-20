@@ -56,30 +56,24 @@ export function createAnthropicTerminalFallbackEvents(
     cache_creation_input_tokens: 4,
     cache_creation: null,
   };
+  const iteration = (type: string, model: unknown, tokens = {}) => ({
+    type,
+    ...usage,
+    model,
+    ...tokens,
+  });
+  const iterations = [
+    iteration(testCase.marker === false ? "message" : "fallback_message", testCase.model),
+  ];
+  if (testCase.boundary) {
+    iterations.unshift(
+      iteration("message", "claude-fable-5", { input_tokens: 1_000, output_tokens: 2_000 }),
+    );
+  }
   const terminal = {
     type: "message_delta",
     delta: { stop_reason: "tool_use" },
-    usage: {
-      ...usage,
-      iterations: [
-        ...(testCase.boundary
-          ? [
-              {
-                type: "message",
-                ...usage,
-                model: "claude-fable-5",
-                input_tokens: 1_000,
-                output_tokens: 2_000,
-              },
-            ]
-          : []),
-        {
-          type: testCase.marker === false ? "message" : "fallback_message",
-          ...usage,
-          model: testCase.model,
-        },
-      ],
-    },
+    usage: { ...usage, iterations },
   };
   const block = (index: number, content_block: Record<string, unknown>) => [
     { type: "content_block_start", index, content_block },

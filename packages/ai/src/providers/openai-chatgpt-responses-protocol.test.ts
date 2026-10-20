@@ -2,15 +2,8 @@ import { describe, expect, it } from "vitest";
 import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../transports/transport-utils.js";
 import { parseOpenAIChatGptResponsesSse } from "./openai-chatgpt-responses-protocol.js";
 
-const completedEvent = {
-  type: "response.completed",
-  response: {
-    id: "resp_parser",
-    status: "completed",
-    output: [],
-    usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
-  },
-};
+const completedEvent = { type: "response.completed", response: { id: "resp_parser" } };
+const parse = (body: BodyInit) => parseOpenAIChatGptResponsesSse(new Response(body));
 const serializedCompletedEvent = JSON.stringify(completedEvent);
 const multilineDataLines = JSON.stringify(completedEvent, null, 2)
   .split("\n")
@@ -37,7 +30,7 @@ describe("ChatGPT Responses SSE frame boundaries", () => {
       .join("")}\r\n`;
     const events = [];
 
-    for await (const event of parseOpenAIChatGptResponsesSse(new Response(frame))) {
+    for await (const event of parse(frame)) {
       events.push(event);
     }
 
@@ -58,15 +51,11 @@ describe("ChatGPT Responses SSE frame boundaries", () => {
         canceled = true;
       },
     });
-    const iterator = parseOpenAIChatGptResponsesSse(new Response(body))[Symbol.asyncIterator]();
+    const iterator = parse(body);
     let receivedEvent = false;
 
     try {
-      const result = await settleWithin(
-        iterator.next(),
-        "SSE frame while response remains open",
-        1_000,
-      );
+      const result = await settleWithin(iterator.next(), "open-response frame", 1_000);
       receivedEvent = true;
 
       expect(result).toEqual({ done: false, value: completedEvent });
@@ -84,20 +73,17 @@ describe("ChatGPT Responses SSE frame boundaries", () => {
 
   it("keeps a final undelimited event after a delimited event", async () => {
     const precedingEvent = { type: "response.output_item.done" };
-    const response = new Response(
-      `data: ${JSON.stringify(precedingEvent)}\n\ndata: ${serializedCompletedEvent}`,
-    );
     const events = [];
-    for await (const event of parseOpenAIChatGptResponsesSse(response)) {
+    for await (const event of parse(
+      `data: ${JSON.stringify(precedingEvent)}\n\ndata: ${serializedCompletedEvent}`,
+    )) {
       events.push(event);
     }
     expect(events).toEqual([precedingEvent, completedEvent]);
   });
 
   it("rejects a malformed EOF frame after a valid event", async () => {
-    const iterator = parseOpenAIChatGptResponsesSse(
-      new Response(`data: ${serializedCompletedEvent}\n\ndata: {not-json`),
-    );
+    const iterator = parse(`data: ${serializedCompletedEvent}\n\ndata: {not-json`);
     await expect(iterator.next()).resolves.toEqual({ done: false, value: completedEvent });
     await expect(iterator.next()).rejects.toThrow(MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE);
   });
@@ -113,7 +99,7 @@ describe("ChatGPT Responses SSE frame boundaries", () => {
         return new Promise<void>(() => {});
       },
     });
-    const iterator = parseOpenAIChatGptResponsesSse(new Response(body))[Symbol.asyncIterator]();
+    const iterator = parse(body);
 
     await expect(settleWithin(iterator.next(), "first response event")).resolves.toEqual({
       done: false,
