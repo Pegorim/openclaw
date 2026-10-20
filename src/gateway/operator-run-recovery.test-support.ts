@@ -146,6 +146,14 @@ export async function createOperatorRecoveryFixture(params: {
       throw new Error("Recovery claim retired");
     }
   };
+  const recover = (mode: "operator" | "requester" | "both" = "operator", sourceTarget = target) =>
+    restoreGatewayRunRecovery({
+      target: sourceTarget,
+      context,
+      assertCurrent,
+      restoreOperator: mode !== "requester",
+      restoreRequester: mode !== "operator",
+    });
   return {
     client,
     context,
@@ -158,13 +166,7 @@ export async function createOperatorRecoveryFixture(params: {
     retire: () => {
       current = false;
     },
-    restore: () =>
-      restoreGatewayRunRecovery({
-        target,
-        context,
-        assertCurrent,
-        restoreOperator: true,
-        restoreRequester: false,
-      }).then(({ operator }) => operator),
+    recover,
+    restore: () => recover().then(({ operator }) => operator),
   };
 }

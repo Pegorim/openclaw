@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import { buildDeviceAuthPayloadV3 } from "../../packages/gateway-client/src/device-auth.js";
+import type { ConnectParams } from "../../packages/gateway-protocol/src/schema/frames.js";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
@@ -97,33 +98,31 @@ export async function connect(peer: Peer, options: ConnectOptions): Promise<Ingr
   const role = options.role ?? "operator";
   const signedAt = Date.now();
   const identity = options.identity;
-  const payload = identity
-    ? buildDeviceAuthPayloadV3({
-        deviceId: identity.deviceId,
-        clientId: client.id,
-        clientMode: client.mode,
-        platform: client.platform,
-        role,
-        scopes: options.scopes ?? [],
-        signedAtMs: signedAt,
-        token:
-          options.auth?.deviceToken ?? options.auth?.bootstrapToken ?? options.auth?.token ?? null,
-        nonce,
-      })
-    : undefined;
-  const device =
-    identity && payload
-      ? {
-          id: identity.deviceId,
-          publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
-          signature: signDevicePayload(
-            identity.privateKeyPem,
-            options.tamperSignature ? `${payload}-tampered` : payload,
-          ),
-          signedAt,
-          nonce,
-        }
-      : undefined;
+  let device: ConnectParams["device"];
+  if (identity) {
+    const payload = buildDeviceAuthPayloadV3({
+      deviceId: identity.deviceId,
+      clientId: client.id,
+      clientMode: client.mode,
+      platform: client.platform,
+      role,
+      scopes: options.scopes ?? [],
+      signedAtMs: signedAt,
+      token:
+        options.auth?.deviceToken ?? options.auth?.bootstrapToken ?? options.auth?.token ?? null,
+      nonce,
+    });
+    device = {
+      id: identity.deviceId,
+      publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
+      signature: signDevicePayload(
+        identity.privateKeyPem,
+        options.tamperSignature ? `${payload}-tampered` : payload,
+      ),
+      signedAt,
+      nonce,
+    };
+  }
   const hello = await request(peer, "connect", {
     minProtocol: PROTOCOL_VERSION,
     maxProtocol: PROTOCOL_VERSION,
