@@ -31,18 +31,20 @@ export function scanDoctorSessionTranscripts(
 ): void {
   const reportError = (message: string, error: unknown) =>
     note(`${message}: ${formatErrorMessage(error).replace(/\s+/g, " ").trim()}`, params.title);
-  for (const target of projectExistingAgentDatabaseTargets(
+  for (const candidate of projectExistingAgentDatabaseTargets(
     resolveAllAgentSessionStoreTargetsSync(params.cfg, { env: params.env }),
     params.env,
     params.cfg,
   )) {
     const scan = params.cleanScanIdentity
-      ? beginUpdateDoctorHistoricalScan(target.sqlitePath, params.cleanScanIdentity(target))
+      ? beginUpdateDoctorHistoricalScan(candidate.sqlitePath, params.cleanScanIdentity(candidate))
       : undefined;
     if (scan?.reused) {
       scan.complete();
       continue;
     }
+    // The read connection and any repair must use the admitted owner, not a mutable alias.
+    const target = scan ? { ...candidate, sqlitePath: scan.databasePath } : candidate;
     let clean = true;
     const reportTargetError = (message: string, error: unknown) => {
       clean = false;

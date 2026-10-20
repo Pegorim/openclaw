@@ -4,15 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  installPrivateUpdateHandoffStore,
+  writePrivateUpdateHandoffChildGuard,
+} from "../../test/helpers/private-update-handoff-store.js";
+import {
   consumeUpdateDoctorHistoricalScans,
   recordUpdateDatabaseWrites,
 } from "../cli/update-cli/update-command-database-receipts.js";
+import { runUpdateFinalizationDoctorInFreshProcess } from "../cli/update-cli/update-command-fresh-doctor.js";
 import { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
-import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
+import * as sqliteOwner from "../infra/node-sqlite.js";
 import { projectExistingAgentDatabaseTargets } from "../infra/session-sqlite-migration-readers.js";
 import * as tempRoot from "../infra/tmp-openclaw-dir.js";
 import type { UpdateDatabaseBackup } from "../infra/update-database-backup.js";
-import { readUpdatePhysicalDatabaseGenerations } from "../infra/update-database-generations.js";
 import {
   consumeUpdatePostInstallDoctorResult,
   createUpdatePostInstallDoctorResultPath,
@@ -23,6 +27,8 @@ import {
   UPDATE_DOCTOR_HISTORICAL_SCANS_ENV,
   type UpdateDoctorHistoricalScans,
 } from "../infra/update-doctor-scan-receipts.js";
+import { resolveManagedUpdateLeaseDatabasePath } from "../infra/update-managed-service-handoff-lease.js";
+import { readUpdatePhysicalDatabaseGenerations } from "../infra/update-physical-database-generations.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import {
   openOpenClawStateDatabase,
@@ -43,7 +49,7 @@ describe("update Doctor retained transcript scan reuse", () => {
   let env: NodeJS.ProcessEnv;
   let databasePath: string;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-history-reuse-"));
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "doctor-history-reuse-")));
     env = { HOME: root, OPENCLAW_STATE_DIR: path.join(root, "state") };
     databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env });
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -52,7 +58,7 @@ describe("update Doctor retained transcript scan reuse", () => {
     fs.writeFileSync(path.join(sessions, "sessions.json"), "{}");
     openOpenClawStateDatabase({ env });
     closeOpenClawStateDatabaseForTest();
-    const db = openNodeSqliteDatabase(databasePath);
+    const db = sqliteOwner.openNodeSqliteDatabase(databasePath);
     try {
       db.exec("CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT)");
       const insert = db.prepare("INSERT INTO transcript_events VALUES (?, ?, ?)");
@@ -73,6 +79,7 @@ describe("update Doctor retained transcript scan reuse", () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     note.mockClear();
     fs.rmSync(root, { recursive: true, force: true });
   });
@@ -84,6 +91,7 @@ describe("update Doctor retained transcript scan reuse", () => {
       after?: () => void;
       incomplete?: boolean;
       shouldRepair?: boolean;
+      postPlugin?: boolean;
     } = {},
   ) {
     const warnings: string[] = [];
@@ -94,17 +102,21 @@ describe("update Doctor retained transcript scan reuse", () => {
           ? {
               [UPDATE_DOCTOR_HISTORICAL_SCANS_ENV]:
                 typeof previous === "string" ? previous : JSON.stringify(previous),
-              OPENCLAW_UPDATE_POST_CORE_CONVERGENCE: "1",
             }
+          : {}),
+        ...(previous !== undefined || options.postPlugin
+          ? { OPENCLAW_UPDATE_POST_CORE_CONVERGENCE: "1" }
           : {}),
       },
       warn: (message) => warnings.push(message),
     });
-    capture.observe([databasePath]);
+    // Backup inventory admits real paths even when Doctor discovers a lexical state alias.
+    const canonicalDatabasePath = fs.realpathSync(databasePath);
+    capture.observe([canonicalDatabasePath]);
     capture.admit(
       options.incomplete
-        ? { [databasePath]: null }
-        : await readUpdatePhysicalDatabaseGenerations([databasePath]),
+        ? { [canonicalDatabasePath]: null }
+        : await readUpdatePhysicalDatabaseGenerations([canonicalDatabasePath]),
     );
     before?.();
     const config = { ...cfg, session: { store: databasePath } };
@@ -123,12 +135,14 @@ describe("update Doctor retained transcript scan reuse", () => {
     );
     options.after?.();
     return {
-      receipts: capture.settle(await readUpdatePhysicalDatabaseGenerations([databasePath])),
+      receipts: capture.settle(
+        await readUpdatePhysicalDatabaseGenerations([canonicalDatabasePath]),
+      ),
       warnings,
     };
   }
   function write(sql: string) {
-    const db = openNodeSqliteDatabase(databasePath);
+    const db = sqliteOwner.openNodeSqliteDatabase(databasePath);
     try {
       db.exec(sql);
     } finally {
@@ -175,6 +189,167 @@ describe("update Doctor retained transcript scan reuse", () => {
     expect(second.warnings).toEqual([]);
     expect(reads).toHaveBeenCalledTimes(1);
   });
+  it("reuses canonical admitted generations through a symlinked state directory", async () => {
+    const canonicalDatabasePath = fs.realpathSync(databasePath);
+    const alias = path.join(root, ".openclaw-profile");
+    fs.symlinkSync(env.OPENCLAW_STATE_DIR!, alias, "dir");
+    env.OPENCLAW_STATE_DIR = alias;
+    databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env });
+    expect(databasePath).not.toBe(canonicalDatabasePath);
+    const reads = vi.spyOn(ReadOnlySqliteTranscriptReader.prototype, "labelRepairSnapshot");
+    const first = await pass();
+    expect(first.receipts).toMatchObject([{ databasePath: canonicalDatabasePath }]);
+    const second = await pass(first.receipts);
+    expect(second.receipts).toEqual(first.receipts);
+    expect(second.warnings).toEqual([]);
+    expect(reads).toHaveBeenCalledOnce();
+  });
+  it("rescans when the state alias is retargeted after admission", async () => {
+    const alias = path.join(root, ".openclaw-profile");
+    const replacement = path.join(root, "replacement-state");
+    fs.cpSync(env.OPENCLAW_STATE_DIR!, replacement, { recursive: true });
+    fs.symlinkSync(env.OPENCLAW_STATE_DIR!, alias, "dir");
+    env.OPENCLAW_STATE_DIR = alias;
+    databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env });
+    const first = await pass();
+    const reads = vi.spyOn(ReadOnlySqliteTranscriptReader.prototype, "labelRepairSnapshot");
+    const second = await pass(first.receipts, () => {
+      fs.unlinkSync(alias);
+      fs.symlinkSync(replacement, alias, "dir");
+    });
+    expect(reads).toHaveBeenCalledOnce();
+    expect(second.receipts).toEqual([]);
+    expect(second.warnings).toEqual([]);
+  });
+  it("scans the admitted owner when a state alias is retargeted away and back at open", async () => {
+    const alias = path.join(root, ".openclaw-profile");
+    const replacement = path.join(root, "replacement-state");
+    fs.cpSync(env.OPENCLAW_STATE_DIR!, replacement, { recursive: true });
+    write(
+      "UPDATE transcript_events SET event_json = replace(event_json, 'ordinary history 0', 'Chat history since last reply (untrusted, for context):') WHERE seq = 0",
+    );
+    fs.symlinkSync(env.OPENCLAW_STATE_DIR!, alias, "dir");
+    const admittedState = env.OPENCLAW_STATE_DIR!;
+    env.OPENCLAW_STATE_DIR = alias;
+    databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env });
+    let retargetedOpens = 0;
+    const result = await pass(undefined, () => {
+      const original = sqliteOwner.openNodeSqliteDatabase;
+      vi.spyOn(sqliteOwner, "openNodeSqliteDatabase").mockImplementation((...args) => {
+        if (path.basename(args[0]) !== "openclaw-agent.sqlite") {
+          return original(...args);
+        }
+        retargetedOpens++;
+        fs.unlinkSync(alias);
+        fs.symlinkSync(replacement, alias, "dir");
+        try {
+          return original(...args);
+        } finally {
+          fs.unlinkSync(alias);
+          fs.symlinkSync(admittedState, alias, "dir");
+        }
+      });
+    });
+    expect(retargetedOpens).toBe(1);
+    expect(result.receipts).toEqual([]);
+    expect(note).toHaveBeenCalledWith(
+      expect.stringContaining("Found 1 session"),
+      "Session transcript labels",
+    );
+  });
+  it("does not certify a scan when the state alias changes during it", async () => {
+    const alias = path.join(root, ".openclaw-profile");
+    const replacement = path.join(root, "replacement-state");
+    fs.cpSync(env.OPENCLAW_STATE_DIR!, replacement, { recursive: true });
+    fs.symlinkSync(env.OPENCLAW_STATE_DIR!, alias, "dir");
+    env.OPENCLAW_STATE_DIR = alias;
+    databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env });
+    let payloadReads = 0;
+    const reads = vi.spyOn(ReadOnlySqliteTranscriptReader.prototype, "labelRepairSnapshot");
+    reads.mockImplementationOnce(function (this: ReadOnlySqliteTranscriptReader, ...args) {
+      // Restore before calling through the real receiver, not a replacement reader.
+      reads.mockRestore();
+      const result = this.labelRepairSnapshot(...args);
+      payloadReads++;
+      fs.unlinkSync(alias);
+      fs.symlinkSync(replacement, alias, "dir");
+      return result;
+    });
+    const result = await pass();
+    expect(payloadReads).toBe(1);
+    expect(result.receipts).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+  it.each(["older driver", "empty receipt", "stale receipt", "incomplete generation"])(
+    "quietly rescans a routine post-plugin miss: %s",
+    async (reason) => {
+      const first = await pass();
+      const previous =
+        reason === "older driver" ? undefined : reason === "empty receipt" ? [] : first.receipts;
+      if (reason === "stale receipt") {
+        write("DELETE FROM transcript_events WHERE seq = 0");
+      }
+      const reads = vi.spyOn(ReadOnlySqliteTranscriptReader.prototype, "labelRepairSnapshot");
+      const second = await pass(previous, undefined, {
+        postPlugin: true,
+        incomplete: reason === "incomplete generation",
+      });
+      expect(reads).toHaveBeenCalledOnce();
+      expect(second.warnings).toEqual([]);
+    },
+  );
+  it("does not route an older-driver reuse miss into fresh Doctor update warnings", async () => {
+    const second = await pass(undefined, undefined, { postPlugin: true });
+    const privateTmp = path.join(root, "private-tmp");
+    fs.mkdirSync(privateTmp, { mode: 0o700 });
+    const { databasePath: handoffPath, assertDatabasePath } =
+      installPrivateUpdateHandoffStore(privateTmp);
+    assertDatabasePath(resolveManagedUpdateLeaseDatabasePath());
+    const guarded = writePrivateUpdateHandoffChildGuard(
+      handoffPath,
+      privateTmp,
+    )({ ...process.env, ...env });
+    for (const key of [
+      "HOME",
+      "OPENCLAW_STATE_DIR",
+      "NODE_OPTIONS",
+      "BUN_OPTIONS",
+      "OPENCLAW_TEST_PRIVATE_HANDOFF_PATH",
+    ]) {
+      vi.stubEnv(key, guarded[key]);
+    }
+    const entryPath = path.join(root, "fixture-doctor.mjs");
+    const marker = path.join(root, "doctor-ran");
+    fs.writeFileSync(
+      entryPath,
+      [
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "const file = process.env.OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH;",
+        "if (fs.realpathSync(path.dirname(file)) !== " +
+          JSON.stringify(fs.realpathSync(privateTmp)) +
+          ") throw Error('not private');",
+        "fs.writeFileSync(file, " +
+          JSON.stringify(JSON.stringify({ status: "ok", warnings: second.warnings })) +
+          ", { flag: 'wx', mode: 0o600 });",
+        "fs.writeFileSync(" + JSON.stringify(marker) + ", 'ran');",
+      ].join("\n"),
+    );
+    const warnings: string[] = [];
+    const result = await runUpdateFinalizationDoctorInFreshProcess({
+      phase: "post-plugin",
+      root,
+      entryPath,
+      nodeRunner: process.execPath,
+      yes: true,
+      json: true,
+      timeoutMs: 30_000,
+      onWarnings: (messages) => warnings.push(...messages),
+    });
+    expect(fs.readFileSync(marker, "utf8")).toBe("ran");
+    expect(result).toBeUndefined();
+    expect(warnings).toEqual([]);
+  }, 45_000);
   it("drops an optional receipt rather than exceeding the child environment budget", async () => {
     const first = await pass();
     const generations = await readUpdatePhysicalDatabaseGenerations([databasePath]);
@@ -250,13 +425,17 @@ describe("update Doctor retained transcript scan reuse", () => {
     });
     expect(reads).toHaveBeenCalledOnce();
   });
-  it.each(["{", "x".repeat(65537), "[]"])(
-    "warns and rescans an unavailable optional receipt %#",
-    async (encoded) => {
+  it.each([
+    ["malformed", "{", 1],
+    ["oversized", "x".repeat(65537), 0],
+    ["empty", "[]", 0],
+  ] as const)(
+    "rescans a %s optional receipt without inventing a finding",
+    async (_name, encoded, warningCount) => {
       const reads = vi.spyOn(ReadOnlySqliteTranscriptReader.prototype, "labelRepairSnapshot");
       const result = await pass(encoded);
       expect(reads).toHaveBeenCalledOnce();
-      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings).toHaveLength(warningCount);
     },
   );
   it("does not certify incomplete generations or writes after the scan", async () => {
@@ -279,7 +458,7 @@ describe("update Doctor retained transcript scan reuse", () => {
     );
   });
   it("does not suppress repeated legacy-label findings", async () => {
-    const db = openNodeSqliteDatabase(databasePath);
+    const db = sqliteOwner.openNodeSqliteDatabase(databasePath);
     db.prepare("UPDATE transcript_events SET event_json = ? WHERE seq = 0").run(
       JSON.stringify({
         type: "message",

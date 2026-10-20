@@ -46,7 +46,7 @@ function observeFileFamily(pathname: string): string {
   );
 }
 
-type Scan = { reused: boolean; complete(): void };
+type Scan = { databasePath: string; reused: boolean; complete(): void };
 const scans = new AsyncLocalStorage<(pathname: string, key: string) => Scan | undefined>();
 
 /** Call complete only for an exhaustive, clean result, never a warning or partial scan.
@@ -93,33 +93,36 @@ export function createUpdateDoctorHistoricalScanCapture(options: {
   };
   const begin = (pathname: string, key: string): Scan | undefined => {
     try {
-      const admission = retained.get(pathname);
+      // Backup generations and native admission use the resolved database owner,
+      // while profile/session paths can still traverse a symlinked state directory.
+      const databasePath = fs.realpathSync.native(pathname);
+      const admission = retained.get(databasePath);
       if (!admission) {
-        if (options.env.OPENCLAW_UPDATE_POST_CORE_CONVERGENCE === "1") {
-          fallback("no complete database generation");
-        }
         return undefined;
       }
-      const current = token(pathname);
+      const current = token(databasePath);
       const reused =
         current === admission.token &&
-        observed.get(pathname) === observeFileFamily(pathname) &&
+        observed.get(databasePath) === observeFileFamily(databasePath) &&
         previous.some(
           (entry) =>
             entry.key === key &&
-            entry.databasePath === pathname &&
-            entry.generation === admitted[pathname],
+            entry.databasePath === databasePath &&
+            entry.generation === admitted[databasePath],
         );
-      if (!reused && options.env.OPENCLAW_UPDATE_POST_CORE_CONVERGENCE === "1") {
-        fallback("no current clean receipt");
-      }
+      // A missing/stale optional hint is ordinary scan work, not a Doctor finding.
       return {
+        databasePath,
         reused,
         complete() {
           try {
-            const completedToken = token(pathname);
+            // Do not certify the old owner if the profile alias changed during the scan.
+            if (fs.realpathSync.native(pathname) !== databasePath) {
+              return;
+            }
+            const completedToken = token(databasePath);
             if (completedToken) {
-              completed.set(key, { databasePath: pathname, token: completedToken });
+              completed.set(key, { databasePath, token: completedToken });
             }
           } catch (error) {
             fallback(formatErrorMessage(error));
@@ -157,9 +160,6 @@ export function createUpdateDoctorHistoricalScanCapture(options: {
           encoded && encoded.length <= 64 * 1024
             ? UpdateDoctorHistoricalScansSchema.parse(JSON.parse(encoded))
             : [];
-        if (encoded && previous.length === 0) {
-          fallback("missing or oversized receipt");
-        }
         for (const [pathname, generation] of Object.entries(generations)) {
           if (generation === null) {
             continue;
