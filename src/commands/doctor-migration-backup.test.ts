@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import * as sqliteVec from "../infra/database-engine/sqlite-vec.js";
 import * as directoryDurability from "../infra/directory-durability.js";
@@ -11,6 +11,11 @@ import { backupDoctorMigrationDatabases } from "./doctor-migration-backup.js";
 import { inspectSessionSqliteRecovery } from "./doctor-session-sqlite-recovery-inventory.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+let fixture: ReturnType<typeof createFixture>;
+beforeEach(() => {
+  fixture = createFixture();
+});
+afterEach(() => vi.restoreAllMocks());
 
 function seedDatabase(databasePath: string, value: string) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -25,14 +30,15 @@ function readPreservedValue(databasePath: string) {
 }
 
 function listBackups(databasePath: string) {
+  const directory = path.dirname(databasePath);
   return fs
-    .readdirSync(path.dirname(databasePath))
+    .readdirSync(directory)
     .filter(
       (name) =>
         name.startsWith(`${path.basename(databasePath)}.pre-startup-migration-`) &&
         name.endsWith(".bak"),
     )
-    .map((name) => path.join(path.dirname(databasePath), name));
+    .map((name) => path.join(directory, name));
 }
 
 function createFixture() {
@@ -44,10 +50,10 @@ function createFixture() {
   return { shared, agent, env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } };
 }
 
-function addSecondAgent(fixture: ReturnType<typeof createFixture>) {
-  const secondAgent = path.join(path.dirname(fixture.agent), "second.sqlite");
+function addSecondAgent(first: ReturnType<typeof createFixture>) {
+  const secondAgent = path.join(path.dirname(first.agent), "second.sqlite");
   seedDatabase(secondAgent, "second before migration");
-  return { secondAgent, inventory: [fixture.agent, secondAgent] };
+  return { secondAgent, inventory: [first.agent, secondAgent] };
 }
 
 function partiallyMigrate(databasePath: string) {
@@ -56,9 +62,9 @@ function partiallyMigrate(databasePath: string) {
 }
 
 async function backup(
-  fixture: ReturnType<typeof createFixture>,
-  pendingDatabasePaths = [fixture.agent],
-  databasePaths = [fixture.agent],
+  source: ReturnType<typeof createFixture>,
+  pendingDatabasePaths = [source.agent],
+  databasePaths = [source.agent],
 ) {
   const maintenance = createOpenClawDatabaseMaintenanceScope({
     schemaMaintenance: true,
@@ -66,166 +72,143 @@ async function backup(
   });
   try {
     return await maintenance.run(() =>
-      backupDoctorMigrationDatabases({ env: fixture.env, pendingDatabasePaths, databasePaths }),
+      backupDoctorMigrationDatabases({ env: source.env, pendingDatabasePaths, databasePaths }),
     );
   } finally {
     await maintenance.close();
   }
 }
 
-describe("Doctor migration backup retries", () => {
-  it("backs up the full inventory when only the shared database has a pending migration", async () => {
-    const fixture = createFixture();
-    await backup(fixture, [fixture.shared]);
-    expect(listBackups(fixture.shared)).toHaveLength(1);
-    expect(listBackups(fixture.agent)).toHaveLength(1);
-    expect(readPreservedValue(listBackups(fixture.agent)[0]!)).toBe("agent before migration");
-    const preview = inspectSessionSqliteRecovery({ cfg: {}, env: fixture.env });
-    expect(preview.artifacts).toHaveLength(2);
-    expect(preview.artifacts).toEqual(
-      expect.arrayContaining(
-        [fixture.shared, fixture.agent].map((database) =>
-          expect.objectContaining({
-            path: listBackups(database)[0],
-            outcome: "protected",
-            reason: "incomplete-recovery-operation",
-          }),
-        ),
-      ),
+it("backs up the full inventory when only the shared database has a pending migration", async () => {
+  await backup(fixture, [fixture.shared]);
+  expect(listBackups(fixture.shared)).toHaveLength(1);
+  expect(listBackups(fixture.agent)).toHaveLength(1);
+  expect(readPreservedValue(listBackups(fixture.agent)[0]!)).toBe("agent before migration");
+  const preview = inspectSessionSqliteRecovery({ cfg: {}, env: fixture.env });
+  expect(preview.artifacts).toHaveLength(2);
+  for (const database of [fixture.shared, fixture.agent]) {
+    expect(preview.artifacts).toContainEqual(
+      expect.objectContaining({
+        path: listBackups(database)[0],
+        outcome: "protected",
+        reason: "incomplete-recovery-operation",
+      }),
     );
-  });
+  }
+});
 
-  it("does not reuse a completed group until capture-marker removal is durable", async () => {
-    const fixture = createFixture();
-    const syncDirectory = directoryDurability.syncDirectorySync;
-    const sync = vi
-      .spyOn(directoryDurability, "syncDirectorySync")
-      .mockImplementationOnce(syncDirectory)
-      .mockImplementationOnce(() => {
-        throw new Error("capture completion sync failed");
-      })
-      .mockImplementationOnce(() => {
-        throw new Error("capture completion sync failed");
-      });
-    try {
-      await expect(backup(fixture)).rejects.toThrow("capture completion sync failed");
-      await expect(backup(fixture)).rejects.toThrow("capture completion sync failed");
-    } finally {
-      sync.mockRestore();
-    }
-    const originals = [fixture.agent, fixture.shared].flatMap(listBackups);
-    await backup(fixture);
-    expect([fixture.agent, fixture.shared].flatMap(listBackups)).toEqual(originals);
-  });
+it("does not reuse a completed group until capture-marker removal is durable", async () => {
+  const syncDirectory = directoryDurability.syncDirectorySync;
+  const failSync = () => {
+    throw new Error("capture completion sync failed");
+  };
+  const sync = vi
+    .spyOn(directoryDurability, "syncDirectorySync")
+    .mockImplementationOnce(syncDirectory)
+    .mockImplementationOnce(failSync)
+    .mockImplementationOnce(failSync);
+  await expect(backup(fixture)).rejects.toThrow("capture completion sync failed");
+  await expect(backup(fixture)).rejects.toThrow("capture completion sync failed");
+  sync.mockRestore();
+  const originals = [fixture.agent, fixture.shared].flatMap(listBackups);
+  await backup(fixture);
+  expect([fixture.agent, fixture.shared].flatMap(listBackups)).toEqual(originals);
+});
 
-  it("recaptures the entire incomplete group after interruption and intervening writes", async () => {
-    const fixture = createFixture();
-    const originalCreateSnapshot = sqliteSnapshot.createVerifiedSqliteSnapshot;
-    const createSnapshot = vi
-      .spyOn(sqliteSnapshot, "createVerifiedSqliteSnapshot")
-      .mockImplementationOnce(originalCreateSnapshot)
-      .mockRejectedValueOnce(new Error("interrupted backup"));
-    try {
-      await expect(backup(fixture)).rejects.toThrow("interrupted backup");
-    } finally {
-      createSnapshot.mockRestore();
-    }
-    expect(listBackups(fixture.agent)).toHaveLength(1);
-    expect(listBackups(fixture.shared)).toHaveLength(0);
-    for (const source of [fixture.agent, fixture.shared]) {
-      using database = new DatabaseSync(source);
-      database.exec("UPDATE preserved SET value = 'after interruption';");
-    }
-    await backup(fixture);
-    for (const source of [fixture.agent, fixture.shared]) {
-      const backups = listBackups(source);
-      expect(backups).toHaveLength(1);
-      expect(readPreservedValue(backups[0]!)).toBe("after interruption");
-    }
-  });
+it("recaptures the entire incomplete group after interruption and intervening writes", async () => {
+  const originalCreateSnapshot = sqliteSnapshot.createVerifiedSqliteSnapshot;
+  const createSnapshot = vi
+    .spyOn(sqliteSnapshot, "createVerifiedSqliteSnapshot")
+    .mockImplementationOnce(originalCreateSnapshot)
+    .mockRejectedValueOnce(new Error("interrupted backup"));
+  await expect(backup(fixture)).rejects.toThrow("interrupted backup");
+  createSnapshot.mockRestore();
+  expect(listBackups(fixture.agent)).toHaveLength(1);
+  expect(listBackups(fixture.shared)).toHaveLength(0);
+  for (const source of [fixture.agent, fixture.shared]) {
+    using database = new DatabaseSync(source);
+    database.exec("UPDATE preserved SET value = 'after interruption';");
+  }
+  await backup(fixture);
+  for (const source of [fixture.agent, fixture.shared]) {
+    const backups = listBackups(source);
+    expect(backups).toHaveLength(1);
+    expect(readPreservedValue(backups[0]!)).toBe("after interruption");
+  }
+});
 
-  it("reuses the original rollback group after partial migration and repeated retries", async () => {
-    const fixture = createFixture();
+it("reuses the original rollback group after partial migration and repeated retries", async () => {
+  const { secondAgent, inventory } = addSecondAgent(fixture);
+  await backup(fixture, inventory, inventory);
+  const originals = [fixture.shared, ...inventory].map((source) => listBackups(source)[0]!);
+  expect(new Set(originals.map((name) => name.split(".pre-startup-migration-")[1])).size).toBe(1);
+
+  partiallyMigrate(fixture.agent);
+  const load = vi
+    .spyOn(sqliteVec, "loadSqliteVecExtension")
+    .mockRejectedValue(new Error("sqlite-vec cannot load on this CPU"));
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await backup(fixture, [secondAgent], inventory.toReversed());
+  }
+  expect(load).not.toHaveBeenCalled();
+
+  expect([fixture.shared, ...inventory].flatMap(listBackups).toSorted()).toEqual(
+    originals.toSorted(),
+  );
+  expect(readPreservedValue(listBackups(fixture.agent)[0]!)).toBe("agent before migration");
+  expect(readPreservedValue(listBackups(fixture.shared)[0]!)).toBe("shared before migration");
+  expect(readPreservedValue(fixture.agent)).toBe("partially migrated");
+});
+
+it.each(["symlink-agent", "missing-shared"] as const)(
+  "preserves a completed rollback group when %s damage is discovered after partial migration",
+  async (damage) => {
     const { secondAgent, inventory } = addSecondAgent(fixture);
     await backup(fixture, inventory, inventory);
-    const originals = [fixture.shared, ...inventory].map((source) => listBackups(source)[0]!);
-    expect(new Set(originals.map((name) => name.split(".pre-startup-migration-")[1])).size).toBe(1);
-
+    const originalAgent = listBackups(fixture.agent)[0]!;
+    const originalShared = listBackups(fixture.shared)[0]!;
+    const originalSecond = listBackups(secondAgent)[0]!;
+    const originalBytes = fs.readFileSync(originalSecond);
     partiallyMigrate(fixture.agent);
-    const load = vi
-      .spyOn(sqliteVec, "loadSqliteVecExtension")
-      .mockRejectedValue(new Error("sqlite-vec cannot load on this CPU"));
-    try {
-      for (let attempt = 0; attempt < 4; attempt++) {
-        await backup(fixture, [secondAgent], inventory.toReversed());
-      }
-      expect(load).not.toHaveBeenCalled();
-    } finally {
-      load.mockRestore();
+    const damaged = damage === "missing-shared" ? originalShared : originalAgent;
+    fs.unlinkSync(damaged);
+    if (damage === "symlink-agent") {
+      fs.symlinkSync(fixture.agent, damaged);
     }
+    const remaining = [fixture.shared, ...inventory].flatMap(listBackups);
 
-    expect([fixture.shared, ...inventory].flatMap(listBackups).toSorted()).toEqual(
-      originals.toSorted(),
-    );
-    expect(readPreservedValue(listBackups(fixture.agent)[0]!)).toBe("agent before migration");
-    expect(readPreservedValue(listBackups(fixture.shared)[0]!)).toBe("shared before migration");
+    await expect(backup(fixture, [secondAgent], inventory)).rejects.toMatchObject({
+      refusal: { kind: "data-at-risk", reason: "incomplete-migration" },
+    });
+    expect([fixture.shared, ...inventory].flatMap(listBackups)).toEqual(remaining);
+    expect(fs.readFileSync(originalSecond)).toEqual(originalBytes);
     expect(readPreservedValue(fixture.agent)).toBe("partially migrated");
-  });
+    if (damage === "missing-shared") {
+      expect(readPreservedValue(originalAgent)).toBe("agent before migration");
+    }
+  },
+);
 
-  it.each(["symlink-agent", "missing-shared"] as const)(
-    "preserves a completed rollback group when %s damage is discovered after partial migration",
-    async (damage) => {
-      const fixture = createFixture();
-      const { secondAgent, inventory } = addSecondAgent(fixture);
-      await backup(fixture, inventory, inventory);
-      const originalAgent = listBackups(fixture.agent)[0]!;
-      const originalShared = listBackups(fixture.shared)[0]!;
-      const originalSecond = listBackups(secondAgent)[0]!;
-      const originalBytes = fs.readFileSync(originalSecond);
-      partiallyMigrate(fixture.agent);
-      const damaged = damage === "missing-shared" ? originalShared : originalAgent;
-      fs.unlinkSync(damaged);
-      if (damage === "symlink-agent") {
-        fs.symlinkSync(fixture.agent, damaged);
-      }
-      const remaining = [fixture.shared, ...inventory].flatMap(listBackups);
+it("starts a new coherent group for a replaced database without removing older backups", async () => {
+  await backup(fixture);
+  const originalSharedBackup = listBackups(fixture.shared)[0]!;
+  const legacyBackup = `${fixture.shared}.pre-startup-migration-legacy-operator-copy.bak`;
+  fs.copyFileSync(originalSharedBackup, legacyBackup);
+  const originalBytes = fs.readFileSync(legacyBackup);
+  const newAgent = path.join(path.dirname(fixture.agent), "replacement.sqlite");
+  seedDatabase(newAgent, "new agent history");
+  fs.renameSync(newAgent, fixture.agent);
+  await backup(fixture);
+  await backup(fixture);
 
-      await expect(backup(fixture, [secondAgent], inventory)).rejects.toMatchObject({
-        refusal: { kind: "data-at-risk", reason: "incomplete-migration" },
-      });
-      expect([fixture.shared, ...inventory].flatMap(listBackups)).toEqual(remaining);
-      expect(fs.readFileSync(originalSecond)).toEqual(originalBytes);
-      expect(readPreservedValue(fixture.agent)).toBe("partially migrated");
-      if (damage === "missing-shared") {
-        expect(readPreservedValue(originalAgent)).toBe("agent before migration");
-      }
-    },
+  const newSharedBackups = listBackups(fixture.shared).filter(
+    (pathname) => pathname !== originalSharedBackup && pathname !== legacyBackup,
   );
-
-  it("starts a new coherent group for a replaced database without removing older backups", async () => {
-    const fixture = createFixture();
-    await backup(fixture);
-    const originalSharedBackup = listBackups(fixture.shared)[0]!;
-    const legacyBackup = `${fixture.shared}.pre-startup-migration-legacy-operator-copy.bak`;
-    fs.copyFileSync(originalSharedBackup, legacyBackup);
-    const originalBytes = fs.readFileSync(legacyBackup);
-    const newAgent = path.join(path.dirname(fixture.agent), "replacement.sqlite");
-    seedDatabase(newAgent, "new agent history");
-    fs.renameSync(newAgent, fixture.agent);
-    const currentAgent = fixture.agent;
-    const inventory = [fixture.agent];
-    await backup(fixture, [currentAgent], inventory);
-    await backup(fixture, [currentAgent], inventory);
-
-    const newSharedBackups = listBackups(fixture.shared).filter(
-      (pathname) => pathname !== originalSharedBackup && pathname !== legacyBackup,
-    );
-    expect(newSharedBackups).toHaveLength(1);
-    const newId = newSharedBackups[0]!.split(".pre-startup-migration-")[1];
-    const currentBackup = listBackups(currentAgent).find((pathname) => pathname.endsWith(newId!));
-    expect(currentBackup).toBeDefined();
-    expect(readPreservedValue(currentBackup!)).toBe("new agent history");
-    expect(fs.readFileSync(legacyBackup)).toEqual(originalBytes);
-    expect(fs.existsSync(originalSharedBackup)).toBe(true);
-  });
+  expect(newSharedBackups).toHaveLength(1);
+  const newId = newSharedBackups[0]!.split(".pre-startup-migration-")[1];
+  const currentBackup = listBackups(fixture.agent).find((pathname) => pathname.endsWith(newId!));
+  expect(currentBackup).toBeDefined();
+  expect(readPreservedValue(currentBackup!)).toBe("new agent history");
+  expect(fs.readFileSync(legacyBackup)).toEqual(originalBytes);
+  expect(fs.existsSync(originalSharedBackup)).toBe(true);
 });
