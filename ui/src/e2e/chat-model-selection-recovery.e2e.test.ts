@@ -29,8 +29,8 @@ const expectLoading = (picker: Locator) =>
 suite.define(() => {
   it.each([false, true])(
     "retains a confirmed model selection when the roster refresh fails=%s",
-    async (refreshFails) => {
-      await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+    (refreshFails) =>
+      suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
         const key = "agent:main:model-selection-proof";
         const row = {
           key,
@@ -101,47 +101,39 @@ suite.define(() => {
         await picker.locator(".chat-controls__model-menu").waitFor();
         expect(await trigger.getAttribute("data-chat-select-value")).toBe("openai/gpt-5.5");
         expect(await trigger.textContent()).toContain("GPT-5.5");
-      });
-    },
+      }),
   );
   it.each([
     { status: "error", message: "Models unavailable" },
     { status: "offline", message: "Offline" },
-  ] as const)(
-    "shows the $status catalog state when the panel arrives",
-    async ({ status, message }) => {
-      await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
-        const held = await holdOptions(page);
-        try {
-          const gateway = await installMockGateway(page, {
-            models: [],
-            methodResponses: {
-              "models.list": {
-                __mockError: { code: "UNAVAILABLE", message: "Synthetic catalog unavailable" },
-              },
-            },
-          });
-          await page.goto(`${suite.server.baseUrl}chat`);
-          const picker = page.locator(".chat-controls__model-picker").first();
-          const trigger = await openPicker(picker);
-          await held.request;
-          await gateway.waitForRequest("models.list");
-          await expectLoading(picker);
-          if (status === "offline") {
-            await gateway.setOnline(false);
-            await pollAttribute(trigger, "aria-disabled").toBe("true");
-          }
-          held.release();
-          await picker.locator(".chat-controls__model-menu").waitFor();
-          const notice = picker.locator(`[data-chat-model-catalog-state="${status}"]`);
-          await expect.poll(() => notice.isVisible()).toBe(true);
-          expect(await notice.textContent()).toBe(message);
-          expect(await notice.getAttribute("aria-live")).toBe("polite");
-        } finally {
-          held.release();
-        }
+  ] as const)("shows the $status catalog state when the panel arrives", ({ status, message }) =>
+    suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+      const held = await holdOptions(page);
+      const gateway = await installMockGateway(page, {
+        models: [],
+        methodResponses: {
+          "models.list": {
+            __mockError: { code: "UNAVAILABLE", message: "Synthetic catalog unavailable" },
+          },
+        },
       });
-    },
+      await page.goto(`${suite.server.baseUrl}chat`);
+      const picker = page.locator(".chat-controls__model-picker").first();
+      const trigger = await openPicker(picker);
+      await held.request;
+      await gateway.waitForRequest("models.list");
+      await expectLoading(picker);
+      if (status === "offline") {
+        await gateway.setOnline(false);
+        await pollAttribute(trigger, "aria-disabled").toBe("true");
+      }
+      held.release();
+      await picker.locator(".chat-controls__model-menu").waitFor();
+      const notice = picker.locator(`[data-chat-model-catalog-state="${status}"]`);
+      await expect.poll(() => notice.isVisible()).toBe(true);
+      expect(await notice.textContent()).toBe(message);
+      expect(await notice.getAttribute("aria-live")).toBe("polite");
+    }),
   );
   it.each([
     ["new", "open"],
@@ -150,62 +142,56 @@ suite.define(() => {
     ["chat", "open"],
     ["chat", "closed"],
     ["chat", "focus moved"],
-  ] as const)("keeps /%s usable while model choices load (%s)", async (route, state) => {
-    await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+  ] as const)("keeps /%s usable while model choices load (%s)", (route, state) =>
+    suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
       const held = await holdOptions(page);
-      try {
-        const models = ["Alpha", "Beta"].map((name) => ({
-          id: name.toLowerCase(),
-          name,
-          provider: "example",
-          contextWindow: 128_000,
-        }));
-        await installMockGateway(page, {
-          models,
-          agentModel: "example/alpha",
-          sessionInfo: { model: "alpha", modelProvider: "example" },
-        });
-        await page.goto(`${suite.server.baseUrl}${route}`);
-        const picker = page.locator(".chat-controls__model-picker").first();
-        const trigger = picker.locator("[data-chat-model-select]");
-        const textarea = page.locator(".agent-chat__input textarea").first();
-        await pollAttribute(trigger, "aria-disabled").toBe("false");
-        expect(held.requests()).toBe(0);
+      const models = ["Alpha", "Beta"].map((name) => ({
+        id: name.toLowerCase(),
+        name,
+        provider: "example",
+        contextWindow: 128_000,
+      }));
+      await installMockGateway(page, {
+        models,
+        agentModel: "example/alpha",
+        sessionInfo: { model: "alpha", modelProvider: "example" },
+      });
+      await page.goto(`${suite.server.baseUrl}${route}`);
+      const picker = page.locator(".chat-controls__model-picker").first();
+      const trigger = picker.locator("[data-chat-model-select]");
+      const textarea = page.locator(".agent-chat__input textarea").first();
+      await pollAttribute(trigger, "aria-disabled").toBe("false");
+      expect(held.requests()).toBe(0);
+      await trigger.click();
+      await held.request;
+      await expectLoading(picker);
+      expect(await picker.getAttribute("open")).not.toBeNull();
+      if (state === "closed") {
         await trigger.click();
-        await held.request;
-        await expectLoading(picker);
-        expect(await picker.getAttribute("open")).not.toBeNull();
-        if (state === "closed") {
-          await trigger.click();
-          expect(await picker.getAttribute("open")).toBeNull();
-        }
-        if (state !== "open") {
-          await textarea.focus();
-        }
-        held.release();
-        const search = picker.locator("[data-chat-model-search]");
-        await pollCount(search).toBe(1);
-        await expect
-          .poll(() =>
-            page.evaluate(() => document.activeElement?.hasAttribute("data-chat-model-search")),
-          )
-          .toBe(state === "open");
-        if (state !== "open") {
-          expect(await textarea.evaluate((element) => document.activeElement === element)).toBe(
-            true,
-          );
-          expect(await picker.getAttribute("open")).toBeNull();
-          await trigger.click();
-        }
-        await search.fill("Beta");
-        const choice = picker.locator('[data-chat-model-option="example/beta"]');
-        await expect.poll(() => choice.isVisible()).toBe(true);
-        await search.press("Enter");
-        await pollAttribute(picker, "open").toBeNull();
-        expect(held.requests()).toBe(1);
-      } finally {
-        held.release();
+        expect(await picker.getAttribute("open")).toBeNull();
       }
-    });
-  });
+      if (state !== "open") {
+        await textarea.focus();
+      }
+      held.release();
+      const search = picker.locator("[data-chat-model-search]");
+      await pollCount(search).toBe(1);
+      await expect
+        .poll(() =>
+          page.evaluate(() => document.activeElement?.hasAttribute("data-chat-model-search")),
+        )
+        .toBe(state === "open");
+      if (state !== "open") {
+        expect(await textarea.evaluate((element) => document.activeElement === element)).toBe(true);
+        expect(await picker.getAttribute("open")).toBeNull();
+        await trigger.click();
+      }
+      await search.fill("Beta");
+      const choice = picker.locator('[data-chat-model-option="example/beta"]');
+      await expect.poll(() => choice.isVisible()).toBe(true);
+      await search.press("Enter");
+      await pollAttribute(picker, "open").toBeNull();
+      expect(held.requests()).toBe(1);
+    }),
+  );
 });

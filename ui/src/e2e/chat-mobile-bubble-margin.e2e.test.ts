@@ -86,6 +86,8 @@ suite.define(() => {
             const desktop = await measure();
             for (const width of [390, 430]) {
               const label = `${testCase.id} at ${width} px in ${theme}`;
+              const pollMargin = <T>(project: (margin: Margin) => T) =>
+                expect.poll(async () => project(await measure()), { message: label });
               await resizeMarginViewport(page, width);
               if (testCase.selector === ".chat-session-activity") {
                 const activity = page.locator(".chat-thread .chat-session-activity");
@@ -109,18 +111,13 @@ suite.define(() => {
                 await expectBrowser(activity, label).toHaveJSProperty("open", false);
                 await expectBrowser(activity.locator(".chat-bubble"), label).toHaveCount(0);
               } else if (!("excluded" in testCase)) {
-                await expect
-                  .poll(
-                    async () => {
-                      const box = await measure();
-                      return box.open - box.columnWidth * 0.1;
-                    },
-                    { message: label },
-                  )
-                  .toBeGreaterThanOrEqual(-1);
-                await expect
-                  .poll(async () => (await measure()).closed, { message: label })
-                  .toBeCloseTo(testCase.id === "user-audio" ? 17 : 0, 0);
+                await pollMargin((box) => box.open - box.columnWidth * 0.1).toBeGreaterThanOrEqual(
+                  -1,
+                );
+                await pollMargin((box) => box.closed).toBeCloseTo(
+                  testCase.id === "user-audio" ? 17 : 0,
+                  0,
+                );
                 const mobile = await measure();
                 if (imageSize) {
                   const expectedWidth = Math.min(imageSize.width, mobile.columnWidth * 0.9);
@@ -141,19 +138,13 @@ suite.define(() => {
                 }
               }
               await resizeMarginViewport(page, 1440);
-              await expect
-                .poll(
-                  async () => {
-                    const restored = await measure();
-                    return Math.max(
-                      ...(["x", "y", "width", "height"] as const).map((key) =>
-                        Math.abs(restored[key] - desktop[key]),
-                      ),
-                    );
-                  },
-                  { message: `${label} desktop geometry` },
-                )
-                .toBeLessThanOrEqual(0.5);
+              await pollMargin((restored) =>
+                Math.max(
+                  ...(["x", "y", "width", "height"] as const).map((key) =>
+                    Math.abs(restored[key] - desktop[key]),
+                  ),
+                ),
+              ).toBeLessThanOrEqual(0.5);
             }
           }
         },

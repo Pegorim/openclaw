@@ -35,8 +35,8 @@ async function openComposer(page: Page, route: string, users: MentionUser[]) {
 suite.define(() => {
   it.each(["chat", "new"])(
     "reuses the picker photo and shows initials while it loads in %s",
-    async (route) => {
-      await suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
+    (route) =>
+      suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
         const profileId = "00000003-1111-4111-8111-000000000103";
         const avatarUrl = `/api/users/${profileId}/avatar?v=7`;
         const requests: string[] = [];
@@ -85,8 +85,7 @@ suite.define(() => {
         } finally {
           releasePhoto();
         }
-      });
-    },
+      }),
   );
 
   it.each([
@@ -95,8 +94,8 @@ suite.define(() => {
     { route: "new", count: 2 },
   ])(
     "keeps people identifiable without offline metadata in $route ($count people)",
-    async ({ route, count }) => {
-      await suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
+    ({ route, count }) =>
+      suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
         const users = Array.from({ length: count }, (_, index) => ({
           profileId: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-${String(index + 101).padStart(12, "0")}`,
           // The directory decorates duplicate names before returning them to the composer.
@@ -155,7 +154,6 @@ suite.define(() => {
         expect(await page.locator(".chat-reply-preview").textContent()).toContain(
           lastPerson.displayName,
         );
-      });
-    },
+      }),
   );
 });

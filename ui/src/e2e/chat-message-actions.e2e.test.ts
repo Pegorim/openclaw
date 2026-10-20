@@ -180,8 +180,8 @@ suite.define(() => {
   it.each([
     { name: "desktop", width: 1440, height: 900 },
     { name: "mobile", width: 390, height: 844 },
-  ])("keeps view-only subagent reply actions absent on $name", async (viewport) => {
-    await withPage(
+  ])("keeps view-only subagent reply actions absent on $name", (viewport) =>
+    withPage(
       async ({ page, context }) => {
         await context.grantPermissions(["clipboard-read", "clipboard-write"], {
           origin: new URL(suite.server.baseUrl).origin,
@@ -255,142 +255,139 @@ suite.define(() => {
         hasTouch: viewport.name === "mobile",
         viewport,
       },
-    );
-  });
+    ),
+  );
 
   it.each([
     { role: "assistant", kind: "document" },
     { role: "assistant", kind: "image" },
     { role: "user", kind: "document" },
     { role: "user", kind: "image" },
-  ] as const)(
-    "replies to $role $kind-only messages with a linked source",
-    async ({ role, kind }) => {
-      await withPage(async ({ page }) => {
-        await page.route("https://files.example.test/**", (route) => route.abort());
-        const sourceId = `attachment-only-${role}-${kind}`;
-        const runId = "attachment-reply-run";
-        const fileName = kind === "image" ? "openclaw-banner.png" : "report.pdf";
-        const imageUrl =
+  ] as const)("replies to $role $kind-only messages with a linked source", ({ role, kind }) =>
+    withPage(async ({ page }) => {
+      await page.route("https://files.example.test/**", (route) => route.abort());
+      const sourceId = `attachment-only-${role}-${kind}`;
+      const runId = "attachment-reply-run";
+      const fileName = kind === "image" ? "openclaw-banner.png" : "report.pdf";
+      const imageUrl =
+        kind === "image"
+          ? `data:image/png;base64,${(
+              await readFile(path.join(process.cwd(), "docs/assets/openclaw-banner-dark.png"))
+            ).toString("base64")}`
+          : "";
+      const source = {
+        role,
+        content:
           kind === "image"
-            ? `data:image/png;base64,${(
-                await readFile(path.join(process.cwd(), "docs/assets/openclaw-banner-dark.png"))
-              ).toString("base64")}`
-            : "";
-        const source = {
-          role,
-          content:
-            kind === "image"
-              ? [{ type: "image", url: imageUrl, fileName, alt: "OpenClaw banner" }]
-              : role === "user"
-                ? []
-                : [
-                    {
-                      type: "attachment",
-                      attachment: {
-                        kind: "document",
-                        url: "https://files.example.test/report.pdf",
-                        label: fileName,
-                        mimeType: "application/pdf",
-                      },
-                    },
-                  ],
-          timestamp: Date.now() - 2_000,
-          ...(role === "assistant" ? { phase: "final_answer", stopReason: "stop" } : {}),
-          __openclaw: {
-            id: sourceId,
-            seq: 2,
-            ...(role === "assistant" ? { runId } : {}),
-            ...(role === "user" && kind === "document"
-              ? {
-                  media: [
-                    {
+            ? [{ type: "image", url: imageUrl, fileName, alt: "OpenClaw banner" }]
+            : role === "user"
+              ? []
+              : [
+                  {
+                    type: "attachment",
+                    attachment: {
                       kind: "document",
                       url: "https://files.example.test/report.pdf",
-                      contentType: "application/pdf",
-                      fileName,
+                      label: fileName,
+                      mimeType: "application/pdf",
                     },
-                  ],
-                }
-              : {}),
-          },
-        };
-        const gateway = await installMockGateway(page, {
-          historyMessages:
-            role === "assistant"
-              ? [
-                  historyMessage(
-                    "user",
-                    "Create the requested file.",
-                    "attachment-request",
-                    1,
-                    -3_000,
-                    { idempotencyKey: `${runId}:user` },
-                  ),
-                  source,
-                ]
-              : [source],
-        });
-        await page.goto(`${suite.server.baseUrl}chat`);
-        await gateway.waitForRequest("chat.startup");
-        const bubble = page.locator(`.chat-bubble[data-entry-id="${sourceId}"]`);
-        await bubble.waitFor({ state: "visible" });
-        if (kind === "image") {
-          await expect
-            .poll(() =>
-              bubble
-                .locator(".chat-message-image")
-                .evaluate((image) =>
-                  image instanceof HTMLImageElement && image.complete ? image.naturalWidth : 0,
+                  },
+                ],
+        timestamp: Date.now() - 2_000,
+        ...(role === "assistant" ? { phase: "final_answer", stopReason: "stop" } : {}),
+        __openclaw: {
+          id: sourceId,
+          seq: 2,
+          ...(role === "assistant" ? { runId } : {}),
+          ...(role === "user" && kind === "document"
+            ? {
+                media: [
+                  {
+                    kind: "document",
+                    url: "https://files.example.test/report.pdf",
+                    contentType: "application/pdf",
+                    fileName,
+                  },
+                ],
+              }
+            : {}),
+        },
+      };
+      const gateway = await installMockGateway(page, {
+        historyMessages:
+          role === "assistant"
+            ? [
+                historyMessage(
+                  "user",
+                  "Create the requested file.",
+                  "attachment-request",
+                  1,
+                  -3_000,
+                  { idempotencyKey: `${runId}:user` },
                 ),
-            )
-            .toBeGreaterThan(0);
-        } else {
-          await bubble.getByText(fileName, { exact: true }).waitFor({ state: "visible" });
-        }
-        expect(await bubble.locator(".chat-text").count()).toBe(0);
-        const group = bubble.locator(
-          "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' chat-group ')]",
-        );
-        if (role === "assistant") {
-          expect(await group.getAttribute("data-chat-row-key")).toContain("agent-run:");
-        }
-        await group.hover();
-        const reply = group.getByRole("button", { name: "Reply to message", exact: true });
-        expect(await reply.count()).toBe(1);
-        expect(await group.getByRole("button", { name: "Copy as markdown" }).count()).toBe(0);
-        await reply.click();
-        const preview = page.locator(".chat-reply-preview").filter({
-          has: page.getByRole("button", { name: "Cancel reply" }),
-        });
-        await replyText(preview).toBe(fileName);
-        await preview.getByRole("button", { name: "Cancel reply" }).click();
-        await bubble.click({ button: "right", position: { x: 2, y: 2 } });
-        await page
-          .locator(".chat-reply-context-menu")
-          .getByRole("menuitem", { name: "Reply to message" })
-          .click();
-        await replyText(preview).toBe(fileName);
-        const text = "Please explain this file.";
-        await page.locator(".agent-chat__composer-combobox textarea").fill(text);
-        await page.getByRole("button", { name: "Send message", exact: true }).click();
-        const sent = await gateway.waitForRequest("chat.send");
-        expect(sent.params).toMatchObject({ message: text, replyToId: sourceId });
-        const sentPreview = page.locator(".chat-reply-attribution--inline");
-        await pollCount(sentPreview.getByRole("button")).toBe(1);
-        await sentPreview.getByRole("button").click();
+                source,
+              ]
+            : [source],
+      });
+      await page.goto(`${suite.server.baseUrl}chat`);
+      await gateway.waitForRequest("chat.startup");
+      const bubble = page.locator(`.chat-bubble[data-entry-id="${sourceId}"]`);
+      await bubble.waitFor({ state: "visible" });
+      if (kind === "image") {
         await expect
           .poll(() =>
-            bubble.evaluate((element) => element.classList.contains("chat-bubble--reply-target")),
+            bubble
+              .locator(".chat-message-image")
+              .evaluate((image) =>
+                image instanceof HTMLImageElement && image.complete ? image.naturalWidth : 0,
+              ),
           )
-          .toBe(true);
-        expect(await gateway.getRequests("chat.message.get")).toHaveLength(0);
+          .toBeGreaterThan(0);
+      } else {
+        await bubble.getByText(fileName, { exact: true }).waitFor({ state: "visible" });
+      }
+      expect(await bubble.locator(".chat-text").count()).toBe(0);
+      const group = bubble.locator(
+        "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' chat-group ')]",
+      );
+      if (role === "assistant") {
+        expect(await group.getAttribute("data-chat-row-key")).toContain("agent-run:");
+      }
+      await group.hover();
+      const reply = group.getByRole("button", { name: "Reply to message", exact: true });
+      expect(await reply.count()).toBe(1);
+      expect(await group.getByRole("button", { name: "Copy as markdown" }).count()).toBe(0);
+      await reply.click();
+      const preview = page.locator(".chat-reply-preview").filter({
+        has: page.getByRole("button", { name: "Cancel reply" }),
       });
-    },
+      await replyText(preview).toBe(fileName);
+      await preview.getByRole("button", { name: "Cancel reply" }).click();
+      await bubble.click({ button: "right", position: { x: 2, y: 2 } });
+      await page
+        .locator(".chat-reply-context-menu")
+        .getByRole("menuitem", { name: "Reply to message" })
+        .click();
+      await replyText(preview).toBe(fileName);
+      const text = "Please explain this file.";
+      await page.locator(".agent-chat__composer-combobox textarea").fill(text);
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
+      const sent = await gateway.waitForRequest("chat.send");
+      expect(sent.params).toMatchObject({ message: text, replyToId: sourceId });
+      const sentPreview = page.locator(".chat-reply-attribution--inline");
+      await pollCount(sentPreview.getByRole("button")).toBe(1);
+      await sentPreview.getByRole("button").click();
+      await expect
+        .poll(() =>
+          bubble.evaluate((element) => element.classList.contains("chat-bubble--reply-target")),
+        )
+        .toBe(true);
+      expect(await gateway.getRequests("chat.message.get")).toHaveLength(0);
+    }),
   );
 
-  it("keeps assistant actions hidden when the user message is last", async () => {
-    await withPage(async ({ page }) => {
+  it("keeps assistant actions hidden when the user message is last", () =>
+    withPage(async ({ page }) => {
       await installMockGateway(page, {
         historyMessages: [
           historyMessage("assistant", "Earlier assistant reply.", "earlier-assistant", 1, -4_000),
@@ -461,11 +458,10 @@ suite.define(() => {
       });
       await expectPresentation(latestAssistant, true);
       await expect.poll(inlinePresentation).toEqual({ opacity: "1", pointerEvents: "auto" });
-    });
-  });
+    }));
 
-  it("shares tooltip styling and dismissal across message metadata, actions, and file hints", async () => {
-    await withPage(
+  it("shares tooltip styling and dismissal across message metadata, actions, and file hints", () =>
+    withPage(
       async ({ page }) => {
         await installMockGateway(page, {
           historyMessages: [
@@ -538,11 +534,10 @@ suite.define(() => {
       {
         hasTouch: true,
       },
-    );
-  });
+    ));
 
-  it("keeps oversized history notices consistent through recovery and message actions", async () => {
-    await withPage(async ({ page, context }) => {
+  it("keeps oversized history notices consistent through recovery and message actions", () =>
+    withPage(async ({ page, context }) => {
       await context.grantPermissions(["clipboard-read", "clipboard-write"], {
         origin: new URL(suite.server.baseUrl).origin,
       });
@@ -809,6 +804,5 @@ suite.define(() => {
       await setThemeMode(page, "light");
       await fullTail.scrollIntoViewIfNeeded();
       expect(await gateway.getRequests("chat.message.get")).toHaveLength(1);
-    });
-  });
+    }));
 });

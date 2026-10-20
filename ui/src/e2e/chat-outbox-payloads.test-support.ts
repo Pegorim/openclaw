@@ -50,9 +50,7 @@ export async function countOutboxPayloads(page: Page): Promise<number> {
 }
 
 export async function readOutboxPayloadBytes(page: Page, key: string): Promise<string[] | null> {
-  return (
-    (await readOutboxPayloadAttachments(page, key))?.map((attachment) => attachment.base64) ?? null
-  );
+  return (await readOutboxPayloadAttachments(page, key))?.map(({ base64 }) => base64) ?? null;
 }
 
 export async function stageOutboxAttachment(page: Page, message: string) {
@@ -81,21 +79,14 @@ export async function outboxChatUrl(
 /** Pause native Blob decoding in the next document until reconnect has parked the source. */
 export async function holdOutboxPreviewReads(page: Page): Promise<() => Promise<number>> {
   await page.addInitScript(() => {
-    const NativeFileReader = FileReader;
+    const readAsDataURL = FileReader.prototype.readAsDataURL;
     const pending: Array<() => void> = [];
-    let released = false;
-    globalThis.FileReader = class extends NativeFileReader {
-      override readAsDataURL(blob: Blob): void {
-        if (released) {
-          super.readAsDataURL(blob);
-        } else {
-          pending.push(() => super.readAsDataURL(blob));
-        }
-      }
+    FileReader.prototype.readAsDataURL = function (this: FileReader, blob: Blob): void {
+      pending.push(() => readAsDataURL.call(this, blob));
     };
     Object.assign(window, {
       releaseOutboxPreviewRead() {
-        released = true;
+        FileReader.prototype.readAsDataURL = readAsDataURL;
         const reads = pending.splice(0);
         reads.forEach((resume) => resume());
         return reads.length;
