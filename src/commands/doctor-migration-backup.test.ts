@@ -14,22 +14,14 @@ const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 function seedDatabase(databasePath: string, value: string) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-  const database = new DatabaseSync(databasePath);
-  try {
-    database.exec("PRAGMA user_version = 1; CREATE TABLE preserved (value TEXT NOT NULL);");
-    database.prepare("INSERT INTO preserved VALUES (?)").run(value);
-  } finally {
-    database.close();
-  }
+  using database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA user_version = 1; CREATE TABLE preserved (value TEXT NOT NULL);");
+  database.prepare("INSERT INTO preserved VALUES (?)").run(value);
 }
 
 function readPreservedValue(databasePath: string) {
-  const database = new DatabaseSync(databasePath, { readOnly: true });
-  try {
-    return database.prepare("SELECT value FROM preserved").get()?.value;
-  } finally {
-    database.close();
-  }
+  using database = new DatabaseSync(databasePath, { readOnly: true });
+  return database.prepare("SELECT value FROM preserved").get()?.value;
 }
 
 function listBackups(databasePath: string) {
@@ -50,6 +42,17 @@ function createFixture() {
   seedDatabase(shared, "shared before migration");
   seedDatabase(agent, "agent before migration");
   return { shared, agent, env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } };
+}
+
+function addSecondAgent(fixture: ReturnType<typeof createFixture>) {
+  const secondAgent = path.join(path.dirname(fixture.agent), "second.sqlite");
+  seedDatabase(secondAgent, "second before migration");
+  return { secondAgent, inventory: [fixture.agent, secondAgent] };
+}
+
+function partiallyMigrate(databasePath: string) {
+  using database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA user_version = 24; UPDATE preserved SET value = 'partially migrated';");
 }
 
 async function backup(
@@ -130,12 +133,8 @@ describe("Doctor migration backup retries", () => {
     expect(listBackups(fixture.agent)).toHaveLength(1);
     expect(listBackups(fixture.shared)).toHaveLength(0);
     for (const source of [fixture.agent, fixture.shared]) {
-      const database = new DatabaseSync(source);
-      try {
-        database.exec("UPDATE preserved SET value = 'after interruption';");
-      } finally {
-        database.close();
-      }
+      using database = new DatabaseSync(source);
+      database.exec("UPDATE preserved SET value = 'after interruption';");
     }
     await backup(fixture);
     for (const source of [fixture.agent, fixture.shared]) {
@@ -147,19 +146,12 @@ describe("Doctor migration backup retries", () => {
 
   it("reuses the original rollback group after partial migration and repeated retries", async () => {
     const fixture = createFixture();
-    const secondAgent = path.join(path.dirname(fixture.agent), "second.sqlite");
-    seedDatabase(secondAgent, "second before migration");
-    const inventory = [fixture.agent, secondAgent];
+    const { secondAgent, inventory } = addSecondAgent(fixture);
     await backup(fixture, inventory, inventory);
     const originals = [fixture.shared, ...inventory].map((source) => listBackups(source)[0]!);
     expect(new Set(originals.map((name) => name.split(".pre-startup-migration-")[1])).size).toBe(1);
 
-    const migrated = new DatabaseSync(fixture.agent);
-    try {
-      migrated.exec("PRAGMA user_version = 24; UPDATE preserved SET value = 'partially migrated';");
-    } finally {
-      migrated.close();
-    }
+    partiallyMigrate(fixture.agent);
     const load = vi
       .spyOn(sqliteVec, "loadSqliteVecExtension")
       .mockRejectedValue(new Error("sqlite-vec cannot load on this CPU"));
@@ -184,22 +176,13 @@ describe("Doctor migration backup retries", () => {
     "preserves a completed rollback group when %s damage is discovered after partial migration",
     async (damage) => {
       const fixture = createFixture();
-      const secondAgent = path.join(path.dirname(fixture.agent), "second.sqlite");
-      seedDatabase(secondAgent, "second before migration");
-      const inventory = [fixture.agent, secondAgent];
+      const { secondAgent, inventory } = addSecondAgent(fixture);
       await backup(fixture, inventory, inventory);
       const originalAgent = listBackups(fixture.agent)[0]!;
       const originalShared = listBackups(fixture.shared)[0]!;
       const originalSecond = listBackups(secondAgent)[0]!;
       const originalBytes = fs.readFileSync(originalSecond);
-      const migrated = new DatabaseSync(fixture.agent);
-      try {
-        migrated.exec(
-          "PRAGMA user_version = 24; UPDATE preserved SET value = 'partially migrated';",
-        );
-      } finally {
-        migrated.close();
-      }
+      partiallyMigrate(fixture.agent);
       const damaged = damage === "missing-shared" ? originalShared : originalAgent;
       fs.unlinkSync(damaged);
       if (damage === "symlink-agent") {

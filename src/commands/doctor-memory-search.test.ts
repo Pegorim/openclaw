@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import type { DoctorMemoryEmbeddingRuntimePayload } from "../gateway/server-methods/doctor.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import type { MemoryHealth } from "../plugins/memory-provider-types.js";
 
 const note = vi.hoisted(() => vi.fn());
 const resolveDefaultAgentId = vi.hoisted(() => vi.fn(() => "agent-default"));
@@ -125,13 +127,18 @@ import {
   noteMemorySearchHealth,
   collectMemorySearchHealthFindings,
 } from "./doctor-memory-search.js";
-import {
-  createDoctorNoteAssertions,
-  registerProviderRuntimeDoctorTest,
-} from "./doctor-memory-search.provider-runtime.test-support.js";
 
-const { firstNoteMessage, expectFirstNoteContains, expectFirstNoteExcludes } =
-  createDoctorNoteAssertions(note);
+const firstNoteMessage = () => String(note.mock.calls[0]?.[0] ?? "");
+function expectFirstNoteContains(...values: string[]) {
+  for (const value of values) {
+    expect(firstNoteMessage()).toContain(value);
+  }
+}
+function expectFirstNoteExcludes(...values: string[]) {
+  for (const value of values) {
+    expect(firstNoteMessage()).not.toContain(value);
+  }
+}
 
 describe("noteMemorySearchHealth", () => {
   const cfg = {} as OpenClawConfig;
@@ -162,18 +169,19 @@ describe("noteMemorySearchHealth", () => {
     model: "text-embedding-bge-m3",
     remote: { baseUrl: "http://127.0.0.1:1234/v1" },
   };
-  type ProviderHealthScenario = [
-    string,
-    string,
-    NonNullable<Parameters<typeof noteMemorySearchHealth>[1]>,
-    {
-      overrides?: Record<string, unknown>;
-      config?: OpenClawConfig;
-      contains?: string[];
-      noNote?: boolean;
-      noApiKeyLookup?: boolean;
-    }?,
-  ];
+  function localRuntimeFacts(failed = false): DoctorMemoryEmbeddingRuntimePayload {
+    const endpoint = failed ? "unavailable" : "ready";
+    return {
+      engine: "llama.cpp",
+      state: failed ? "failed" : "ready",
+      backend: failed ? "cpu" : "metal",
+      buildInfo: "b10357 (689e227db)",
+      model: { id: "embedding-model", ...(failed ? {} : { path: "/models/embedding.gguf" }) },
+      capabilities: { vision: false, draft: false },
+      endpoints: { health: endpoint, models: endpoint, props: endpoint, metrics: endpoint },
+      ...(failed ? { loadError: "GGUF load failed" } : {}),
+    };
+  }
 
   function stubMemorySearchConfig(provider: string, overrides: Record<string, unknown> = {}) {
     resolveMemorySearchConfig.mockReturnValue({
@@ -234,23 +242,16 @@ describe("noteMemorySearchHealth", () => {
     resolveAgentDir.mockClear();
     resolveAgentWorkspaceDir.mockClear();
     resolveMemorySearchConfig.mockReset();
-    resolveApiKeyForProviderCore.mockReset();
-    resolveApiKeyForProviderCore.mockRejectedValue(new Error("missing key"));
-    hasAnyAuthProfileStoreSource.mockReset();
-    hasAnyAuthProfileStoreSource.mockReturnValue(true);
-    hasAuthProfileStoreSourceForProvider.mockReset();
-    hasAuthProfileStoreSourceForProvider.mockReturnValue(true);
-    isConfiguredAwsSdkAuthProfileForProvider.mockReset();
-    isConfiguredAwsSdkAuthProfileForProvider.mockReturnValue(false);
+    resolveApiKeyForProviderCore.mockReset().mockRejectedValue(new Error("missing key"));
+    hasAnyAuthProfileStoreSource.mockReset().mockReturnValue(true);
+    hasAuthProfileStoreSourceForProvider.mockReset().mockReturnValue(true);
+    isConfiguredAwsSdkAuthProfileForProvider.mockReset().mockReturnValue(false);
     getActiveMemorySearchManagerCore.mockReset();
     getActiveMemoryProviderCore.mockReset();
     getMissingLocalMemoryEmbeddingProviderMessage.mockClear();
-    inspectConfiguredEmbeddingProviderSetup.mockReset();
-    inspectConfiguredEmbeddingProviderSetup.mockResolvedValue(null);
-    listProviderPolicyOwners.mockReset();
-    listProviderPolicyOwners.mockReturnValue([{ id: "llama-cpp" }]);
-    loadProviderPolicyArtifacts.mockReset();
-    loadProviderPolicyArtifacts.mockImplementation((owners) => {
+    inspectConfiguredEmbeddingProviderSetup.mockReset().mockResolvedValue(null);
+    listProviderPolicyOwners.mockReset().mockReturnValue([{ id: "llama-cpp" }]);
+    loadProviderPolicyArtifacts.mockReset().mockImplementation((owners) => {
       const owner = owners[0];
       return owner
         ? {
@@ -259,14 +260,37 @@ describe("noteMemorySearchHealth", () => {
           }
         : null;
     });
-    resolveManifestOwnerBasePolicyBlock.mockReset();
-    resolveManifestOwnerBasePolicyBlock.mockReturnValue(null);
-    resolveActiveMemoryBackendConfig.mockReset();
-    resolveActiveMemoryBackendConfig.mockReturnValue({ backend: "builtin" });
+    resolveManifestOwnerBasePolicyBlock.mockReset().mockReturnValue(null);
+    resolveActiveMemoryBackendConfig.mockReset().mockReturnValue({ backend: "builtin" });
     noteWorkspaceMemoryHealth.mockClear();
   });
 
-  async function collectFindings(config: OpenClawConfig = cfg) {
+  function configureProviderHealth(health: MemoryHealth) {
+    const close = vi.fn().mockResolvedValue(undefined);
+    stubMemorySearchConfig("none");
+    resolveActiveMemoryBackendConfig.mockReturnValue({
+      backend: "provider-runtime",
+      providerId: "records",
+    });
+    getActiveMemoryProviderCore.mockResolvedValue({
+      providerId: "records",
+      provider: {
+        capabilities: {
+          sources: ["memory"],
+          pagination: false,
+          candidates: [],
+          projectFilter: false,
+        },
+        search: vi.fn().mockResolvedValue({ hits: [] }),
+        get: vi.fn().mockResolvedValue({ status: "not_found" }),
+        health: vi.fn().mockResolvedValue(health),
+        close,
+      },
+    });
+    return close;
+  }
+
+  function collectFindings(config: OpenClawConfig) {
     return collectMemorySearchHealthFindings({
       mode: "lint",
       cfg: config,
@@ -275,11 +299,36 @@ describe("noteMemorySearchHealth", () => {
     });
   }
 
-  registerProviderRuntimeDoctorTest({
-    cfg,
-    stubMemorySearchConfig,
-    noteMemorySearchHealth,
-    expectFirstNoteContains,
+  it("reports native provider health as an informational doctor note", async () => {
+    const close = configureProviderHealth({ status: "ready", message: "connected" });
+
+    await noteMemorySearchHealth(cfg, { includeWorkspaceMemoryHealth: false });
+
+    expectFirstNoteContains(
+      "Not applicable: records uses the provider runtime",
+      "Provider health: ready (connected)",
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("collects a native provider acquisition failure as an unavailable warning", async () => {
+    const close = configureProviderHealth({ status: "ready" });
+    getActiveMemoryProviderCore.mockRejectedValue(new Error("connection failed"));
+
+    const findings = await collectFindings(cfg);
+
+    expect(findings).toMatchObject([
+      {
+        checkId: "core/doctor/memory-search",
+        severity: "warning",
+        path: "plugins.slots.memory",
+      },
+    ]);
+    const diagnostic = `${findings[0]?.message} ${findings[0]?.fixHint}`;
+    expect(diagnostic).toContain("records");
+    expect(diagnostic).toContain("unavailable");
+    expect(diagnostic).toContain("connection failed");
+    expect(close).not.toHaveBeenCalled();
   });
 
   it("preserves disabled-memory lint filtering with multiple agents", async () => {
@@ -411,16 +460,6 @@ describe("noteMemorySearchHealth", () => {
     const earlierOwner = { id: "a-disabled" };
     const selectedOwner = { id: "b-policy" };
     listProviderPolicyOwners.mockReturnValueOnce([earlierOwner, selectedOwner]);
-    loadProviderPolicyArtifacts.mockImplementationOnce((owners) => {
-      const owner = owners[0];
-      if (!owner) {
-        throw new Error("missing selected provider owner");
-      }
-      return {
-        owner,
-        surface: { inspectEmbeddingProviderSetup: inspectConfiguredEmbeddingProviderSetup },
-      };
-    });
     resolveManifestOwnerBasePolicyBlock.mockImplementationOnce((params) =>
       params?.plugin.id === earlierOwner.id ? "plugin-disabled" : null,
     );
@@ -457,20 +496,7 @@ describe("noteMemorySearchHealth", () => {
       gatewayMemoryProbe: {
         checked: true,
         ready: true,
-        runtimeFacts: {
-          engine: "llama.cpp",
-          state: "ready",
-          backend: "metal",
-          buildInfo: "b10357 (689e227db)",
-          model: { id: "embedding-model", path: "/models/embedding.gguf" },
-          capabilities: { vision: false, draft: false },
-          endpoints: {
-            health: "ready",
-            models: "ready",
-            props: "ready",
-            metrics: "ready",
-          },
-        },
+        runtimeFacts: localRuntimeFacts(),
       },
     });
 
@@ -491,21 +517,7 @@ describe("noteMemorySearchHealth", () => {
         checked: true,
         ready: false,
         error: "GGUF load failed",
-        runtimeFacts: {
-          engine: "llama.cpp",
-          state: "failed",
-          backend: "cpu",
-          buildInfo: "b10357 (689e227db)",
-          model: { id: "embedding-model" },
-          capabilities: { vision: false, draft: false },
-          endpoints: {
-            health: "unavailable",
-            models: "unavailable",
-            props: "unavailable",
-            metrics: "unavailable",
-          },
-          loadError: "GGUF load failed",
-        },
+        runtimeFacts: localRuntimeFacts(true),
       },
     });
 
@@ -709,74 +721,61 @@ describe("noteMemorySearchHealth", () => {
     expect(note).not.toHaveBeenCalled();
   });
 
-  it.each<ProviderHealthScenario>([
-    [
-      "does not warn for ollama when gateway probe is ready without CLI API key",
-      "ollama",
-      readyGatewayOptions,
-      { noNote: true, noApiKeyLookup: true },
-    ],
-    [
-      "warns when lmstudio gateway probe reports embeddings are not ready",
-      "lmstudio",
-      failedGatewayOptions("LM API token missing"),
-      { contains: ['provider "lmstudio" is configured', "embeddings are not ready"] },
-    ],
-    [
-      "warns when openai-compatible is missing its required baseUrl even if probe was skipped",
-      "openai-compatible",
-      skippedGatewayOptions,
-      {
-        contains: [
-          'provider is set to "openai-compatible"',
-          "remote.baseUrl",
-          "openclaw config set",
-        ],
-        noApiKeyLookup: true,
-      },
-    ],
-    [
-      "warns when openai-compatible is missing its required model even if probe was skipped",
-      "openai-compatible",
-      skippedGatewayOptions,
-      {
-        overrides: { model: "   ", remote: openAiCompatibleEmbedding.remote },
-        contains: [
-          'provider is set to "openai-compatible"',
-          "memory.search.model",
-          "openclaw config set",
-        ],
-        noApiKeyLookup: true,
-      },
-    ],
-    [
-      "does not warn for baseUrl-only OpenAI-compatible custom providers when probe was skipped",
+  it("does not warn for ollama when gateway probe is ready without CLI API key", async () => {
+    await runMemorySearchHealth("ollama", readyGatewayOptions);
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
+  });
+
+  it("warns when lmstudio gateway probe reports embeddings are not ready", async () => {
+    await runMemorySearchHealth("lmstudio", failedGatewayOptions("LM API token missing"));
+    expect(note).toHaveBeenCalledTimes(1);
+    expectFirstNoteContains('provider "lmstudio" is configured', "embeddings are not ready");
+  });
+
+  it("warns when openai-compatible is missing its required baseUrl even if probe was skipped", async () => {
+    await runMemorySearchHealth("openai-compatible", skippedGatewayOptions);
+    expect(note).toHaveBeenCalledTimes(1);
+    expectFirstNoteContains(
+      'provider is set to "openai-compatible"',
+      "remote.baseUrl",
+      "openclaw config set",
+    );
+    expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
+  });
+
+  it("warns when openai-compatible is missing its required model even if probe was skipped", async () => {
+    await runMemorySearchHealth("openai-compatible", skippedGatewayOptions, {
+      model: "   ",
+      remote: openAiCompatibleEmbedding.remote,
+    });
+    expect(note).toHaveBeenCalledTimes(1);
+    expectFirstNoteContains(
+      'provider is set to "openai-compatible"',
+      "memory.search.model",
+      "openclaw config set",
+    );
+    expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
+  });
+
+  it("does not warn for baseUrl-only OpenAI-compatible custom providers when probe was skipped", async () => {
+    await runMemorySearchHealth(
       "localEmbeddings",
       skippedGatewayOptions,
+      { model: "text-embedding-bge-m3" },
       {
-        overrides: { model: "text-embedding-bge-m3" },
-        config: {
-          models: {
-            providers: { localEmbeddings: { baseUrl: "http://127.0.0.1:1234/v1", models: [] } },
+        models: {
+          providers: {
+            localEmbeddings: {
+              baseUrl: "http://127.0.0.1:1234/v1",
+              models: [],
+            },
           },
-        } as unknown as OpenClawConfig,
-        noNote: true,
-        noApiKeyLookup: true,
+        },
       },
-    ],
-  ])("%s", async (_name, provider, options, scenario = {}) => {
-    const { overrides, config, contains, noNote, noApiKeyLookup } = scenario;
-    await runMemorySearchHealth(provider, options, overrides, config ?? cfg);
-    if (noNote) {
-      expect(note).not.toHaveBeenCalled();
-    }
-    if (contains) {
-      expect(note).toHaveBeenCalledTimes(1);
-      expectFirstNoteContains(...contains);
-    }
-    if (noApiKeyLookup) {
-      expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
-    }
+    );
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
   });
 
   it("warns for explicit empty auth order when lint skips profile resolution", async () => {

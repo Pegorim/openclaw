@@ -92,19 +92,9 @@ describe("Memory Core cold startup migrations", () => {
           db.prepare(
             `INSERT INTO memory_index_chunks
              (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
-            "preserved-chunk",
-            "MEMORY.md",
-            "memory",
-            1,
-            1,
-            "chunk-hash",
-            "text-embedding-3-small",
-            "Keep this semantic memory.",
-            encodeMemoryEmbedding([1, 0, 0]),
-            1,
-          );
+             VALUES ('preserved-chunk', 'MEMORY.md', 'memory', 1, 1, 'chunk-hash',
+                     'text-embedding-3-small', 'Keep this semantic memory.', ?, 1)`,
+          ).run(encodeMemoryEmbedding([1, 0, 0]));
           const readSemanticData = () => ({
             metadata: db.prepare("SELECT * FROM memory_index_meta ORDER BY key").all(),
             chunks: db.prepare("SELECT * FROM memory_index_chunks ORDER BY id").all(),

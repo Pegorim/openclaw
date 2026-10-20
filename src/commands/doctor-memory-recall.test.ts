@@ -45,13 +45,6 @@ import { maybeRepairMemoryRecallHealth, noteMemoryRecallHealth } from "./doctor-
 function shortTermAudit(overrides: Record<string, unknown> = {}) {
   return {
     storePath: "/tmp/agent-default/workspace/memory/.dreams/short-term-recall.json",
-    lockPath: "/tmp/agent-default/workspace/memory/.dreams/short-term-promotion.lock",
-    exists: true,
-    entryCount: 1,
-    promotedCount: 0,
-    spacedEntryCount: 0,
-    conceptTaggedEntryCount: 1,
-    invalidEntryCount: 0,
     issues: [],
     ...overrides,
   };
@@ -60,14 +53,13 @@ function shortTermAudit(overrides: Record<string, unknown> = {}) {
 function dreamingAudit(overrides: Record<string, unknown> = {}) {
   return {
     sessionCorpusDir: "/tmp/agent-default/workspace/memory/.dreams/session-corpus",
-    sessionCorpusFileCount: 0,
-    suspiciousSessionCorpusFileCount: 0,
-    suspiciousSessionCorpusLineCount: 0,
-    sessionIngestionPath: "/tmp/agent-default/workspace/memory/.dreams/session-ingestion.json",
-    sessionIngestionExists: false,
     issues: [],
     ...overrides,
   };
+}
+
+function warning(code: string, message: string) {
+  return { severity: "warn", code, message, fixable: true };
 }
 
 function resetMemoryRecallMocks() {
@@ -147,24 +139,9 @@ describe("memory recall doctor integration", () => {
       }
       auditShortTermPromotionArtifacts.mockResolvedValueOnce(
         shortTermAudit({
-          entryCount: 12,
-          promotedCount: 4,
-          spacedEntryCount: 2,
-          conceptTaggedEntryCount: 10,
-          invalidEntryCount: 1,
           issues: [
-            {
-              severity: "warn",
-              code: "recall-store-invalid",
-              message: "Short-term recall store contains 1 invalid entry.",
-              fixable: true,
-            },
-            {
-              severity: "warn",
-              code: "recall-lock-stale",
-              message: "Short-term promotion lock appears stale.",
-              fixable: true,
-            },
+            warning("recall-store-invalid", "Short-term recall store contains 1 invalid entry."),
+            warning("recall-lock-stale", "Short-term promotion lock appears stale."),
           ],
         }),
       );
@@ -194,18 +171,11 @@ describe("memory recall doctor integration", () => {
   it("runs dreaming artifact repair during doctor --fix", async () => {
     auditDreamingArtifacts.mockResolvedValueOnce(
       dreamingAudit({
-        sessionCorpusFileCount: 2,
-        suspiciousSessionCorpusFileCount: 1,
-        suspiciousSessionCorpusLineCount: 3,
-        sessionIngestionExists: true,
         issues: [
-          {
-            severity: "warn",
-            code: "dreaming-session-corpus-self-ingested",
-            message:
-              "Dreaming session corpus appears to contain self-ingested narrative content (3 suspicious lines).",
-            fixable: true,
-          },
+          warning(
+            "dreaming-session-corpus-self-ingested",
+            "Dreaming session corpus appears to contain self-ingested narrative content (3 suspicious lines).",
+          ),
         ],
       }),
     );
@@ -244,18 +214,8 @@ describe("memory recall doctor integration", () => {
     listAgentIds.mockReturnValue(["agent-default", "secondary"]);
     auditShortTermPromotionArtifacts.mockImplementation(async ({ workspaceDir }) =>
       shortTermAudit({
-        storePath: `${workspaceDir}/memory/.dreams/short-term-recall.json`,
-        lockPath: `${workspaceDir}/memory/.dreams/short-term-promotion.lock`,
-        invalidEntryCount: workspaceDir.includes("secondary") ? 1 : 0,
         issues: workspaceDir.includes("secondary")
-          ? [
-              {
-                severity: "warn",
-                code: "recall-store-invalid",
-                message: "Secondary recall is invalid.",
-                fixable: true,
-              },
-            ]
+          ? [warning("recall-store-invalid", "Secondary recall is invalid.")]
           : [],
       }),
     );
