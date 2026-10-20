@@ -42,8 +42,6 @@ import { waitForMemoryReindexLock } from "./manager-reindex-lock.js";
 import type { MemoryIndexManager } from "./manager.js";
 import { isolateMemoryManagerTestConfig } from "./test-config-helpers.js";
 
-const writeMetadata = MemoryIndexDatabase.prototype.writeMetadata;
-
 type SyncArchiveParams = { needsFullReindex: boolean; targetArchiveFiles?: string[] };
 
 type ReindexHarness = {
@@ -210,11 +208,9 @@ describe("memory manager reindex recovery", () => {
     await writeSources("replacement");
     harness.sessionsDirty = true;
     harness.sessionsDirtyFiles.add(transcript);
-    vi.spyOn(MemoryIndexDatabase.prototype, "writeMetadata")
-      .mockImplementation(writeMetadata)
-      .mockImplementationOnce(() => {
-        throw new Error("late reindex failure");
-      });
+    vi.spyOn(MemoryIndexDatabase.prototype, "writeMetadata").mockImplementationOnce(() => {
+      throw new Error("late reindex failure");
+    });
     await expect(memoryManager.sync({ force: true })).rejects.toThrow("late reindex failure");
     expect(harness).toMatchObject({
       dirty: true,
@@ -661,7 +657,6 @@ describe("memory manager reindex recovery", () => {
       batchEmbeddingCalls = [];
       const metadata = vi
         .spyOn(MemoryIndexDatabase.prototype, "writeMetadata")
-        .mockImplementation(writeMetadata)
         .mockImplementationOnce(() => {
           throw new Error("late runtime batch failure");
         });

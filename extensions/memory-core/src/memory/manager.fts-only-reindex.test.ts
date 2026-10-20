@@ -27,8 +27,6 @@ import { MemoryIndexDatabase } from "./manager-database-context.js";
 import type { MemoryIndexManager } from "./manager.js";
 import "./test-runtime-mocks.js";
 
-const writeMetadata = MemoryIndexDatabase.prototype.writeMetadata;
-
 let providerConstructionError: Error | null = null;
 let providerConstructionGate: Promise<void> | null = null;
 let providerAvailable = false;
@@ -272,7 +270,6 @@ describe("memory manager FTS-only reindex", () => {
       const memoryManager = await createManager();
       const metadata = vi
         .spyOn(MemoryIndexDatabase.prototype, "writeMetadata")
-        .mockImplementation(writeMetadata)
         .mockImplementationOnce(() => {
           throw new Error("keyword publication failed");
         });

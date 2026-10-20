@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveSessionTranscriptsDirForAgent } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
+import * as memoryFoundation from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import * as memorySessions from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import {
@@ -21,7 +21,6 @@ import {
 } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { createOpenClawTestState, type OpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
-import { emitSessionTranscriptUpdate } from "../../../../src/sessions/transcript-events.js";
 import {
   ensureMemorySessionTombstones,
   recordMemorySessionTombstonesInDatabase,
@@ -64,7 +63,7 @@ describe("session startup catch-up", () => {
     content = "startup catchup",
     timestamp?: string,
   ): Promise<{ filePath: string; size: number; mtimeMs: number }> {
-    const sessionsDir = resolveSessionTranscriptsDirForAgent("main");
+    const sessionsDir = memoryFoundation.resolveSessionTranscriptsDirForAgent("main");
     await fs.mkdir(sessionsDir, { recursive: true });
     const filePath = path.join(sessionsDir, name);
     await fs.writeFile(
@@ -550,10 +549,19 @@ describe("session startup catch-up", () => {
       vi.useFakeTimers();
       const session = await writeSessionFile(fileName);
       const harness = await Harness.create([], true);
-      harness.startTranscriptListener();
+      const subscribe = memoryFoundation.onInternalSessionTranscriptUpdate;
+      let listener: Parameters<typeof subscribe>[0] | undefined;
+      const subscription = vi
+        .spyOn(memoryFoundation, "onInternalSessionTranscriptUpdate")
+        .mockImplementation((receive) => {
+          listener = receive;
+          return subscribe(receive);
+        });
 
       try {
-        emitSessionTranscriptUpdate({ sessionFile: session.filePath });
+        harness.startTranscriptListener();
+        assert.isDefined(listener);
+        listener({ sessionFile: session.filePath });
         await harness.waitForCorpusList();
         await flushSessionSync(harness, 31_000);
 
@@ -564,6 +572,7 @@ describe("session startup catch-up", () => {
         expect([harness.syncCalls, harness.indexedPaths]).toEqual([[], []]);
       } finally {
         harness.stopTranscriptListener();
+        subscription.mockRestore();
       }
     },
   );

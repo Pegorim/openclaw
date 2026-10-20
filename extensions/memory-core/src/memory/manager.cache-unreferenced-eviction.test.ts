@@ -20,8 +20,6 @@ import { MemoryIndexDatabase } from "./manager-database-context.js";
 import type { MemoryIndexManager } from "./manager.js";
 import { isolateMemoryManagerTestConfig } from "./test-config-helpers.js";
 
-const writeMetadata = MemoryIndexDatabase.prototype.writeMetadata;
-
 type EvictionHarness = {
   db: DatabaseSync;
   cache: { maxEntries?: number };
@@ -203,12 +201,12 @@ describe("memory manager embedding cache eviction at the cap", () => {
     vi.spyOn(Date, "now").mockImplementation(() => now);
     // A sibling caches a vector for a chunk it has not published yet, after this
     // rebuild started and before it publishes. No published chunk carries its hash.
-    vi.spyOn(MemoryIndexDatabase.prototype, "writeMetadata")
-      .mockImplementation(writeMetadata)
-      .mockImplementationOnce(function (this: MemoryIndexDatabase, meta) {
-        insertCacheRow(identity, "pending-sibling", Date.now());
-        return writeMetadata.call(this, meta);
-      });
+    const metadata = vi.spyOn(MemoryIndexDatabase.prototype, "writeMetadata");
+    metadata.mockImplementationOnce(function (this: MemoryIndexDatabase, meta) {
+      insertCacheRow(identity, "pending-sibling", Date.now());
+      metadata.mockRestore();
+      return this.writeMetadata(meta);
+    });
     harness.cache.maxEntries = 2;
 
     await memoryManager.sync({ reason: "cli", force: true });
