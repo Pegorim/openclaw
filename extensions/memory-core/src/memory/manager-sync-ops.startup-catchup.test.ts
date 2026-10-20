@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { createOpenClawTestState, type OpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
+import { emitSessionTranscriptUpdate } from "../../../../src/sessions/transcript-events.js";
 import {
   ensureMemorySessionTombstones,
   recordMemorySessionTombstonesInDatabase,
@@ -28,9 +29,7 @@ import {
 import * as cpuRuntime from "./manager-cpu-worker-runtime.js";
 import {
   SessionStartupCatchupHarness as Harness,
-  emitSessionTranscriptUpdate,
   startupHarnessDatabases,
-  resetTranscriptUpdateListener,
 } from "./manager-sync-ops.startup-catchup.test-support.js";
 
 describe("session startup catch-up", () => {
@@ -44,13 +43,11 @@ describe("session startup catch-up", () => {
     });
     await captureRuntimeConfigAsyncReader()();
     stateDir = testState.stateDir;
-    resetTranscriptUpdateListener();
   });
 
   afterEach(async () => {
     vi.clearAllTimers();
     vi.useRealTimers();
-    resetTranscriptUpdateListener();
     for (const database of startupHarnessDatabases) {
       await database.closeShadow();
     }
@@ -268,7 +265,7 @@ describe("session startup catch-up", () => {
       updatedAtMs: 10,
       sessionKind: "interactive",
     });
-    const harness = await Harness.create([sourceRow(entry, 20)], true, false);
+    const harness = await Harness.create([sourceRow(entry, 20)], true);
 
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const observed = observeHostDataSql();
@@ -320,7 +317,7 @@ describe("session startup catch-up", () => {
     });
     const forgotten = await writeSqliteSession({ storePath, sessionId: "forgotten-thread" });
     await writeSqliteSession({ storePath, sessionId: "unrelated-thread" });
-    const harness = await Harness.create([], true, false, {
+    const harness = await Harness.create([], true, {
       session: { store: storePath },
     });
     harness.addPendingSessionTarget({
@@ -432,7 +429,7 @@ describe("session startup catch-up", () => {
       content: "replacement store target",
     });
     await configureTestSessionStore(session.storePath);
-    const harness = await Harness.create([], false, false, {
+    const harness = await Harness.create([], false, {
       session: { store: session.storePath },
     });
     harness.afterNextCorpusListForTest(async () => {
@@ -453,7 +450,7 @@ describe("session startup catch-up", () => {
   it("indexes a persisted SQLite append through the real transcript listener", async () => {
     vi.useFakeTimers();
     const session = await writeSqliteSession();
-    const harness = await Harness.create([], true, true);
+    const harness = await Harness.create([], true);
     const turnContext = new AsyncLocalStorage<string>();
     const pendingInputContext = new AsyncLocalStorage<string>();
     turnContext.run("opening turn", () => harness.startTranscriptListener());
@@ -488,6 +485,28 @@ describe("session startup catch-up", () => {
       expect(harness.indexedContents).toEqual([
         "User: startup catchup\nAssistant: persisted listener update",
       ]);
+
+      const sibling = await Harness.create([], true);
+      const restarted = harness.restartForStartup();
+      sibling.startTranscriptListener();
+      restarted.startTranscriptListener();
+      try {
+        // Retiring one subscriber must leave both independent native listeners attached.
+        harness.stopTranscriptListener();
+        await append(session, "after restart", "assistant");
+        await publishSessionTranscriptUpdateByIdentity(session);
+        await vi.advanceTimersByTimeAsync(31_000);
+        await Promise.all([sibling.waitForSessionSync(), restarted.waitForSessionSync()]);
+        expect(harness.syncCalls).toHaveLength(1);
+        const contents = [
+          "User: startup catchup\nAssistant: persisted listener update\nAssistant: after restart",
+        ];
+        expect(sibling.indexedContents).toEqual(contents);
+        expect(restarted.indexedContents).toEqual(contents);
+      } finally {
+        sibling.stopTranscriptListener();
+        restarted.stopTranscriptListener();
+      }
     } finally {
       harness.stopTranscriptListener();
       timerObserver.mockRestore();
@@ -497,7 +516,7 @@ describe("session startup catch-up", () => {
   it("indexes a real SQLite delete archive through the transcript listener", async () => {
     vi.useFakeTimers();
     const session = await writeSqliteSession({ content: "lifecycle archive memory" });
-    const harness = await Harness.create([], true, true);
+    const harness = await Harness.create([], true);
     harness.startTranscriptListener();
 
     try {

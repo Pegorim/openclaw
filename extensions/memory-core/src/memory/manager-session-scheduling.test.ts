@@ -6,10 +6,9 @@ import {
 } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createOpenClawTestState, type OpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { emitSessionTranscriptUpdate } from "../../../../src/sessions/transcript-events.js";
 import { createMemoryEmbeddingOperationError } from "./manager-embedding-errors.js";
 import {
-  emitSessionTranscriptUpdate,
-  resetTranscriptUpdateListener,
   SessionStartupCatchupHarness,
   startupHarnessDatabases,
 } from "./manager-sync-ops.startup-catchup.test-support.js";
@@ -52,7 +51,6 @@ describe("session index scheduling", () => {
     harness.stopTranscriptListener();
     vi.clearAllTimers();
     vi.useRealTimers();
-    resetTranscriptUpdateListener();
     for (const database of startupHarnessDatabases) {
       await database.closeShadow();
     }
