@@ -13,6 +13,12 @@ import { restoreGatewayRunRecovery } from "./operator-run-recovery.js";
 import { createOperatorRecoveryFixture } from "./operator-run-recovery.test-support.js";
 import { createContext } from "./server-plugin-in-process-dispatch.test-support.js";
 
+function expectRestrictedModel(
+  operator: NonNullable<Awaited<ReturnType<typeof restoreGatewayRunRecovery>>["operator"]>,
+) {
+  expect(operator.authority.modelPolicy?.models).toEqual([{ provider: "fixture", model: "b" }]);
+}
+
 describe("restart recovery requester custody", () => {
   it("restores only the requester bound to the current durable source claim", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
@@ -172,6 +178,27 @@ describe("restart recovery requester custody", () => {
       let recovered = await restore();
       const active = expectDefined(recovered.operator, "initial recovered operator");
       const restoredAuthorities = [active];
+      const compact = (
+        currentTarget: typeof target,
+        entry: typeof fixture.entry,
+        sessionId: string,
+        onCommitted?: () => void,
+      ) =>
+        acceptCompactionSuccessor({
+          currentTarget,
+          expectedEntry: {
+            sessionId: entry.sessionId,
+            lifecycleRevision: entry.lifecycleRevision,
+            activeWriterRunId: entry.activeWriterRunId,
+          },
+          assertActive: active.authority.assertCurrent,
+          onCommitted,
+          result: {
+            ok: true,
+            compacted: true,
+            result: { sessionId, tokensBefore: 120, tokensAfter: 42 },
+          },
+        });
       try {
         expect(recovered.requesterOrigin).toEqual(requesterOrigin);
         for (const sessionId of ["first-successor", "second-successor"]) {
@@ -180,24 +207,10 @@ describe("restart recovery requester custody", () => {
             "current predecessor",
           );
           const predecessorTarget = target;
-          const accepted = await acceptCompactionSuccessor({
-            currentTarget: target,
-            expectedEntry: {
-              sessionId: predecessor.sessionId,
-              lifecycleRevision: predecessor.lifecycleRevision,
-              activeWriterRunId: predecessor.activeWriterRunId,
-            },
-            assertActive: active.authority.assertCurrent,
-            onCommitted: () => {
-              if (sessionId === "second-successor") {
-                throw new Error("compaction fact observer failed");
-              }
-            },
-            result: {
-              ok: true,
-              compacted: true,
-              result: { sessionId, tokensBefore: 120, tokensAfter: 42 },
-            },
+          const accepted = await compact(target, predecessor, sessionId, () => {
+            if (sessionId === "second-successor") {
+              throw new Error("compaction fact observer failed");
+            }
           });
           expect(accepted.entry.sessionId).toBe(sessionId);
           fixture.setConfig(current);
@@ -208,32 +221,15 @@ describe("restart recovery requester custody", () => {
           restoredAuthorities.push(successor);
           expect(recovered.requesterOrigin).toEqual(requesterOrigin);
           expect(active.authority.assertCurrent).not.toThrow();
-          expect(active.authority.modelPolicy?.models).toEqual([
-            { provider: "fixture", model: "b" },
-          ]);
-          expect(successor.authority.modelPolicy?.models).toEqual([
-            { provider: "fixture", model: "b" },
-          ]);
+          expectRestrictedModel(active);
+          expectRestrictedModel(successor);
           expect(successor.authority.profileId).toBe(profile.id);
           expect(successor.authority.assertCurrent).not.toThrow();
         }
         const restored = expectDefined(recovered.operator, "model-restricted recovery");
-        await expect(
-          acceptCompactionSuccessor({
-            currentTarget: fixture.target,
-            expectedEntry: {
-              sessionId: fixture.entry.sessionId,
-              lifecycleRevision: fixture.entry.lifecycleRevision,
-              activeWriterRunId: fixture.entry.activeWriterRunId,
-            },
-            assertActive: active.authority.assertCurrent,
-            result: {
-              ok: true,
-              compacted: true,
-              result: { sessionId: "stale-successor", tokensBefore: 120, tokensAfter: 42 },
-            },
-          }),
-        ).rejects.toThrow(SessionTranscriptWriterClaimReboundError);
+        await expect(compact(fixture.target, fixture.entry, "stale-successor")).rejects.toThrow(
+          SessionTranscriptWriterClaimReboundError,
+        );
         expect(active.authority.assertCurrent).not.toThrow();
         expect(restored.authority.assertCurrent).not.toThrow();
         expect(restored.authority.rolePolicy).toMatchObject({
@@ -246,9 +242,7 @@ describe("restart recovery requester custody", () => {
           allow: ["fixture/a", "fixture/b", "fixture/c"],
         };
         fixture.setConfig(widened);
-        expect(restored.authority.modelPolicy?.models).toEqual([
-          { provider: "fixture", model: "b" },
-        ]);
+        expectRestrictedModel(restored);
         setUserProfileRole(profile.id, "revoked");
         expect(active.authority.assertCurrent).toThrow("authority changed");
         expect(restored.authority.assertCurrent).toThrow("authority changed");
@@ -257,22 +251,9 @@ describe("restart recovery requester custody", () => {
           await readSessionEntryReadOnlyInWorker(target),
           "retained successor",
         );
-        await expect(
-          acceptCompactionSuccessor({
-            currentTarget: target,
-            expectedEntry: {
-              sessionId: retainedSuccessor.sessionId,
-              lifecycleRevision: retainedSuccessor.lifecycleRevision,
-              activeWriterRunId: retainedSuccessor.activeWriterRunId,
-            },
-            assertActive: active.authority.assertCurrent,
-            result: {
-              ok: true,
-              compacted: true,
-              result: { sessionId: "revoked-successor", tokensBefore: 120, tokensAfter: 42 },
-            },
-          }),
-        ).rejects.toThrow("authority changed");
+        await expect(compact(target, retainedSuccessor, "revoked-successor")).rejects.toThrow(
+          "authority changed",
+        );
         expect((await readSessionEntryReadOnlyInWorker(target))?.sessionId).toBe(
           "second-successor",
         );
