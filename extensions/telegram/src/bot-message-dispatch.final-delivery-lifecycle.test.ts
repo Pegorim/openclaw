@@ -11,12 +11,12 @@ import {
   createBot,
   createContext,
   createDirectSessionPayload,
-  createStatusReactionController,
-  createTelegramDraftStream,
-  deliverInboundReplyWithMessageSendContext,
+  createStatusReactionController as createReactions,
+  createTelegramDraftStream as createDraftStream,
+  deliverInboundReplyWithMessageSendContext as deliverInbound,
   deliverReplies,
   describeTelegramDispatch,
-  dispatchReplyWithBufferedBlockDispatcher,
+  dispatchReplyWithBufferedBlockDispatcher as dispatchReplyMock,
   dispatchWithContext,
   editMessageTelegram,
   emitToolStart,
@@ -38,15 +38,28 @@ function retiredPluginError() {
   );
 }
 
-async function setupObservedProgressTransport() {
+function resolveReply(
+  replyResolver: NonNullable<DispatchReplyWithBufferedBlockDispatcherArgs["replyResolver"]>,
+) {
+  dispatchReplyMock.mockImplementationOnce((params) =>
+    dispatchThroughSharedOwner({ ...params, replyResolver }),
+  );
+}
+
+async function installRealDelivery() {
   const [draft, delivery, edit] = await Promise.all([
     vi.importActual<typeof DraftStreamModule>("./draft-stream.js"),
     vi.importActual<typeof DeliveryRepliesModule>("./bot/delivery.replies.js"),
     vi.importActual<typeof SendEditModule>("./send-edit.js"),
   ]);
-  createTelegramDraftStream.mockImplementation(draft.createTelegramDraftStream);
+  createDraftStream.mockImplementation(draft.createTelegramDraftStream);
   deliverReplies.mockImplementation(delivery.deliverStructuredReplies);
   editMessageTelegram.mockImplementation(edit.editMessageTelegram);
+  return { draft, delivery, edit };
+}
+
+async function setupObservedProgressTransport() {
+  const { delivery } = await installRealDelivery();
   const bot = createBot();
   const messages = new Map<number, string>();
   let nextMessageId = 1000;
@@ -90,7 +103,7 @@ async function setupObservedProgressTransport() {
 
 let inboundSequence = 0;
 
-function progressContext(statusReactionController = createStatusReactionController()) {
+function progressContext(statusReactionController = createReactions()) {
   const messageId = 456 + inboundSequence++;
   return createContext({
     ctxPayload: {
@@ -114,6 +127,22 @@ const progressConfig = {
   streaming: { mode: "progress", progress: { toolProgress: true } },
 } as const;
 
+function dispatchTurn(
+  bot: Bot,
+  options: Omit<Parameters<typeof dispatchWithContext>[0], "bot" | "context" | "telegramCfg"> & {
+    status?: ReturnType<typeof createReactions>;
+  } = {},
+) {
+  const { status, streamMode = "partial", ...rest } = options;
+  return dispatchWithContext({
+    bot,
+    context: progressContext(status),
+    streamMode,
+    telegramCfg: streamMode === "progress" ? progressConfig : { streaming: { mode: streamMode } },
+    ...rest,
+  });
+}
+
 describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -133,7 +162,7 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
     "preserves accepted content and reports $failure with streaming $mode",
     async ({ failure, mode }) => {
       const { bot, messages, sendMessage, deleteMessage } = await setupObservedProgressTransport();
-      const failedStatus = createStatusReactionController();
+      const failedStatus = createReactions();
       const prefix = "Accepted final prefix";
       const tail = "Rejected final tail";
       const partial = failure === "rejected tail";
@@ -141,7 +170,7 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
         ? `${prefix}\n\n${tail}`
         : "The answer whose delivery cannot be confirmed";
       if (partial) {
-        deliverInboundReplyWithMessageSendContext.mockImplementationOnce(async () => {
+        deliverInbound.mockImplementationOnce(async () => {
           const accepted = await bot.api.sendMessage(123, prefix);
           sendMessage.mockRejectedValueOnce(new Error("final tail rejected"));
           try {
@@ -158,16 +187,16 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
           throw new Error("Expected the final tail send to reject");
         });
       } else if (failure === "retired instance") {
-        deliverInboundReplyWithMessageSendContext.mockRejectedValueOnce(retiredPluginError());
+        deliverInbound.mockRejectedValueOnce(retiredPluginError());
       } else if (failure === "network failure" || failure === "opaque fetch failure") {
         const error = new Error("fetch failed");
         if (failure === "network failure") {
           error.cause = Object.assign(new Error("socket closed"), { code: "ECONNRESET" });
         }
-        deliverInboundReplyWithMessageSendContext.mockRejectedValueOnce(error);
+        deliverInbound.mockRejectedValueOnce(error);
       } else {
         // A confirmed non-send may be retried without rerunning the model.
-        deliverInboundReplyWithMessageSendContext.mockResolvedValue({ status: "handled_no_send" });
+        deliverInbound.mockResolvedValue({ status: "handled_no_send" });
       }
       const replyResolver = vi.fn<
         NonNullable<DispatchReplyWithBufferedBlockDispatcherArgs["replyResolver"]>
@@ -178,15 +207,10 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
         }
         return { text: finalText };
       });
-      dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) =>
-        dispatchThroughSharedOwner({ ...params, replyResolver }),
-      );
-      const telegramCfg = mode === "progress" ? progressConfig : { streaming: { mode } };
-      const result = await dispatchWithContext({
-        bot,
-        context: progressContext(failedStatus),
+      resolveReply(replyResolver);
+      const result = await dispatchTurn(bot, {
+        status: failedStatus,
         streamMode: mode,
-        telegramCfg,
         retryDispatchErrors: true,
         suppressFailureFallback: true,
       });
@@ -206,7 +230,7 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
       expect(failedStatus.setError).toHaveBeenCalledOnce();
       expect(failedStatus.setDone).not.toHaveBeenCalled();
       if (failure !== "definite no-send") {
-        expect(deliverInboundReplyWithMessageSendContext).toHaveBeenCalledOnce();
+        expect(deliverInbound).toHaveBeenCalledOnce();
         expect(result).toEqual({ kind: "completed" });
       }
       if (mode === "progress") {
@@ -223,26 +247,19 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
       }
 
       const retainedFailure = [...messages.entries()];
-      const nextStatus = createStatusReactionController();
-      deliverInboundReplyWithMessageSendContext.mockResolvedValue({
+      const nextStatus = createReactions();
+      deliverInbound.mockResolvedValue({
         status: "unsupported",
         reason: "missing_outbound_handler",
       });
       const nextText = "The next turn succeeds";
-      dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) =>
-        dispatchThroughSharedOwner({
-          ...params,
-          replyResolver: async (_ctx, options) => {
-            await emitToolStart(options, { name: "read", phase: "start", toolCallId: "next-1" });
-            return { text: nextText };
-          },
-        }),
-      );
-      await dispatchWithContext({
-        bot,
-        context: progressContext(nextStatus),
+      resolveReply(async (_ctx, options) => {
+        await emitToolStart(options, { name: "read", phase: "start", toolCallId: "next-1" });
+        return { text: nextText };
+      });
+      await dispatchTurn(bot, {
+        status: nextStatus,
         streamMode: mode,
-        telegramCfg,
       });
       await vi.advanceTimersByTimeAsync(5_000);
 
@@ -256,17 +273,17 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
 
   it("keeps a confirmed streamed answer when prompt-context recording fails", async () => {
     const { bot, messages, sendMessage } = await setupObservedProgressTransport();
-    const status = createStatusReactionController();
+    const status = createReactions();
     const preview = "Answer in progress while checking the completed result";
     const final = "Complete answer already accepted by Telegram";
     const contextFailure = new Error("prompt context recording failed");
     const recordContext = vi.fn(async () => {
       throw contextFailure;
     });
-    dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) => {
+    dispatchReplyMock.mockImplementationOnce(async (params) => {
       await params.replyOptions?.onAssistantMessageStart?.();
       await params.replyOptions?.onPartialReply?.({ text: preview });
-      await createTelegramDraftStream.mock.results[0]?.value?.flush();
+      await createDraftStream.mock.results[0]?.value?.flush();
       expect([...messages.values()]).toEqual([preview]);
       return dispatchThroughSharedOwner({
         ...params,
@@ -274,12 +291,9 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
       });
     });
 
-    const result = await dispatchWithContext({
-      bot,
+    const result = await dispatchTurn(bot, {
+      status,
       cfg: { channels: { telegram: { botToken: "synthetic-test-token" } } },
-      context: progressContext(status),
-      streamMode: "partial",
-      telegramCfg: { streaming: { mode: "partial" } },
       moduleMocks: {
         ...telegramDepsForTest,
         recordOutboundMessageForPromptContext: recordContext,
@@ -301,10 +315,10 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
     const { bot, messages, sendMessage } = await setupObservedProgressTransport();
     const preTool = "Let me check the workspace first";
     const final = "The workspace has three projects";
-    dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) => {
+    dispatchReplyMock.mockImplementationOnce(async (params) => {
       await params.replyOptions?.onAssistantMessageStart?.();
       await params.replyOptions?.onPartialReply?.({ text: preTool });
-      await createTelegramDraftStream.mock.results[0]?.value?.flush();
+      await createDraftStream.mock.results[0]?.value?.flush();
       expect([...messages.values()]).toEqual([preTool]);
       return dispatchThroughSharedOwner({
         ...params,
@@ -316,12 +330,7 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
       });
     });
 
-    const result = await dispatchWithContext({
-      bot,
-      context: progressContext(),
-      streamMode: "partial",
-      telegramCfg: { streaming: { mode: "partial" } },
-    });
+    const result = await dispatchTurn(bot);
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(sendMessage.mock.calls.map(([, text]) => text)).toEqual([
@@ -335,32 +344,21 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
 
   it("does not retry or erase an accepted final after late cancellation", async () => {
     const { bot, messages, sendMessage, deliver } = await setupObservedProgressTransport();
-    const status = createStatusReactionController();
+    const status = createReactions();
     const abortController = new AbortController();
     deliverReplies.mockImplementationOnce(async (params) => {
       const result = await deliver(params);
       abortController.abort(new Error("turn cancelled after final acceptance"));
       return result;
     });
-    dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) =>
-      dispatchThroughSharedOwner({
-        ...params,
-        replyResolver: async (_ctx, options) => {
-          await emitToolStart(options, {
-            name: "exec",
-            phase: "start",
-            toolCallId: "cleanup-1",
-          });
-          return { text: "Accepted final survives cleanup" };
-        },
-      }),
-    );
+    resolveReply(async (_ctx, options) => {
+      await emitToolStart(options, { name: "exec", phase: "start", toolCallId: "cleanup-1" });
+      return { text: "Accepted final survives cleanup" };
+    });
 
-    await dispatchWithContext({
-      bot,
-      context: progressContext(status),
+    await dispatchTurn(bot, {
+      status,
       streamMode: "progress",
-      telegramCfg: progressConfig,
       retryDispatchErrors: true,
       turnAdoptionLifecycle: {
         abortSignal: abortController.signal,
@@ -383,15 +381,15 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
 
   it("uses the second assistant preview as the current final when delivery is rejected", async () => {
     const { bot, messages, sendMessage, editMessageText } = await setupObservedProgressTransport();
-    const status = createStatusReactionController();
+    const status = createReactions();
     const first = "First accepted answer";
     const partial = "Second answer in progress while inspecting the result";
     const second = "Second complete answer";
-    dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async (params) => {
+    dispatchReplyMock.mockImplementationOnce(async (params) => {
       await params.dispatcherOptions.deliver({ text: first }, { kind: "final" });
       await params.replyOptions?.onAssistantMessageStart?.();
       await params.replyOptions?.onPartialReply?.({ text: partial });
-      await createTelegramDraftStream.mock.results[0]?.value?.flush();
+      await createDraftStream.mock.results[0]?.value?.flush();
       expect([...messages.values()]).toEqual([first, partial]);
       editMessageText.mockRejectedValueOnce(new Error("second final edit rejected"));
       sendMessage.mockRejectedValueOnce(new Error("second final send rejected"));
@@ -400,12 +398,9 @@ describeTelegramDispatch("dispatchTelegramMessage final-delivery-lifecycle", () 
         replyResolver: async () => ({ text: second }),
       });
     });
-    await dispatchWithContext({
-      bot,
+    await dispatchTurn(bot, {
+      status,
       cfg: { channels: { telegram: { botToken: "synthetic-test-token" } } },
-      context: progressContext(status),
-      streamMode: "partial",
-      telegramCfg: { streaming: { mode: "partial" } },
       retryDispatchErrors: true,
       suppressFailureFallback: true,
     });
@@ -441,14 +436,14 @@ describeTelegramDispatch("dispatchTelegramMessage native questions", () => {
       const register = vi
         .spyOn(questionGatewayRuntime, "registerChannelDelivery")
         .mockImplementation(() => {});
-      const statusReactionController = createStatusReactionController();
+      const statusReactionController = createReactions();
       try {
-        const actualDraft = await vi.importActual<typeof DraftStreamModule>("./draft-stream.js");
-        const actualDelivery = await vi.importActual<typeof DeliveryRepliesModule>(
-          "./bot/delivery.replies.js",
-        );
-        const actualEdit = await vi.importActual<typeof SendEditModule>("./send-edit.js");
-        createTelegramDraftStream.mockImplementation((params) => {
+        const {
+          draft: actualDraft,
+          delivery: actualDelivery,
+          edit: actualEdit,
+        } = await installRealDelivery();
+        createDraftStream.mockImplementation((params) => {
           const stream = actualDraft.createTelegramDraftStream(params);
           draft ??= stream;
           return stream;
@@ -513,54 +508,45 @@ describeTelegramDispatch("dispatchTelegramMessage native questions", () => {
           client: { fetch: asTelegramClientFetch(fetch) },
         });
         let questionMessageId: number | undefined;
-        dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
-          async ({ dispatcherOptions, replyOptions }) => {
-            await emitToolStart(replyOptions, {
-              name: "exec",
-              toolCallId: "check",
-              phase: "start",
-            });
-            await vi.advanceTimersByTimeAsync(1500);
-            await draft?.flush();
-            expect([...visible.values()].some((text) => text.includes("Exec"))).toBe(true);
-            await dispatcherOptions.deliver(
-              {
-                ...question,
-                channelData: {
-                  ...question.channelData,
-                  ...(controls === "buttons"
-                    ? {
-                        telegram: {
-                          buttons: [[{ text: "Continue", callback_data: "ask:continue" }]],
-                        },
-                      }
-                    : {}),
-                },
+        dispatchReplyMock.mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+          await emitToolStart(replyOptions, {
+            name: "exec",
+            toolCallId: "check",
+            phase: "start",
+          });
+          await vi.advanceTimersByTimeAsync(1500);
+          await draft?.flush();
+          expect([...visible.values()].some((text) => text.includes("Exec"))).toBe(true);
+          await dispatcherOptions.deliver(
+            {
+              ...question,
+              channelData: {
+                ...question.channelData,
+                ...(controls === "buttons"
+                  ? {
+                      telegram: {
+                        buttons: [[{ text: "Continue", callback_data: "ask:continue" }]],
+                      },
+                    }
+                  : {}),
               },
-              { kind: "tool" },
-            );
-            questionMessageId = draft?.messageId();
-            expect(visible.get(questionMessageId ?? -1)).toBe(
-              "Should this harmless check continue?",
-            );
-            await emitToolStart(replyOptions, { name: "wait", toolCallId: "wait", phase: "start" });
-            await vi.advanceTimersByTimeAsync(1500);
-            await draft?.flush();
-            expect(visible.get(questionMessageId ?? -1)).toBe(
-              "Should this harmless check continue?",
-            );
-            if (controls === "buttons") {
-              expect(keyboards.get(questionMessageId ?? -1)).toEqual({
-                inline_keyboard: [[{ text: "Continue", callback_data: "ask:continue" }]],
-              });
-            }
-            await dispatcherOptions.deliver(
-              { text: "The question has settled." },
-              { kind: "final" },
-            );
-            return { queuedFinal: true };
-          },
-        );
+            },
+            { kind: "tool" },
+          );
+          questionMessageId = draft?.messageId();
+          expect(visible.get(questionMessageId ?? -1)).toBe("Should this harmless check continue?");
+          await emitToolStart(replyOptions, { name: "wait", toolCallId: "wait", phase: "start" });
+          await vi.advanceTimersByTimeAsync(1500);
+          await draft?.flush();
+          expect(visible.get(questionMessageId ?? -1)).toBe("Should this harmless check continue?");
+          if (controls === "buttons") {
+            expect(keyboards.get(questionMessageId ?? -1)).toEqual({
+              inline_keyboard: [[{ text: "Continue", callback_data: "ask:continue" }]],
+            });
+          }
+          await dispatcherOptions.deliver({ text: "The question has settled." }, { kind: "final" });
+          return { queuedFinal: true };
+        });
         await dispatchWithContext({
           bot,
           cfg: { channels: { telegram: { botToken: "123456:question-fixture" } } },

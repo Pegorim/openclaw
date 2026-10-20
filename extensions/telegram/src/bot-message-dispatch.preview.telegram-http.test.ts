@@ -22,6 +22,15 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     dispatchProgressTurn,
     waitForBotApiCall,
   } = http;
+  const texts = () => [...visibleMessages.values()];
+  const sentTexts = () =>
+    acceptedCalls.filter((call) => call.method === "sendMessage").map((call) => call.fields.text);
+  const waitForText = (text: string, method?: string) =>
+    waitForBotApiCall((call) => (!method || call.method === method) && call.fields.text === text);
+  const waitForContaining = (text: string, method?: string) =>
+    waitForBotApiCall(
+      (call) => (!method || call.method === method) && String(call.fields.text).includes(text),
+    );
 
   it.each([
     ["partial", ""],
@@ -136,41 +145,25 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     ]);
     expect(JSON.stringify(calls)).not.toContain("fixture-secret");
     expect(calls.some((call) => call.method === "editMessageText")).toBe(false);
-    await dispatchProgressTurn(
-      async (_options, channelOptions) => {
-        expect(channelOptions?.disableBlockStreaming).toBe(true);
-      },
-      {
-        mode,
-        toolProgress: false,
-        telegramCfg: {
-          streaming: { mode, block: { enabled: false } },
+    const expected = ["Checking filtered while work continues.", "Finished filtered."];
+    for (const [label, config] of [
+      ["Opted-out", { telegramCfg: { streaming: { mode, block: { enabled: false } } } }],
+      ["Global-off", { cfg: { agents: { defaults: { blockStreamingDefault: "off" } } } }],
+    ] as const) {
+      await dispatchProgressTurn(
+        async (_options, channelOptions) => {
+          expect(channelOptions?.disableBlockStreaming).toBe(true);
         },
-        finalReply: { text: "Opted-out final fixture-secret." },
-      },
-    );
-    expect([...visibleMessages.values()]).toEqual([
-      "Checking filtered while work continues.",
-      "Finished filtered.",
-      "Opted-out final filtered.",
-    ]);
-    await dispatchProgressTurn(
-      async (_options, channelOptions) => {
-        expect(channelOptions?.disableBlockStreaming).toBe(true);
-      },
-      {
-        mode,
-        toolProgress: false,
-        cfg: { agents: { defaults: { blockStreamingDefault: "off" } } },
-        finalReply: { text: "Global-off final fixture-secret." },
-      },
-    );
-    expect([...visibleMessages.values()]).toEqual([
-      "Checking filtered while work continues.",
-      "Finished filtered.",
-      "Opted-out final filtered.",
-      "Global-off final filtered.",
-    ]);
+        {
+          mode,
+          toolProgress: false,
+          ...config,
+          finalReply: { text: `${label} final fixture-secret.` },
+        },
+      );
+      expected.push(`${label} final filtered.`);
+      expect(texts()).toEqual(expected);
+    }
   });
 
   it.each([
@@ -287,10 +280,6 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     }
     expect(preview).toHaveLength(1);
     expect(pages[0]?.[0]).toBe(preview[0]?.[0]);
-    expect(pages.map(([, text]) => text).join("")).toBe(finalText);
-    for (const [, text] of pages) {
-      expect(text.length).toBeLessThanOrEqual(600);
-    }
     expect(pages.map(([, text]) => text)).toEqual([
       "A".repeat(600),
       "B".repeat(600),
@@ -464,9 +453,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         await emitToolStart(options, { name: "exec", phase: "start", toolCallId: "first" });
         await options?.onAssistantMessageStart?.();
         await options?.onPartialReply?.({ text: answer, delta: answer });
-        await waitForBotApiCall(
-          (call) => call.method === "sendMessage" && call.fields.text === answer,
-        );
+        await waitForText(answer, "sendMessage");
         await emitToolStart(options, { name: "exec", phase: "update", toolCallId: "first" });
       },
       { mode: "partial", toolProgress: false, finalReply: { text: failure, isError: true } },
@@ -491,9 +478,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         await replyOptions?.onBlockReplyQueued?.(first, { assistantMessageIndex: 0 });
         await replyOptions?.onBlockReplyQueued?.(second, { assistantMessageIndex: 1 });
         dispatcher.sendBlockReply(first);
-        await waitForBotApiCall(
-          (call) => call.method === "sendMessage" && call.fields.text === first.text,
-        );
+        await waitForText(first.text!, "sendMessage");
         firstPreviewId = [...visibleMessages.keys()][0];
         dispatcher.sendBlockReply(second);
         dispatcher.sendFinalReply(second);
@@ -503,9 +488,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
     });
     expect([...visibleMessages.values()]).toEqual([first.text, second.text]);
     expect(visibleMessages.get(firstPreviewId!)).toBe(first.text);
-    expect(
-      acceptedCalls.filter((call) => call.method === "sendMessage").map((call) => call.fields.text),
-    ).toEqual([first.text, second.text]);
+    expect(sentTexts()).toEqual([first.text, second.text]);
   });
 
   it("retires a skipped indexed block preview before the next assistant answer", async () => {
@@ -521,9 +504,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
       toolProgress: false,
       producer: async ({ dispatcher, replyOptions }) => {
         await replyOptions?.onPartialReply?.({ text: discarded });
-        await waitForBotApiCall(
-          (call) => call.method === "sendMessage" && call.fields.text === discarded,
-        );
+        await waitForText(discarded, "sendMessage");
         discardedPreviewId = [...visibleMessages.keys()][0];
         await replyOptions?.onBlockReplyQueued?.(skipped, { assistantMessageIndex: 0 });
         await replyOptions?.onAssistantMessageStart?.();
@@ -541,9 +522,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         .filter((call) => call.method === "deleteMessage")
         .map((call) => Number(call.fields.message_id)),
     ).toEqual([discardedPreviewId]);
-    expect(
-      acceptedCalls.filter((call) => call.method === "sendMessage").map((call) => call.fields.text),
-    ).toEqual([discarded, answer]);
+    expect(sentTexts()).toEqual([discarded, answer]);
   });
 
   it.each([false, true])(
@@ -599,9 +578,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
           toolCallId: "exec-1",
           args: { command: "echo fixture-private-token" },
         });
-        await waitForBotApiCall(
-          (call) => call.method === "sendMessage" && String(call.fields.text).includes("Exec"),
-        );
+        await waitForContaining("Exec", "sendMessage");
         expect(
           await channelOptions?.onToolResult?.({
             text: "Formatted summary must not replace the command",
@@ -625,10 +602,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
             isError: true,
           }),
         );
-        await waitForBotApiCall(
-          (call) =>
-            call.method === "editMessageText" && String(call.fields.text).includes("failed"),
-        );
+        await waitForContaining("failed", "editMessageText");
         const card = [...visibleMessages.values()][0] ?? "";
         expect(card.match(/Exec/gu)).toHaveLength(1);
         expect(card).toContain("🛠️ Exec");
@@ -664,7 +638,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
             // A preamble replaces reasoning rows, so verify token updates before it arrives.
             await options?.onReasoningProgress?.({ progressTokens: 50 });
             await options?.onReasoningProgress?.({ progressTokens: 200 });
-            await waitForBotApiCall((call) => String(call.fields.text).includes("200 tokens"));
+            await waitForContaining("200 tokens");
             const card = [...visibleMessages.values()][0] ?? "";
             expect(card).toContain("200 tokens");
             expect(card).not.toContain("50 tokens");
@@ -693,7 +667,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
               channelData: { openclawProgressKind: "fast-mode-auto" },
             }),
           ).toBe(true);
-          await waitForBotApiCall((call) => String(call.fields.text).includes("Fast mode enabled"));
+          await waitForContaining("Fast mode enabled");
           expect(
             [...visibleMessages.values()].join("\n").match(/Fast mode enabled/gu),
           ).toHaveLength(1);
@@ -767,11 +741,7 @@ describe("Telegram preview, presentation, and progress delivery through HTTP", (
         ).toBe(preamble);
         expect([...visibleMessages.values()]).not.toContain("Inspecting the requested files");
         if (!preamble) {
-          expect(
-            acceptedCalls
-              .filter((call) => call.method === "sendMessage")
-              .map((call) => call.fields.text),
-          ).toEqual([diagnostic, "Inspection complete."]);
+          expect(sentTexts()).toEqual([diagnostic, "Inspection complete."]);
         }
       }
     },
