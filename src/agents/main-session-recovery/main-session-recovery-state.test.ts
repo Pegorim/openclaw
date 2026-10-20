@@ -823,12 +823,9 @@ describe("main session recovery state", () => {
     expect(
       projectLifecycle(
         { restartRecoveryRuns: [{ runId: "ordinary-run", lifecycleGeneration: "generation-1" }] },
-        {
-          runId: "ordinary-run",
-          lifecycleGeneration: "generation-1",
-          data: { phase: "error", stopReason: "user" },
-        },
+        "ordinary-run",
         { status: "killed", abortedLastRun: true },
+        { data: { phase: "error", stopReason: "user" } },
       ),
     ).toEqual({
       action: "apply",
