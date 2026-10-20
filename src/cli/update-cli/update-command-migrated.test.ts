@@ -13,7 +13,7 @@ import {
   withinTest,
 } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import { asResolvedSourceConfig, asRuntimeConfig } from "../../config/materialize.js";
+import { createTestConfigSnapshot } from "../../commands/test-runtime-config-helpers.js";
 import { readDaemonRuntimePin } from "../../daemon/runtime-pin-state.js";
 import * as nodeSqlite from "../../infra/node-sqlite.js";
 import {
@@ -26,7 +26,6 @@ import {
   resolveRuntimeWorkerArgv,
   resolveRuntimeWorkerUrl,
 } from "../../infra/runtime-worker-url.js";
-import { resolveSqliteDatabaseFilePath } from "../../infra/sqlite-database-admission.js";
 import { migrateDaemonRuntimePins } from "../../infra/state-migrations.daemon-runtime-pins.js";
 import * as temporaryState from "../../infra/tmp-openclaw-dir.js";
 import {
@@ -49,12 +48,14 @@ import { createUpdateProgress } from "./progress.js";
 import { prepareCandidateAuthorityRuntime } from "./update-command-candidate-authority.test-support.js";
 import { createUpdateCommandExecutionGuards } from "./update-command-execution-guards.js";
 import { withUpdateCommandExecutor } from "./update-command-executor.js";
+import { finishParams, updateResult } from "./update-command-maintenance-fixtures.test-support.js";
 import {
   MIGRATED_FIXTURE_NO_SERVICE,
   migratedFinalizeFixtureEntrypoint,
 } from "./update-command-migrated-fixture-entrypoint.test-support.js";
 import {
   expectMigratedPackageFinalization,
+  observeMigratedStateOpens,
   type MigratedPackageFinalizationCase,
 } from "./update-command-migrated-package.test-support.js";
 import { continueMigratedUpdateInFreshProcess } from "./update-command-migrated.js";
@@ -353,14 +354,12 @@ it.for([
                 JSON.stringify({
                   readOnlyEntrypoint: runtimeProcessEntrypoints.sqliteReadOnly,
                   progressGate: progressGate?.endpoint,
-                  ...(replay
+                  replay: replay
                     ? {
-                        replay: {
-                          path: replayEvents,
-                          refuseStep: replay === "refused" ? "receiver-second" : undefined,
-                        },
+                        path: replayEvents,
+                        refuseStep: replay === "refused" ? "receiver-second" : undefined,
                       }
-                    : {}),
+                    : undefined,
                 }),
                 ...argv.slice(2),
               ],
@@ -371,19 +370,7 @@ it.for([
         }
         if (settlement) {
           terminalFromCandidate = inspectTerminal();
-          const open = nodeSqlite.openNodeSqliteDatabase;
-          const migratedStateLocation = nodeSqlite.resolveNodeSqliteLocation(database.path);
-          vi.spyOn(nodeSqlite, "openNodeSqliteDatabase").mockImplementation((...args) => {
-            // SQLite encodes Windows filenames separately from file URLs. The
-            // observer must not turn the executor's lease writes into failed cleanup.
-            const openedPath = nodeSqlite.resolveNodeSqliteLocation(
-              resolveSqliteDatabaseFilePath(args[0]),
-            );
-            if (openedPath === migratedStateLocation) {
-              oldRuntimeOpens.push(args[0]);
-            }
-            return open(...args);
-          });
+          observeMigratedStateOpens(database.path, oldRuntimeOpens);
         }
         return child;
       },
@@ -424,11 +411,10 @@ it.for([
           registerRun?.(scopedRun);
         }
         const continued = await continueMigratedUpdateInFreshProcess(
-          {
-            mutationStarted: true,
-            ...(originalFingerprint && serviceRoot
-              ? {
-                  originalManagedServiceRuntime: {
+          finishParams({
+            originalManagedServiceRuntime:
+              originalFingerprint && serviceRoot
+                ? {
                     root: serviceRoot,
                     nodeRunner: process.execPath,
                     version: "2026.9.3",
@@ -448,38 +434,21 @@ it.for([
                       targetFingerprint: unverifiedLauncher,
                     },
                     nodeIdentity: "unverified-original-service-fixture",
-                  },
-                }
-              : {}),
-            result: {
+                  }
+                : undefined,
+            result: updateResult({
               status: "error",
               reason: "doctor-failed",
               rollbackOutcome,
-              mode: "npm",
               root,
-              steps: [],
               durationMs: 0,
-            },
+            }),
             root,
-            installKindChanged: false,
             configSnapshot: {
-              path: path.join(stateDir, "openclaw.json"),
+              ...createTestConfigSnapshot({}, {}, path.join(stateDir, "openclaw.json")),
               exists: false,
               raw: null,
-              parsed: {},
-              sourceConfig: asResolvedSourceConfig({}),
-              resolved: asResolvedSourceConfig({}),
-              valid: true,
-              runtimeConfig: asRuntimeConfig({}),
-              config: asRuntimeConfig({}),
-              issues: [],
-              warnings: [],
-              legacyIssues: [],
             },
-            requestedChannel: null,
-            storedChannel: "stable",
-            channel: "stable",
-            downgradeRisk: false,
             shouldRestart: false,
             opts: { json, run: scopedRun },
             packageTransaction: {
@@ -491,26 +460,21 @@ it.for([
                 terminalAtCleanup = row && { status: row.status, reason: row.reason };
                 if (settlement === "package") {
                   throw new UpdateCommandPendingRecoveryFailure(
-                    {
+                    updateResult({
                       status: "error",
-                      mode: "npm",
                       root,
                       runId: run.runId,
-                      steps: [],
                       durationMs: 0,
-                    },
+                    }),
                     "fixture migrated package completion refused",
                   );
                 }
               },
             },
-            controlPlaneUpdateSentinelMeta: null,
-            preUpdatePluginInstallRecords: {},
-            startedAt: Date.now(),
             packageUpdateNodeRunner: process.execPath,
             updateStepTimeoutMs: stepBudgetMs ?? 30_000,
             rollbackBlockedReason: "state-migrated-no-rollback",
-          },
+          }),
           [
             ...progress.pendingSteps,
             ...(replay

@@ -22,6 +22,7 @@ import {
 import { beginAgentDeletionJournal } from "../../test-utils/agent-deletion-journal.js";
 import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
 import { prepareCandidateAuthorityRuntime } from "./update-command-candidate-authority.test-support.js";
+import { updateResult } from "./update-command-maintenance-fixtures.test-support.js";
 import { inspectActivatedUpdateState } from "./update-command-migrated.js";
 
 // The retained updater reads through the real candidate's newer schema contract.
@@ -45,18 +46,30 @@ afterEach(async () => {
   await closeStateDatabaseForTest();
 });
 
-function activationResult() {
+async function fixture(prefix: string) {
+  const stateDir = await fs.realpath(dirs.make(prefix));
+  const env = { OPENCLAW_STATE_DIR: stateDir };
   return {
-    status: "ok" as const,
-    mode: "npm" as const,
-    root: candidateRoot,
-    steps: [],
-    durationMs: 0,
+    stateDir,
+    env,
+    shared: openOpenClawStateDatabase({ env }),
+    result: updateResult({ root: candidateRoot, durationMs: 0 }),
   };
 }
 
-function inspect(params: Omit<Parameters<typeof inspectActivatedUpdateState>[0], "root">) {
-  return runtimeFixture.track(inspectActivatedUpdateState({ root: candidateRoot, ...params }));
+function inspect(
+  params: Omit<Parameters<typeof inspectActivatedUpdateState>[0], "root" | "config"> & {
+    config?: Parameters<typeof inspectActivatedUpdateState>[0]["config"];
+  },
+) {
+  return runtimeFixture.track(
+    inspectActivatedUpdateState({ root: candidateRoot, config: {}, ...params }),
+  );
+}
+
+function setSchema(file: string, version: number) {
+  using db = new DatabaseSync(file);
+  db.exec(`PRAGMA user_version = ${version}`);
 }
 
 it.each([
@@ -72,9 +85,7 @@ it.each([
 ])(
   "classifies activation after first-use database creation (agent=$agentId, changed=$changed)",
   async ({ agentId, changed, blocked }) => {
-    const stateDir = await fs.realpath(dirs.make("update-first-serving-turn-"));
-    const env = { OPENCLAW_STATE_DIR: stateDir };
-    const shared = openOpenClawStateDatabase({ env });
+    const { stateDir, env, shared, result } = await fixture("update-first-serving-turn-");
     const schemaVersions = await readUpdateStateSchemaVersions({ stateDir, config: {}, env });
     if (changed === "local") {
       expect((await migrateDaemonRuntimePins(env)).warnings).toEqual([]);
@@ -91,7 +102,7 @@ it.each([
     ).toBeNull();
 
     runOpenClawAgentWriteTransaction(
-      (database) => {
+      (database) =>
         appendTranscriptEventsInTransaction(
           database,
           { agentId, sessionKey: `agent:${agentId}:update-check`, sessionId: "serving-check" },
@@ -106,18 +117,10 @@ it.each([
               type: "message",
               id: "reply",
               parentId: "request",
-              message: {
-                role: "assistant",
-                content: "update-verified-run",
-                provider: "openai",
-                model: "gpt-4.1-mini",
-                stopReason: "stop",
-                __openclaw: { runId: "run" },
-              },
+              message: { role: "assistant", content: "update-verified-run" },
             },
           ],
-        );
-      },
+        ),
       { agentId, env },
     );
     closeOpenClawAgentDatabasesForTest();
@@ -127,9 +130,7 @@ it.each([
       const agentDir = path.join(stateDir, "agents", "retired", "agent");
       retainedPath = path.join(agentDir, "openclaw-agent.sqlite");
       await fs.mkdir(agentDir, { recursive: true });
-      const db = new DatabaseSync(retainedPath);
-      db.exec(`PRAGMA user_version = ${OPENCLAW_AGENT_SCHEMA_VERSION - 1}`);
-      db.close();
+      setSchema(retainedPath, OPENCLAW_AGENT_SCHEMA_VERSION - 1);
       retainedBytes = await fs.readFile(retainedPath);
       beginAgentDeletionJournal(
         {
@@ -153,16 +154,11 @@ it.each([
       shared.db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
     }
     if (changed === "shared" || changed === "agent") {
-      const db = new DatabaseSync(changed === "shared" ? shared.path : agentPath);
-      try {
-        db.exec(
-          `PRAGMA user_version = ${changed === "shared" ? OPENCLAW_STATE_SCHEMA_VERSION + 1 : OPENCLAW_AGENT_SCHEMA_VERSION + 1}`,
-        );
-      } finally {
-        db.close();
-      }
+      setSchema(
+        changed === "shared" ? shared.path : agentPath,
+        (changed === "shared" ? OPENCLAW_STATE_SCHEMA_VERSION : OPENCLAW_AGENT_SCHEMA_VERSION) + 1,
+      );
     }
-    const result = activationResult();
     await expect(
       inspect({
         result,
@@ -173,7 +169,6 @@ it.each([
             Number(changed === "shared" || changed === "retained" || changed === "pending"),
           agent: OPENCLAW_AGENT_SCHEMA_VERSION + Number(changed === "incomplete"),
         },
-        config: {},
         env,
       }),
     ).resolves.toBe(blocked);
@@ -227,8 +222,7 @@ it.each([
     openOpenClawStateDatabase({ env });
     if (envKey) {
       await fs.mkdir(store);
-      using database = new DatabaseSync(file);
-      database.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION}`);
+      setSchema(file, OPENCLAW_STATE_SCHEMA_VERSION);
     } else {
       openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: store } });
     }
@@ -236,7 +230,7 @@ it.each([
     const before = await fs.readFile(file);
     const schemaVersions = await readUpdateStateSchemaVersions({ stateDir, config, env });
     expect(schemaVersions).toContainEqual(expect.objectContaining({ path: file }));
-    const result = activationResult();
+    const result = updateResult({ root: candidateRoot, durationMs: 0 });
     await expect(
       inspect({
         result,
@@ -258,12 +252,11 @@ it.each([
 );
 
 it("refuses state inspection when activation leaves no known runtime root", async () => {
-  const result = { status: "error" as const, mode: "npm" as const, steps: [], durationMs: 0 };
+  const result = updateResult({ status: "error", durationMs: 0 });
   await expect(
     inspect({
       result,
       schemaVersions: [],
-      config: {},
       env: { OPENCLAW_STATE_DIR: dirs.make("unknown-update-runtime-") },
     }),
   ).resolves.toBe("rollback-state-unverified");
@@ -280,9 +273,7 @@ it.each([
 ])(
   "accepts applied shared content through activation (alreadyApplied=$beforeContent, published=$publish)",
   async ({ beforeContent, publish, blocked }) => {
-    const stateDir = await fs.realpath(dirs.make("update-deferred-content-"));
-    const env = { OPENCLAW_STATE_DIR: stateDir };
-    const shared = openOpenClawStateDatabase({ env });
+    const { stateDir, env, shared, result } = await fixture("update-deferred-content-");
     const contentVersion = OPENCLAW_STATE_SCHEMA_VERSION + 1;
     const markContentApplied = () =>
       shared.db
@@ -298,13 +289,11 @@ it.each([
     if (publish) {
       shared.db.exec(`PRAGMA user_version = ${contentVersion};`);
     }
-    const result = activationResult();
     await expect(
       inspect({
         result,
         schemaVersions,
         candidateSchemaVersions: { state: contentVersion, agent: OPENCLAW_AGENT_SCHEMA_VERSION },
-        config: {},
         env,
       }),
     ).resolves.toBe(blocked);

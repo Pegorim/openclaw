@@ -12,6 +12,11 @@ import { defaultRuntime } from "../../runtime.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
 import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
 import { expectNoCalls } from "../daemon-cli/lifecycle-assertions.test-support.js";
+import {
+  finishParams,
+  updateResult,
+  updateStep,
+} from "./update-command-maintenance-fixtures.test-support.js";
 import type { MigratedUpdateFinalizationInput } from "./update-command-migrated-types.js";
 import { continueMigratedUpdateInFreshProcess } from "./update-command-migrated.js";
 import { readMigratedUpdateRunRow } from "./update-command-migrated.test-support.js";
@@ -33,6 +38,18 @@ export type MigratedPackageFinalizationCase = {
   recovered?: boolean;
   diagnostics?: "truncated" | "interrupted" | "incomplete";
 };
+
+export function observeMigratedStateOpens(databasePath: string, opened: string[]) {
+  const location = nodeSqlite.resolveNodeSqliteLocation(databasePath);
+  const open = nodeSqlite.openNodeSqliteDatabase;
+  return vi.spyOn(nodeSqlite, "openNodeSqliteDatabase").mockImplementation((...args) => {
+    // Keep SQLite's Windows filename normalization distinct from file URLs.
+    if (nodeSqlite.resolveNodeSqliteLocation(resolveSqliteDatabaseFilePath(args[0])) === location) {
+      opened.push(args[0]);
+    }
+    return open(...args);
+  });
+}
 
 export async function expectMigratedPackageFinalization(
   base: string,
@@ -150,14 +167,12 @@ export async function expectMigratedPackageFinalization(
         status,
         reason,
         runId: run.runId,
-        ...(recovered
-          ? { recovery: { serviceRestartSafe: true, version: "2.0.0", service: "healthy" } }
-          : {}),
+        recovery: recovered
+          ? { serviceRestartSafe: true, version: "2.0.0", service: "healthy" }
+          : undefined,
         steps: pending
           ? [
-              {
-                name: "gateway verification",
-                command: "gateway verification",
+              updateStep("gateway verification", {
                 cwd: packageRoot,
                 durationMs: 90_000,
                 exitCode: 0,
@@ -167,7 +182,7 @@ export async function expectMigratedPackageFinalization(
                   message:
                     "Gateway is still starting after 90000ms; left running with readiness unverified.",
                 },
-              },
+              }),
             ]
           : [],
       };
@@ -187,19 +202,7 @@ export async function expectMigratedPackageFinalization(
         migrated.close();
         const controlPath = path.join(base, "observer-control.sqlite");
         new DatabaseSync(controlPath).close();
-        const migratedStateLocation = nodeSqlite.resolveNodeSqliteLocation(databasePath);
-        const open = nodeSqlite.openNodeSqliteDatabase;
-        const observedOpen = vi
-          .spyOn(nodeSqlite, "openNodeSqliteDatabase")
-          .mockImplementation((...args) => {
-            const openedPath = nodeSqlite.resolveNodeSqliteLocation(
-              resolveSqliteDatabaseFilePath(args[0]),
-            );
-            if (openedPath === migratedStateLocation) {
-              oldRuntimeOpens.push(args[0]);
-            }
-            return open(...args);
-          });
+        const observedOpen = observeMigratedStateOpens(databasePath, oldRuntimeOpens);
         // Exercise the observer with the native SQLite filename URI without
         // reopening the migrated state database in the old runtime.
         const controlUri = nodeSqlite.resolveExistingSqliteFileUri(controlPath);
@@ -229,17 +232,10 @@ export async function expectMigratedPackageFinalization(
 
   const continueUpdate = () =>
     continueMigratedUpdateInFreshProcess(
-      {
-        mutationStarted: true,
-        result: { status: "ok", mode: "npm", root: packageRoot, steps: [], durationMs: 1 },
+      finishParams({
+        result: updateResult({ root: packageRoot }),
         root: packageRoot,
-        installKindChanged: false,
         configSnapshot,
-        requestedChannel: null,
-        storedChannel: "stable",
-        channel: "stable",
-        downgradeRisk: false,
-        shouldRestart: true,
         opts: { json: true, run },
         preManagedServiceStop: {
           stopped: true,
@@ -247,27 +243,22 @@ export async function expectMigratedPackageFinalization(
           runtimeInspected: true,
           running: true,
           serviceEnv: env,
-          ...(windows ? { windowsTaskAutoStartRecovery: windowsRecovery } : {}),
+          windowsTaskAutoStartRecovery: windows ? windowsRecovery : undefined,
         },
         packageTransaction: transaction,
-        ...(backup
+        databaseBackup: backup
           ? {
-              databaseBackup: {
-                directory: path.join(transaction.backupRoot, "databases"),
-                databases: [],
-                missingPaths: [],
-                sourcePaths: [],
-                sourceGenerations: {},
-                warnings: [],
-              },
+              directory: path.join(transaction.backupRoot, "databases"),
+              databases: [],
+              missingPaths: [],
+              sourcePaths: [],
+              sourceGenerations: {},
+              warnings: [],
             }
-          : {}),
-        controlPlaneUpdateSentinelMeta: null,
-        preUpdatePluginInstallRecords: {},
-        startedAt: Date.now(),
+          : undefined,
         packageUpdateNodeRunner: process.execPath,
         updateStepTimeoutMs: 90_000,
-      },
+      }),
       [],
     );
   let continuedResult: Awaited<ReturnType<typeof continueUpdate>> | undefined;
@@ -303,9 +294,7 @@ export async function expectMigratedPackageFinalization(
     if (completion === "failure") {
       expect.soft(settled).toBeInstanceOf(UpdateCommandPendingRecoveryFailure);
       expect.soft(settled).toMatchObject({
-        cause: expect.objectContaining({
-          result: expect.objectContaining({ reason: "package-backup-retention-failed" }),
-        }),
+        cause: { result: { reason: "package-backup-retention-failed" } },
       });
       expect.soft(stdout).not.toHaveBeenCalled();
       expect(onResult).not.toHaveBeenCalled();
