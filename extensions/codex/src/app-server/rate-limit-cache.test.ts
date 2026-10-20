@@ -1,4 +1,3 @@
-// Codex tests cover physical-client rate-limit snapshot ownership and rolling merges.
 import { describe, expect, it, vi } from "vitest";
 import { ensureCodexAppServerClientRuntime } from "./client-runtime.js";
 import type { CodexAppServerClient } from "./client.js";
@@ -34,12 +33,9 @@ describe("Codex rate-limit cache", () => {
     expect(readCodexRateLimitsRevision(first)).toBe(1);
     expect(readCodexRateLimitsRevision(second)).toBe(0);
 
-    expect(readRecentCodexRateLimits(first, { nowMs: 250 })).toEqual({
-      rateLimits: { limitId: "codex" },
-    });
-    expect(readRecentCodexRateLimits(second, { nowMs: 250 })).toEqual({
-      rateLimits: { limitId: "codex_other" },
-    });
+    expect(
+      [first, second].map((client) => readRecentCodexRateLimits(client, { nowMs: 250 })),
+    ).toEqual([{ rateLimits: { limitId: "codex" } }, { rateLimits: { limitId: "codex_other" } }]);
     expect(readRecentCodexRateLimits(first, { nowMs: 301, maxAgeMs: 200 })).toBeUndefined();
     expect(readRecentCodexRateLimits(second, { nowMs: 301, maxAgeMs: 200 })).toEqual({
       rateLimits: { limitId: "codex_other" },
@@ -53,13 +49,8 @@ describe("Codex rate-limit cache", () => {
       limitName: "Codex",
       primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 1000 },
       secondary: { usedPercent: 20, windowDurationMins: 10_080, resetsAt: 2000 },
-      credits: { hasCredits: true, unlimited: false, balance: "5" },
-      individualLimit: {
-        limit: "25000",
-        used: "8000",
-        remainingPercent: 68,
-        resetsAt: 3000,
-      },
+      credits: { balance: "5" },
+      individualLimit: { remainingPercent: 68 },
       planType: "pro",
       rateLimitReachedType: "rate_limit_reached",
     };
@@ -75,19 +66,18 @@ describe("Codex rate-limit cache", () => {
       rateLimitsByLimitId: { codex: codexSnapshot, codex_other: otherSnapshot },
     });
 
-    mergeCodexRateLimitsUpdate(client, {
-      rateLimits: {
-        ...unavailable,
-        primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 5000 },
-      },
-    });
-    mergeCodexRateLimitsUpdate(client, {
-      rateLimits: {
-        ...unavailable,
-        limitId: "codex_other",
-        primary: { usedPercent: 75, windowDurationMins: 60, resetsAt: 6000 },
-      },
-    });
+    for (const [limitId, usedPercent, windowDurationMins, resetsAt] of [
+      [null, 90, 300, 5000],
+      ["codex_other", 75, 60, 6000],
+    ] as const) {
+      mergeCodexRateLimitsUpdate(client, {
+        rateLimits: {
+          ...unavailable,
+          limitId,
+          primary: { usedPercent, windowDurationMins, resetsAt },
+        },
+      });
+    }
     expect(readCodexRateLimitsRevision(client)).toBe(2);
 
     const mergedCodexSnapshot = {

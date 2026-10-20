@@ -33,7 +33,7 @@ import {
   itemNotification,
 } from "./native-subagent-monitor.test-support.js";
 import { buildCodexAppServerConnectionFingerprint } from "./plugin-app-cache-key.js";
-import { isJsonObject } from "./protocol.js";
+import { isJsonObject, type JsonObject } from "./protocol.js";
 import {
   bindProductionHarnessHostCapabilitiesForTest,
   createParams,
@@ -84,6 +84,42 @@ vi.mock("openclaw/plugin-sdk/agent-harness-runtime", async (importOriginal) => {
 setupRunAttemptTestHooks();
 // Load real provider schema policy once; cold plugin discovery is not part of the turn budget.
 useProviderToolSchemaRuntimeForTest(["codex"]);
+
+type Send = (message: unknown) => void;
+type NativeReply = (request: JsonObject, send: Send) => unknown;
+function nativeClient(
+  codexHome: string,
+  replies: Record<string, NativeReply>,
+  afterResponse?: (method: string, request: JsonObject, send: Send) => void,
+) {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const handlers: Record<string, NativeReply> = {
+    initialize: () => ({
+      userAgent: `codex-cli/${getMockRuntimeIdentity().serverVersion}`,
+      codexHome,
+    }),
+    "configRequirements/read": () => ({ requirements: null }),
+    "thread/unsubscribe": () => ({ status: "unsubscribed" }),
+    ...replies,
+  };
+  const harness = createClientHarness({
+    onWrite: (line, send) => {
+      const message: unknown = JSON.parse(line);
+      if (
+        !isJsonObject(message) ||
+        typeof message.method !== "string" ||
+        message.id === undefined
+      ) {
+        return;
+      }
+      requests.push({ method: message.method, params: message.params });
+      const request = isJsonObject(message.params) ? message.params : {};
+      send({ id: message.id, result: handlers[message.method]?.(request, send) ?? {} });
+      afterResponse?.(message.method, request, send);
+    },
+  });
+  return { ...harness, requests };
+}
 
 describe("Codex native configuration", () => {
   it.each(["missing", "disabled"])(
@@ -171,54 +207,39 @@ describe("Codex native configuration", () => {
       const retryStarted = createDeferred<void>();
       const turnModels: unknown[] = [];
       let nativeResponse = threadStartResult("thread-policy", { cwd: tempDir });
-      const transport = createClientHarness({
-        onWrite: (line, send) => {
-          const message: unknown = JSON.parse(line);
-          if (!isJsonObject(message) || message.id === undefined) {
-            return;
-          }
-          const request = isJsonObject(message.params) ? message.params : {};
-          let result: unknown = {};
-          if (message.method === "initialize") {
-            result = {
-              userAgent: `codex-cli/${getMockRuntimeIdentity().serverVersion}`,
-              codexHome: resolveCodexAppServerHomeDir(params.agentDir),
-            };
-          } else if (message.method === "configRequirements/read") {
-            result = { requirements: null };
-          } else if (message.method === "config/read") {
-            result = { config: {}, origins: {}, layers: [] };
-          } else if (message.method === "account/login/start") {
-            result = { type: "chatgptAuthTokens" };
-          } else if (message.method === "account/read") {
-            result = {
-              account: { type: "chatgpt", email: "synthetic@example.test", planType: "team" },
-              requiresOpenaiAuth: true,
-            };
-          } else if (message.method === "thread/read") {
-            result = { thread: nativeResponse.thread };
-          } else if (message.method === "thread/start" || message.method === "thread/resume") {
-            if (typeof request.model !== "string") {
-              throw new Error("Expected the selected native model in the thread request");
-            }
-            nativeResponse = { ...nativeResponse, model: request.model };
-            send({
-              method: "thread/status/changed",
-              params: { threadId: "thread-policy", status: { type: "notLoaded" } },
-            });
-            result = nativeResponse;
-          } else if (message.method === "turn/start") {
+      const startThread: NativeReply = (request, send) => {
+        if (typeof request.model !== "string") {
+          throw new Error("Expected the selected native model in the thread request");
+        }
+        nativeResponse = { ...nativeResponse, model: request.model };
+        send({
+          method: "thread/status/changed",
+          params: { threadId: "thread-policy", status: { type: "notLoaded" } },
+        });
+        return nativeResponse;
+      };
+      const transport = nativeClient(
+        resolveCodexAppServerHomeDir(params.agentDir),
+        {
+          "config/read": () => ({ config: {}, origins: {}, layers: [] }),
+          "account/login/start": () => ({ type: "chatgptAuthTokens" }),
+          "account/read": () => ({
+            account: { type: "chatgpt", email: "synthetic@example.test", planType: "team" },
+            requiresOpenaiAuth: true,
+          }),
+          "thread/read": () => ({ thread: nativeResponse.thread }),
+          "thread/start": startThread,
+          "thread/resume": startThread,
+          "turn/start": (request) => {
             turnModels.push(request.model);
-            result = turnStartResult(`turn-${turnModels.length}`);
-          } else if (message.method === "thread/backgroundTerminals/list") {
-            result = { data: [], nextCursor: null };
-          } else if (message.method === "thread/unsubscribe") {
-            result = { status: "unsubscribed" };
-          }
-          send({ id: message.id, result });
-          if (message.method === "turn/start") {
+            return turnStartResult(`turn-${turnModels.length}`);
+          },
+          "thread/backgroundTerminals/list": () => ({ data: [], nextCursor: null }),
+        },
+        (method, request, send) => {
+          if (method === "turn/start") {
             (turnModels.length === 1 ? primaryStarted : retryStarted).resolve();
-          } else if (message.method === "turn/interrupt") {
+          } else if (method === "turn/interrupt") {
             send({
               method: "turn/completed",
               params: {
@@ -228,7 +249,7 @@ describe("Codex native configuration", () => {
             });
           }
         },
-      });
+      );
       // The controlled stdio fixture represents the managed process returned by startup.
       ownCodexInferenceClient(transport.client);
       vi.spyOn(CodexAppServerClient, "start").mockResolvedValue(transport.client);
@@ -341,6 +362,7 @@ describe("Codex native configuration", () => {
     }) => {
       const nativeSearchEnabled =
         nativeProvider === "copilot" || configuredProvider !== nativeProvider;
+      const runtimeSelection = { provider: nativeProvider, model: "gpt-5.6-luna" };
       const approvalsReviewer =
         nativeProvider === "openai" && configuredProvider === nativeProvider
           ? "auto_review"
@@ -380,7 +402,7 @@ describe("Codex native configuration", () => {
         historyCoveredThrough: new Date().toISOString(),
         webSearchThreadConfigFingerprint: JSON.stringify({
           "features.standalone_web_search": false,
-          web_search: "disabled",
+          web_search: nativeSearchEnabled && transport === "unix" ? "cached" : "disabled",
         }),
         connectionScope: "supervision",
         supervisionSourceThreadId: "thread-existing",
@@ -389,14 +411,6 @@ describe("Codex native configuration", () => {
         preserveNativeModel: true,
         conversationSourceTransferComplete: true,
         dynamicToolsFingerprint: codexDynamicToolsFingerprint([]),
-        ...(nativeSearchEnabled && transport === "unix"
-          ? {
-              webSearchThreadConfigFingerprint: JSON.stringify({
-                "features.standalone_web_search": false,
-                web_search: "cached",
-              }),
-            }
-          : {}),
         rolloutPath,
         appServerRuntimeFingerprint: buildCodexAppServerConnectionFingerprint(
           resolveCodexSupervisionAppServerRuntimeOptions({ pluginConfig }),
@@ -411,49 +425,25 @@ describe("Codex native configuration", () => {
         serviceTier: "priority",
       };
       const turnStarted = createDeferred<void>();
-      const requests: Array<{ method: string; params: unknown }> = [];
-      const harness = createClientHarness({
-        onWrite: (line, send) => {
-          const message: unknown = JSON.parse(line);
-          if (
-            !isJsonObject(message) ||
-            typeof message.method !== "string" ||
-            message.id === undefined
-          ) {
-            return;
-          }
-          requests.push({ method: message.method, params: message.params });
-          let result: unknown = {};
-          if (message.method === "initialize") {
-            result = {
-              userAgent: `codex-cli/${getMockRuntimeIdentity().serverVersion}`,
-              codexHome,
-            };
-          } else if (message.method === "configRequirements/read") {
-            result = { requirements: null };
-          } else if (message.method === "config/read") {
-            result = { config: { model_provider: configuredProvider }, origins: {} };
-          } else if (message.method === "modelProvider/capabilities/read") {
-            result = { webSearch: true };
-          } else if (message.method === "thread/read") {
-            result = { thread: { ...nativeResponse.thread, path: rolloutPath } };
-          } else if (message.method === "thread/resume") {
-            // Native resume tears down an idle, unsubscribed thread before applying overrides.
-            // A successful response alone cannot prove that its configuration changed.
-            send({
-              method: "thread/status/changed",
-              params: { threadId: "thread-existing", status: { type: "notLoaded" } },
-            });
-            result = nativeResponse;
-          } else if (message.method === "turn/start") {
-            result = turnStartResult();
-            turnStarted.resolve();
-          } else if (message.method === "thread/unsubscribe") {
-            result = { status: "unsubscribed" };
-          }
-          send({ id: message.id, result });
+      const harness = nativeClient(codexHome, {
+        "config/read": () => ({ config: { model_provider: configuredProvider }, origins: {} }),
+        "modelProvider/capabilities/read": () => ({ webSearch: true }),
+        "thread/read": () => ({ thread: { ...nativeResponse.thread, path: rolloutPath } }),
+        "thread/resume": (_request, send) => {
+          // Native resume tears down an idle, unsubscribed thread before applying overrides.
+          // A successful response alone cannot prove that its configuration changed.
+          send({
+            method: "thread/status/changed",
+            params: { threadId: "thread-existing", status: { type: "notLoaded" } },
+          });
+          return nativeResponse;
+        },
+        "turn/start": () => {
+          turnStarted.resolve();
+          return turnStartResult();
         },
       });
+      const { requests } = harness;
       const start = vi.spyOn(CodexAppServerClient, "start").mockResolvedValue(harness.client);
       const clientFactory = vi.fn(sharedClientModule.getLeasedSharedCodexAppServerClient);
 
@@ -468,7 +458,7 @@ describe("Codex native configuration", () => {
       const bindModelExecution = vi.fn<
         NonNullable<typeof params.hostCapabilities.bindModelExecution>
       >((model) => {
-        expect(model).toEqual({ provider: nativeProvider, model: "gpt-5.6-luna" });
+        expect(model).toEqual(runtimeSelection);
         if (modelPolicyAction === "deny") {
           throw new Error("operator role cannot use this model");
         }
@@ -503,16 +493,13 @@ describe("Codex native configuration", () => {
         tools: {
           ...params.config?.tools,
           exec: { mode: configuredProvider === nativeProvider ? "auto" : "ask" },
+          ...(nativeSearchEnabled ? { web: { search: { enabled: true } } } : {}),
         },
       };
       if (nativeSearchEnabled) {
         params.preparedWebSearchPolicy = {
           allowed: true,
           persistentAllowed: true,
-        };
-        params.config = {
-          ...params.config,
-          tools: { ...params.config?.tools, web: { search: { enabled: true } } },
         };
       }
       // Keep the existing attempt budget on the clock owned by this protocol fixture.
@@ -599,16 +586,10 @@ describe("Codex native configuration", () => {
           expect(context).not.toHaveProperty("modelProviderId");
           expect(context).not.toHaveProperty("modelId");
         }
-        expect(result.runtimeModelSelection).toEqual({
-          provider: nativeProvider,
-          model: "gpt-5.6-luna",
-        });
+        expect(result.runtimeModelSelection).toEqual(runtimeSelection);
         expect(capture).not.toHaveBeenCalled();
         if (hasAnswer) {
-          expect(result.currentAttemptAssistant).toMatchObject({
-            provider: nativeProvider,
-            model: "gpt-5.6-luna",
-          });
+          expect(result.currentAttemptAssistant).toMatchObject(runtimeSelection);
           expect(result.settledTurnFinalizationContext).toBeUndefined();
         } else {
           expect(result.settledTurnFinalizationContext).toEqual({ source: "unavailable" });
