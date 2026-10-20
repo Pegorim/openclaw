@@ -15,20 +15,14 @@ describe("projectAnthropicTools", () => {
 
     expect(projection.inputToolCount).toBe(2);
     expect(projection.unavailableOriginalNames).toEqual(new Set());
-    expect(projection.tools).toEqual([
-      {
+    expect(projection.tools).toEqual(
+      ["Alpha", "Zulu"].map((description) => ({
         originalName: "Read",
         wireName: "read",
-        description: "Alpha",
+        description,
         inputSchema: { type: "object", properties: {}, required: [] },
-      },
-      {
-        originalName: "Read",
-        wireName: "read",
-        description: "Zulu",
-        inputSchema: { type: "object", properties: {}, required: [] },
-      },
-    ]);
+      })),
+    );
   });
 
   it.each([{ names: ["Read", "Read", "read"], first: "Read", last: "read" }])(

@@ -4,8 +4,8 @@ import { Chat } from "@mistralai/mistralai/sdk/chat";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
-import type { Model } from "../types.js";
 import { streamMistral } from "./mistral.js";
+import { makeProviderModel } from "./provider-model.test-support.js";
 
 describe("Mistral HTTPClient contract", () => {
   it("serializes TypeBox tool schemas through the SDK without modifying their owner", async () => {
@@ -16,18 +16,11 @@ describe("Mistral HTTPClient contract", () => {
       }),
     );
     Object.freeze(parameters.properties);
-    const model: Model<"mistral-conversations"> = {
-      id: "mistral-test",
+    const model = makeProviderModel("mistral-conversations", "mistral", "mistral-test", {
       name: "Mistral Test",
-      api: "mistral-conversations",
-      provider: "mistral",
       baseUrl: "https://mistral.invalid",
       reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128_000,
-      maxTokens: 8192,
-    };
+    });
     let body: unknown;
     const host = getAiTransportHost();
     configureAiTransportHost({

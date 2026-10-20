@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderContext } from "../provider-types.js";
 import type { AssistantMessage, RuntimeContextMessage } from "../types.js";
+import { createZeroUsage } from "../usage.test-support.js";
 import { projectGoogleMessages } from "./google-messages.js";
 
 const model = {
@@ -15,6 +16,16 @@ const contextStart = {
 const contextEnd = { text: "Use this context to continue responding to the user's request." };
 const temporalContext =
   "OpenClaw runtime context:\nCurrent date: 2026-10-14\nTime zone: America/Los_Angeles\nEnd OpenClaw runtime context.";
+const laterContext =
+  "OpenClaw runtime context:\nCurrent date: 2026-10-15\nEnd OpenClaw runtime context.";
+const userParts = (...texts: string[]) => ({
+  role: "user",
+  parts: texts.map((text) => ({ text })),
+});
+const contextParts = (...texts: string[]) => ({
+  role: "user",
+  parts: [contextStart, ...texts.map((text) => ({ text })), contextEnd],
+});
 const request = { role: "user", content: "Run pwd, then read README.md.", timestamp: 1 } as const;
 const reply: AssistantMessage = {
   role: "assistant",
@@ -22,14 +33,7 @@ const reply: AssistantMessage = {
   provider: "google",
   model: model.id,
   content: [{ type: "text", text: "The README describes the project." }],
-  usage: {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  },
+  usage: createZeroUsage(),
   stopReason: "stop",
   timestamp: 3,
 };
@@ -54,10 +58,7 @@ describe.each(["managed", "signed-parts"] as const)("Google runtime context (%s)
     const contents = convert([request, { role: "user", timestamp: 2, ...carrier }]);
 
     expect(JSON.stringify(contents)).toBe(
-      JSON.stringify([
-        { role: "user", parts: [{ text: "Run pwd, then read README.md." }] },
-        { role: "user", parts: [contextStart, { text: temporalContext }, contextEnd] },
-      ]),
+      JSON.stringify([userParts(request.content), contextParts(temporalContext)]),
     );
   });
 
@@ -72,8 +73,7 @@ describe.each(["managed", "signed-parts"] as const)("Google runtime context (%s)
       { role: "user", content: "Summarize it.", timestamp: 4 },
       {
         role: "user",
-        content:
-          "OpenClaw runtime context:\nCurrent date: 2026-10-15\nEnd OpenClaw runtime context.",
+        content: laterContext,
         timestamp: 5,
         runtimeContext: { retained: false },
       },
@@ -81,19 +81,10 @@ describe.each(["managed", "signed-parts"] as const)("Google runtime context (%s)
 
     expect(JSON.stringify(later[0])).toBe(JSON.stringify(first[0]));
     expect(later).toEqual([
-      { role: "user", parts: [{ text: "Run pwd, then read README.md." }] },
+      userParts(request.content),
       { role: "model", parts: [{ text: "The README describes the project." }] },
-      { role: "user", parts: [{ text: "Summarize it." }] },
-      {
-        role: "user",
-        parts: [
-          contextStart,
-          {
-            text: "OpenClaw runtime context:\nCurrent date: 2026-10-15\nEnd OpenClaw runtime context.",
-          },
-          contextEnd,
-        ],
-      },
+      userParts("Summarize it."),
+      contextParts(laterContext),
     ]);
   });
 
@@ -122,22 +113,16 @@ describe.each(["managed", "signed-parts"] as const)("Google runtime context (%s)
     ]);
 
     expect(first).toEqual([
-      { role: "user", parts: [{ text: "Run pwd, then read README.md." }] },
-      {
-        role: "user",
-        parts: [contextStart, { text: temporalContext }, { text: "Active exec: 1" }, contextEnd],
-      },
+      userParts(request.content),
+      contextParts(temporalContext, "Active exec: 1"),
     ]);
     expect(JSON.stringify(later.slice(0, first.length))).toBe(JSON.stringify(first));
-    expect(later.at(-1)).toEqual({
-      role: "user",
-      parts: [contextStart, { text: "Current date: 2026-10-15\nActive exec: none" }, contextEnd],
-    });
+    expect(later.at(-1)).toEqual(contextParts("Current date: 2026-10-15\nActive exec: none"));
   });
 
   it("does not interpret user-authored runtime-context labels as trusted metadata", () => {
     expect(convert([{ role: "user", content: temporalContext, timestamp: 1 }])).toEqual([
-      { role: "user", parts: [{ text: temporalContext }] },
+      userParts(temporalContext),
     ]);
   });
 });

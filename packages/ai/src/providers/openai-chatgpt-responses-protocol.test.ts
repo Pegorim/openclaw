@@ -16,13 +16,13 @@ const multilineDataLines = JSON.stringify(completedEvent, null, 2)
   .split("\n")
   .map((line) => `data: ${line}`);
 
-async function settleWithin<T>(promise: Promise<T>, label: string): Promise<T> {
+async function settleWithin<T>(promise: Promise<T>, label: string, ms = 250): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} did not settle`)), 250);
+        timer = setTimeout(() => reject(new Error(`${label} did not settle`)), ms);
       }),
     ]);
   } finally {
@@ -31,47 +31,26 @@ async function settleWithin<T>(promise: Promise<T>, label: string): Promise<T> {
 }
 
 describe("ChatGPT Responses SSE frame boundaries", () => {
-  it.each([
-    {
-      label: "multiline mixed line endings",
-      chunks: [
-        `event: response.completed\r\n${multilineDataLines
-          .map(
-            (line, index) => `${line}${index % 3 === 0 ? "\r\n" : index % 3 === 1 ? "\r" : "\n"}`,
-          )
-          .join("")}\r\n`,
-      ],
-    },
-  ])("parses $label SSE frame boundaries", async ({ chunks }) => {
-    let chunkIndex = 0;
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        const chunk = chunks[chunkIndex++];
-        if (chunk === undefined) {
-          controller.close();
-          return;
-        }
-        controller.enqueue(new TextEncoder().encode(chunk));
-      },
-    });
+  it("parses multiline mixed line endings SSE frame boundaries", async () => {
+    const frame = `event: response.completed\r\n${multilineDataLines
+      .map((line, index) => `${line}${index % 3 === 0 ? "\r\n" : index % 3 === 1 ? "\r" : "\n"}`)
+      .join("")}\r\n`;
     const events = [];
 
-    for await (const event of parseOpenAIChatGptResponsesSse(new Response(body))) {
+    for await (const event of parseOpenAIChatGptResponsesSse(new Response(frame))) {
       events.push(event);
     }
 
     expect(events).toEqual([completedEvent]);
   });
 
-  it.each([
-    { label: "chunk-split lone CR", chunks: [`data: ${serializedCompletedEvent}\r`, "\r"] },
-  ])("dispatches a $label SSE frame before an open response closes", async ({ chunks }) => {
+  it("dispatches a chunk-split lone CR SSE frame before an open response closes", async () => {
     const cleanup = new AbortController();
     let canceled = false;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         cleanup.signal.addEventListener("abort", () => controller.close(), { once: true });
-        for (const chunk of chunks) {
+        for (const chunk of [`data: ${serializedCompletedEvent}\r`, "\r"]) {
           controller.enqueue(new TextEncoder().encode(chunk));
         }
       },
@@ -80,27 +59,20 @@ describe("ChatGPT Responses SSE frame boundaries", () => {
       },
     });
     const iterator = parseOpenAIChatGptResponsesSse(new Response(body))[Symbol.asyncIterator]();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     let receivedEvent = false;
 
     try {
-      const result = await Promise.race([
+      const result = await settleWithin(
         iterator.next(),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => {
-            reject(new Error("SSE frame was not dispatched while the response remained open"));
-          }, 1_000);
-        }),
-      ]);
+        "SSE frame while response remains open",
+        1_000,
+      );
       receivedEvent = true;
 
       expect(result).toEqual({ done: false, value: completedEvent });
       expect(cleanup.signal.aborted).toBe(false);
       expect(canceled).toBe(false);
     } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
       if (!receivedEvent) {
         cleanup.abort();
       }

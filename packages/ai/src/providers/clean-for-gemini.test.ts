@@ -1,89 +1,61 @@
-// Gemini schema cleaner tests cover OpenAPI-compatible tool schema cleanup for
-// Gemini-backed providers before schemas are sent upstream.
 import { describe, expect, it } from "vitest";
 import { cleanSchemaForGemini } from "./clean-for-gemini.js";
 
 describe("cleanSchemaForGemini", () => {
-  it("removes required entirely when no fields match properties", () => {
-    const cleaned = cleanSchemaForGemini({
-      type: "object",
-      properties: {
-        action: { type: "string" },
+  it.each([
+    [
+      "removes required when no fields match properties",
+      {
+        type: "object",
+        properties: { action: { type: "string" } },
+        required: ["missing_a", "missing_b"],
       },
-      required: ["missing_a", "missing_b"],
-    }) as { required?: string[] };
-
-    expect(cleaned.required).toBeUndefined();
-  });
-
-  it("removes required from object schemas when properties is absent", () => {
-    const cleaned = cleanSchemaForGemini({
-      type: "object",
-      required: ["a", "b"],
-    }) as { required?: string[] };
-
-    expect(cleaned.required).toBeUndefined();
-  });
-
-  it("coerces nested null properties while preserving valid siblings", () => {
-    const cleaned = cleanSchemaForGemini({
-      type: "object",
-      properties: {
-        bad: {
-          type: "object",
-          properties: null,
-        },
-        good: {
-          type: "string",
-        },
+      { type: "object", properties: { action: { type: "string" } } },
+    ],
+    [
+      "removes required when properties is absent",
+      { type: "object", required: ["a", "b"] },
+      { type: "object" },
+    ],
+    [
+      "coerces nested null properties while preserving valid siblings",
+      {
+        type: "object",
+        properties: { bad: { type: "object", properties: null }, good: { type: "string" } },
       },
-    }) as {
-      properties?: {
-        bad?: { properties?: unknown };
-        good?: { type?: unknown };
-      };
-    };
-
-    expect(cleaned.properties?.bad?.properties).toStrictEqual({});
-    expect(cleaned.properties?.good?.type).toBe("string");
+      {
+        type: "object",
+        properties: { bad: { type: "object", properties: {} }, good: { type: "string" } },
+      },
+    ],
+    [
+      "collapses type arrays by stripping null entries",
+      { type: ["string", "null"], description: "nullable field" },
+      { type: "string", description: "nullable field" },
+    ],
+    [
+      "stringifies an integer const before type without changing the schema type",
+      { const: 42, type: "integer" },
+      { enum: ["42"], type: "integer" },
+    ],
+    [
+      "returns no enum key when array becomes empty after coercion",
+      { type: "integer", enum: [null, undefined, {}] },
+      { type: "integer" },
+    ],
+  ])("%s", (_name, input, expected) => {
+    expect(cleanSchemaForGemini(input)).toStrictEqual(expected);
   });
 
   it("strips empty required arrays in nested schemas", () => {
-    const cleaned = cleanSchemaForGemini({
-      type: "object",
-      properties: {
-        nested: {
-          type: "object",
-          properties: {
-            optional: { type: "string" },
-          },
-          required: [],
-        },
-      },
-      required: ["nested"],
-    }) as { properties?: { nested?: Record<string, unknown> }; required?: string[] };
-
-    expect(cleaned.required).toEqual(["nested"]);
-    expect(cleaned.properties?.nested).not.toHaveProperty("required");
-  });
-
-  it("collapses type arrays by stripping null entries", () => {
-    // Type arrays like ["string", "null"] must collapse to a scalar OpenAPI
-    // type for Gemini compatibility.
-    const cleaned = cleanSchemaForGemini({
-      type: ["string", "null"],
-      description: "nullable field",
-    }) as Record<string, unknown>;
-
-    expect(cleaned.type).toBe("string");
-    expect(cleaned.description).toBe("nullable field");
-  });
-
-  it("stringifies an integer const before type without changing the schema type", () => {
-    expect(cleanSchemaForGemini({ const: 42, type: "integer" })).toStrictEqual({
-      enum: ["42"],
-      type: "integer",
-    });
+    const nested = { type: "object", properties: { optional: { type: "string" } } };
+    expect(
+      cleanSchemaForGemini({
+        type: "object",
+        properties: { nested: { ...nested, required: [] } },
+        required: ["nested"],
+      }),
+    ).toStrictEqual({ type: "object", properties: { nested }, required: ["nested"] });
   });
 
   it("stringifies nested numeric enums while preserving their number type", () => {
@@ -94,30 +66,15 @@ describe("cleanSchemaForGemini", () => {
           type: "array",
           items: {
             type: "object",
-            properties: {
-              score: { type: "number", enum: [1, 2, 3, 4, 5] },
-            },
+            properties: { score: { type: "number", enum: [1, 2, 3, 4, 5] } },
           },
         },
       },
-    }) as {
-      properties?: {
-        outer?: { items?: { properties?: { score?: { type?: unknown; enum?: unknown } } } };
-      };
-    };
-
-    const score = cleaned.properties?.outer?.items?.properties?.score;
-    expect(score?.type).toBe("number");
-    expect(score?.enum).toStrictEqual(["1", "2", "3", "4", "5"]);
-  });
-
-  it("returns no enum key when array becomes empty after coercion", () => {
-    const cleaned = cleanSchemaForGemini({
-      type: "integer",
-      enum: [null, undefined, {}],
-    }) as { enum?: unknown };
-
-    expect(cleaned.enum).toBeUndefined();
+    });
+    expect(cleaned).toHaveProperty("properties.outer.items.properties.score", {
+      type: "number",
+      enum: ["1", "2", "3", "4", "5"],
+    });
   });
 
   it("preserves the type behind a percent-encoded local schema reference", () => {

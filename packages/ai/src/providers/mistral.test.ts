@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { configureAiTransportHost } from "../host.js";
 import { withProviderAcceptanceObserver } from "../transports/transport-stream-shared.js";
-import type { Context, Model } from "../types.js";
+import type { Context } from "../types.js";
 import { onLlmRequestActivity } from "../utils/llm-request-activity.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../utils/system-prompt-cache-boundary.js";
 
@@ -63,21 +63,14 @@ vi.mock("@mistralai/mistralai/sdk/chat", () => {
 });
 
 import { streamMistral, streamSimpleMistral } from "./mistral.js";
+import { makeProviderModel } from "./provider-model.test-support.js";
 
-function makeMistralModel(): Model<"mistral-conversations"> {
-  return {
-    id: "mistral-large-latest",
+const makeMistralModel = () =>
+  makeProviderModel("mistral-conversations", "mistral", "mistral-large-latest", {
     name: "Mistral Large",
-    api: "mistral-conversations",
-    provider: "mistral",
     baseUrl: "https://api.mistral.ai",
     reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 8192,
-  };
-}
+  });
 
 const context = {
   messages: [{ role: "user", content: "hello", timestamp: 0 }],
@@ -123,6 +116,14 @@ function requireMistralFixtureValue<T>(value: T | undefined): T {
   return value;
 }
 
+function mistralEvents<T>(events: T[]) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield* events;
+    },
+  };
+}
+
 function mistralToolStream(responseId: string, ...chunks: ToolCall[][]) {
   return {
     async *[Symbol.asyncIterator]() {
@@ -131,12 +132,7 @@ function mistralToolStream(responseId: string, ...chunks: ToolCall[][]) {
           data: {
             id: responseId,
             model: "mistral-large-latest",
-            choices: [
-              {
-                finishReason: "tool_calls",
-                delta: { content: null, toolCalls },
-              },
-            ],
+            choices: [{ finishReason: "tool_calls", delta: { content: null, toolCalls } }],
           },
         };
       }
@@ -294,11 +290,7 @@ describe("Mistral provider", () => {
         },
       },
     ];
-    mistralMockState.streamResult = {
-      async *[Symbol.asyncIterator]() {
-        yield* events;
-      },
-    };
+    mistralMockState.streamResult = mistralEvents(events);
     const controller = new AbortController();
     const onActivity = vi.fn();
     const unsubscribe = onLlmRequestActivity(controller.signal, onActivity);
@@ -316,16 +308,16 @@ describe("Mistral provider", () => {
     mistralMockState.requestThroughHttpClient = true;
     const cancel = vi.fn(async () => undefined);
     mistralMockState.streamResult = {
-      cancel,
-      async *[Symbol.asyncIterator]() {
-        yield {
+      ...mistralEvents([
+        {
           data: {
             id: "resp-http-ack",
             model: "mistral-large-latest",
             choices: [{ finishReason: "stop", delta: { content: "ok" } }],
           },
-        };
-      },
+        },
+      ]),
+      cancel,
     };
     configureAiTransportHost({
       buildModelFetch: () => async () => new Response("stream", { status: 200 }),
@@ -378,7 +370,7 @@ describe("Mistral provider", () => {
     });
 
     expect(result.stopReason).toBe("error");
-    expect((mistralMockState.payloads[0] as { stop?: unknown }).stop).toEqual(["STOP"]);
+    expect(mistralMockState.payloads[0]).toHaveProperty("stop", ["STOP"]);
   });
 
   it("preserves requested maxTokens when the model output limit is unknown", async () => {
@@ -412,8 +404,10 @@ describe("Mistral provider", () => {
 
     const result = await runMistralFixture();
 
-    expect(result.errorMessage).toBe("400: invalid request");
-    expect(result.errorBody).toBe(`${prefix.slice(0, 500)}... [truncated]`);
+    expect(result).toMatchObject({
+      errorMessage: "400: invalid request",
+      errorBody: `${prefix.slice(0, 500)}... [truncated]`,
+    });
   });
 
   it.each([
@@ -517,8 +511,7 @@ describe("Mistral provider", () => {
       const result = await runMistralFixture();
       const toolCalls = result.content.filter((block) => block.type === "toolCall");
       expect(toolCalls).toHaveLength(2);
-      expect(toolCalls[0]?.arguments).toEqual({ step: 1 });
-      expect(toolCalls[1]?.arguments).toEqual({ other: true });
+      expect(toolCalls.map((call) => call.arguments)).toEqual([{ step: 1 }, { other: true }]);
       responseIds.push(toolCalls.map((toolCall) => toolCall.id));
     }
 
@@ -758,7 +751,7 @@ describe("Mistral provider", () => {
 
     expect(result.stopReason).toBe("error");
     expect(nameReads).toBe(1);
-    expect((mistralMockState.payloads[0] as { toolChoice?: unknown }).toolChoice).toEqual({
+    expect(mistralMockState.payloads[0]).toHaveProperty("toolChoice", {
       type: "function",
       function: { name: "healthy_tool" },
     });
@@ -809,37 +802,23 @@ describe("Mistral provider", () => {
       sessionId: "session-cache-key",
     });
 
-    expect((mistralMockState.payloads[0] as { promptCacheKey?: string }).promptCacheKey).toBe(
-      "session-cache-key",
-    );
+    expect(mistralMockState.payloads[0]).toHaveProperty("promptCacheKey", "session-cache-key");
   });
 
   it.each([
     ["SDK camel case", { promptTokensDetails: { cachedTokens: 64 } }],
     ["wire snake case", { prompt_tokens_details: { cached_tokens: 64 } }],
   ])("accounts for cached prompt tokens from %s usage", async (_label, cacheUsage) => {
-    mistralMockState.streamResult = {
-      async *[Symbol.asyncIterator]() {
-        yield {
-          data: {
-            id: "response-cache-usage",
-            model: "mistral-small-latest",
-            usage: {
-              promptTokens: 100,
-              completionTokens: 10,
-              totalTokens: 110,
-              ...cacheUsage,
-            },
-            choices: [
-              {
-                finishReason: "stop",
-                delta: { content: "ok", toolCalls: [] },
-              },
-            ],
-          },
-        };
+    mistralMockState.streamResult = mistralEvents([
+      {
+        data: {
+          id: "response-cache-usage",
+          model: "mistral-small-latest",
+          usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110, ...cacheUsage },
+          choices: [{ finishReason: "stop", delta: { content: "ok", toolCalls: [] } }],
+        },
       },
-    };
+    ]);
 
     const result = await runMistralFixture(context, { apiKey: "fixture" });
 
