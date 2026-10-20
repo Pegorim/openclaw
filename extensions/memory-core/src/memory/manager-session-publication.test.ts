@@ -21,7 +21,6 @@ describe("memory session publication", () => {
   ])("blocks forgotten $mode publication", async ({ provider, force }) => {
     const sessionId = "forgotten-during-embedding";
     const sessionKey = `agent:main:chat:${sessionId}`;
-    const session = { agentId: "main", sessionId, sessionKey };
     const cfg = createConfig({
       provider,
       batchEnabled: true,
@@ -35,9 +34,7 @@ describe("memory session publication", () => {
     await seedSessionTranscript({
       sessionId,
       sessionKey,
-      messages: [
-        { role: "user", timestamp: Date.now(), content: "Private violet alpha fragment." },
-      ],
+      messages: [{ role: "user", timestamp: 1, content: "Private violet." }],
     });
     const embeddingEntered = createDeferred<void>();
     fixture.provider.providerRuntimeBatchEntered = () => embeddingEntered.resolve();
@@ -45,7 +42,7 @@ describe("memory session publication", () => {
     fixture.provider.providerRuntimeBatchGate = embeddingReleased.promise;
     const activeSync = manager.sync({
       reason: "forget-during-embedding",
-      ...(force ? { force: true } : { sessions: [session] }),
+      ...(force ? { force: true } : { sessions: [{ agentId: "main", sessionId, sessionKey }] }),
     });
     let publicationSql: ReturnType<typeof observeHostDataSql> | undefined;
     try {
@@ -82,8 +79,6 @@ describe("memory session publication", () => {
       embeddingReleased.resolve();
       await activeSync.catch(() => undefined);
       publicationSql?.restore();
-      fixture.provider.providerRuntimeBatchGate = null;
-      fixture.provider.providerRuntimeBatchEntered = null;
     }
   });
 });

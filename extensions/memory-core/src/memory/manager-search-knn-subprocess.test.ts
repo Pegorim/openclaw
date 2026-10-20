@@ -52,28 +52,24 @@ function useFixtureChild() {
   return { children, closedChildren, liveChildCounts, ready };
 }
 
-function request(limit: number, overrides: Partial<VectorKnnRequest> = {}): VectorKnnRequest {
-  return {
-    providerModels: ["test-model"],
-    queryVec: [1, 0],
-    limit,
-    snippetMaxChars: 700,
-    sourceFilter: { sql: "", params: [] },
-    ...overrides,
-  };
-}
-
+const defaultRequest: VectorKnnRequest = {
+  providerModels: ["test-model"],
+  queryVec: [1, 0],
+  limit: 1,
+  snippetMaxChars: 700,
+  sourceFilter: { sql: "", params: [] },
+};
 function run(
   limit = 1,
   options: Omit<Partial<Parameters<typeof runVectorKnnInSubprocess>[0]>, "request"> & {
     request?: Partial<VectorKnnRequest>;
   } = {},
 ) {
-  const { request: overrides, ...target } = options;
+  const { request, ...target } = options;
   return runVectorKnnInSubprocess({
     databasePath: "fixture:ok",
     ...target,
-    request: request(limit, overrides),
+    request: { ...defaultRequest, limit, ...request },
   });
 }
 
@@ -99,6 +95,12 @@ async function createFileBackedVectorDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-memory-knn-"));
   const databasePath = path.join(directory, "memory.sqlite");
   const db = openNodeSqliteDatabase(databasePath, { allowExtension: true });
+  const cleanup = () => {
+    if (db.isOpen) {
+      db.close();
+    }
+    fs.rmSync(directory, { force: true, recursive: true });
+  };
   try {
     const loaded = await loadSqliteVecExtension({ db });
     if (!loaded.ok) {
@@ -113,12 +115,6 @@ async function createFileBackedVectorDatabase() {
       );
       CREATE VIRTUAL TABLE memory_index_chunks_vec USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[2]);
     `);
-    const cleanup = () => {
-      if (db.isOpen) {
-        db.close();
-      }
-      fs.rmSync(directory, { force: true, recursive: true });
-    };
     return {
       db,
       databasePath,
@@ -128,8 +124,7 @@ async function createFileBackedVectorDatabase() {
         run(limit, { databasePath, request: overrides }),
     };
   } catch (error) {
-    db.close();
-    fs.rmSync(directory, { force: true, recursive: true });
+    cleanup();
     throw error;
   }
 }
@@ -190,7 +185,7 @@ describe("memory vector KNN subprocess boundary", () => {
   it("waits for an idle child to exit through EOF before reusing its capacity", async () => {
     const { children, closedChildren, liveChildCounts } = useFixtureChild();
     for (const databasePath of ["fixture:first", "fixture:second"]) {
-      await runVectorKnnInSubprocess({ databasePath, request: request(1) });
+      await run(1, { databasePath });
     }
     // Make EOF win retirement without changing the real close event.
     vi.spyOn(children[0]!, "kill").mockReturnValueOnce(true);
@@ -208,7 +203,7 @@ describe("memory vector KNN subprocess boundary", () => {
     const { children, closedChildren, liveChildCounts } = useFixtureChild();
     await Promise.all(
       ["fixture:first", "fixture:second", "fixture:third"].map((databasePath) =>
-        runVectorKnnInSubprocess({ databasePath, request: request(100) }),
+        run(100, { databasePath }),
       ),
     );
     expect(children).toHaveLength(3);
@@ -226,7 +221,7 @@ describe("memory vector KNN subprocess boundary", () => {
           JSON.stringify({
             expireIdle: true,
             databasePaths: fixtures.map((fixture) => fixture.databasePath),
-            request: request(1),
+            request: defaultRequest,
           }),
         ],
         { timeout: 30_000, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot } },
@@ -392,19 +387,6 @@ describe("memory vector KNN subprocess boundary", () => {
     expect(children).toHaveLength(2);
   });
 
-  it("bounds NUL-dense native snippets before the subprocess output limit", async () => {
-    using fixture = await createFileBackedVectorDatabase();
-    fixture.db.exec("BEGIN");
-    for (let index = 0; index < 200; index += 1) {
-      insertVectorRow(fixture.db, `nul-${index}`, [1, 0], "memory", "\0".repeat(3000));
-    }
-    fixture.db.exec("COMMIT");
-    const result = await fixture.query(200);
-    expect(result.fallbackScanRequired).toBe(false);
-    expect(result.rows).toHaveLength(200);
-    expect(result.rows.every((row) => row.text === "\0".repeat(700))).toBe(true);
-  });
-
   it("fails vector recall closed when the subprocess is unavailable", async () => {
     const runFallback = vi.fn(async () => []);
     await expect(
@@ -436,17 +418,32 @@ describe("memory vector KNN subprocess boundary", () => {
     expect(childProcess.spawn).toHaveBeenCalledTimes(1);
   });
 
-  it("bounds an oversized stored row before child protocol serialization", async () => {
-    using fixture = await createFileBackedVectorDatabase();
-    const oversizedText = `${"x".repeat(63)}😀${"y".repeat(3 * 1024 * 1024)}`;
-    insertVectorRow(fixture.db, "oversized", [1, 0], "memory", oversizedText);
-
-    const result = await fixture.query(1, { snippetMaxChars: 64 });
-
-    expect(result).toMatchObject({
-      fallbackScanRequired: false,
-      rows: [{ id: "oversized", text: "x".repeat(63) }],
-    });
-    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(2 * 1024 * 1024);
-  });
+  it.each([
+    ["NUL-dense", 200, "\0".repeat(3000), 700, "\0".repeat(700)],
+    ["oversized", 1, `${"x".repeat(63)}😀${"y".repeat(3 * 1024 * 1024)}`, 64, "x".repeat(63)],
+  ] as const)(
+    "bounds %s snippets before child serialization",
+    async (kind, count, text, snippetMaxChars, expected) => {
+      using fixture = await createFileBackedVectorDatabase();
+      fixture.db.exec("BEGIN");
+      for (let index = 0; index < count; index++) {
+        insertVectorRow(
+          fixture.db,
+          count === 1 ? "oversized" : `nul-${index}`,
+          [1, 0],
+          "memory",
+          text,
+        );
+      }
+      fixture.db.exec("COMMIT");
+      const result = await fixture.query(count, { snippetMaxChars });
+      expect(result.fallbackScanRequired).toBe(false);
+      expect(result.rows).toHaveLength(count);
+      expect(result.rows.every((row) => row.text === expected)).toBe(true);
+      if (kind === "oversized") {
+        expect(result.rows[0]).toMatchObject({ id: "oversized", text: expected });
+        expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(2 * 1024 * 1024);
+      }
+    },
+  );
 });

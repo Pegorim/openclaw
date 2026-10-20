@@ -35,12 +35,11 @@ it.each(["body", "body-fallback", "path", "vector-scan", "vector-knn"] as const)
       excludedPath,
       ...Array.from({ length: 33_000 }, (_, i) => `unused/${i}`),
     ];
-    const sourceFilter = buildMemorySourceFilter(undefined, ["memory", "sessions"], excludedPaths);
     const keyword = {
       query: mode === "body-fallback" ? "recall absentword" : "recall",
       limit: 2,
       snippetMaxChars: 80,
-      sourceFilter,
+      sourceFilter: buildMemorySourceFilter(undefined, ["memory", "sessions"], excludedPaths),
     };
     const vector = {
       ...keyword,

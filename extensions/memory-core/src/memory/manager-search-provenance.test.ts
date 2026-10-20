@@ -59,8 +59,7 @@ describe("memory search provenance enrichment", () => {
       FROM memory_index_chunks WHERE path = 'memory/orchid-0.md';
     `);
 
-    const prepare = db.prepare.bind(db);
-    using queries = vi.spyOn(db, "prepare").mockImplementation(prepare);
+    using queries = vi.spyOn(db, "prepare");
     using knn = vi.spyOn(knnSubprocess, "searchMemoryVectorIndex");
     const results = await manager.search(entry.query, {
       lexicalOnly: entry.query !== "semantic needle",

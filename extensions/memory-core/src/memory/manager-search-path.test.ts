@@ -19,12 +19,6 @@ function searchPath(db: DatabaseSync, query: string, options: Partial<PathSearch
   });
 }
 
-function insertPaths(db: DatabaseSync, paths: Record<string, string>) {
-  for (const [id, path] of Object.entries(paths)) {
-    insertKeywordFixture(db, { id, path });
-  }
-}
-
 describe("searchPathKeyword", () => {
   function createDb(options: Parameters<typeof createMemorySearchDb>[0] = {}) {
     const { db, schema } = createMemorySearchDb(options);
@@ -36,19 +30,6 @@ describe("searchPathKeyword", () => {
       throw error;
     }
   }
-
-  it("keeps filename token matching strict so foo.md does not match unrelated .md paths", async () => {
-    using db = createDb({ ftsTokenizer: "unicode61" });
-    insertPaths(db, {
-      target: "memory/notes/foo.md",
-      "other-1": "memory/notes/bar.md",
-      "other-2": "memory/notes/baz.md",
-    });
-
-    const results = await searchPath(db, "foo.md", { limit: 10 });
-
-    expect(results.map((entry) => entry.id)).toEqual(["target"]);
-  });
 
   it.each([
     ["unicode61", "common"],
@@ -140,53 +121,63 @@ describe("searchPathKeyword", () => {
     },
   );
 
-  it("applies short CJK trigram substring matching to the path table", async () => {
-    using db = createDb({ ftsTokenizer: "trigram" });
-    insertPaths(db, {
-      "cjk-path": "memory/成语-notes.md",
-      "cjk-exact": "memory/成语.md",
-      "readme-exact": "memory/README.md",
-      "normalized-exact": "memory/Cafe\u0301.md",
-      "tokenless-exact": "memory/🧠.md",
-    });
-
-    const results = await searchPath(db, "成语", {
-      ftsTokenizer: "trigram",
-      limit: 10,
-    });
-
-    expect(results.map((entry) => entry.id)).toEqual(["cjk-exact", "cjk-path"]);
-    for (const [query, id, exactPathSpecificity] of [
-      ["成语.md", "cjk-exact", 2],
-      ["README.md", "readme-exact", 2],
-      ["CAFÉ", "normalized-exact", 1],
-      ["🧠", "tokenless-exact", 1],
-    ] as const) {
-      await expect(searchPath(db, query, { ftsTokenizer: "trigram" })).resolves.toMatchObject([
-        { id, exactPathSpecificity },
-      ]);
+  type Match = [query: string, limit: number, ids: string[], specificity?: number];
+  it.each<[string, "trigram" | undefined, string[], Match[]]>([
+    [
+      "strict filename tokens",
+      undefined,
+      ["memory/notes/foo.md", "memory/notes/bar.md", "memory/notes/baz.md"],
+      [["foo.md", 10, ["0"]]],
+    ],
+    [
+      "CJK and normalized exact paths",
+      "trigram",
+      [
+        "memory/成语-notes.md",
+        "memory/成语.md",
+        "memory/README.md",
+        "memory/Cafe\u0301.md",
+        "memory/🧠.md",
+      ],
+      [
+        ["成语", 10, ["1", "0"]],
+        ["成语.md", 1, ["1"], 2],
+        ["README.md", 1, ["2"], 2],
+        ["CAFÉ", 1, ["3"], 1],
+        ["🧠", 1, ["4"], 1],
+      ],
+    ],
+    [
+      "NFC queries over partial NFD paths",
+      "trigram",
+      ["memory/Cafe\u0301-notes.md"],
+      [
+        ["Café", 10, ["0"], 0],
+        ["fé", 10, ["0"], 0],
+      ],
+    ],
+    [
+      "default Unicode substrings",
+      undefined,
+      ["memory/Café.md"],
+      [
+        ["afé", 1, ["0"], 0],
+        ["AFE\u0301", 1, ["0"], 0],
+        ["memory afé", 1, ["0"], 0],
+        ["emory afé", 1, []],
+      ],
+    ],
+  ])("matches %s", async (_name, tokenizer, paths, searches) => {
+    const options = tokenizer ? { ftsTokenizer: tokenizer } : {};
+    using db = createDb(options);
+    paths.forEach((path, index) => insertKeywordFixture(db, { id: String(index), path }));
+    for (const [query, limit, ids, specificity] of searches) {
+      const expected = ids.map((id) =>
+        specificity === undefined ? { id } : { id, exactPathSpecificity: specificity },
+      );
+      expect(await searchPath(db, query, { ...options, limit })).toMatchObject(expected);
     }
   });
-
-  it.each([
-    { tokenizer: "trigram", path: "memory/Cafe\u0301-notes.md", queries: ["Café", "fé"] },
-    { tokenizer: "unicode61", path: "memory/Café.md", queries: ["afé", "AFE\u0301", "memory afé"] },
-  ] as const)(
-    "matches partial Unicode paths with $tokenizer",
-    async ({ tokenizer, path, queries }) => {
-      const options = tokenizer === "trigram" ? { ftsTokenizer: tokenizer, limit: 10 } : {};
-      using db = createDb(options);
-      insertPaths(db, { partial: path });
-      for (const query of queries) {
-        await expect(searchPath(db, query, options)).resolves.toMatchObject([
-          { id: "partial", exactPathSpecificity: 0 },
-        ]);
-      }
-      if (tokenizer === "unicode61") {
-        await expect(searchPath(db, "emory afé")).resolves.toEqual([]);
-      }
-    },
-  );
 
   it("bounds exact-path headroom independently from lexical candidates", async () => {
     const exactPath = (index: number) =>
