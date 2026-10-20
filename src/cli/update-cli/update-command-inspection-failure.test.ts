@@ -54,9 +54,7 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
         return withUpdateCommandRecoveryUnwind(
           { json: true, run },
           { triageTarget: { root, env } },
-          async () => {
-            throw original;
-          },
+          () => Promise.reject(original),
         ).catch((error: unknown) => {
           if (outcome === "settlement-failed") {
             throw new AggregateError([error], "Update executor cleanup failed", { cause: error });

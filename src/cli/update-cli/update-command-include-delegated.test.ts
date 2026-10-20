@@ -4,7 +4,6 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
-import { formatErrorMessage } from "../../infra/errors.js";
 import {
   resolveRuntimeWorkerArgv,
   resolveRuntimeWorkerUrl,
@@ -20,12 +19,11 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 const receiverUrl = resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.includeDelegated);
-type CommandResult = Awaited<ReturnType<typeof runUtf8CommandWithTimeout>>;
 const read = (file: string) => fs.readFileSync(file, "utf8");
 
-it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as const)(
+it.each(["healthy", "original-owner-replaced", "include-parent-replaced"] as const)(
   "delegated candidate include effect retains original owner and directory: %s",
-  async (fault, { onTestFailed }) => {
+  async (fault) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const control = state.path("control");
       const root = state.path("install");
@@ -50,58 +48,31 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
         candidate: string;
       }>();
       let stdout = "";
-      const runId = randomUUID();
       let boundPid: number | undefined;
-      let commandResult: CommandResult | undefined;
-      let commandError: unknown;
-      let failure: unknown;
-      onTestFailed(() => {
-        console.error(
-          JSON.stringify({
-            fault,
-            boundPid,
-            parentPid: process.pid,
-            candidate: receiverUrl.href,
-            command: commandResult,
-            commandError: commandError === undefined ? undefined : formatErrorMessage(commandError),
-            error: failure === undefined ? undefined : formatErrorMessage(failure),
-            stdout,
-          }),
-        );
-      });
-      const work = withUpdateCommandExecutor(runId, async (owner) => {
+      const work = withUpdateCommandExecutor(randomUUID(), async (owner) => {
         const fence = await owner.enter(root);
         const pending = withUpdateCommandExecutorChild(fence, root, async (grant, bindChild) => {
-          try {
-            const result = await runUtf8CommandWithTimeout(
-              [process.execPath, ...resolveRuntimeWorkerArgv(receiverUrl)],
-              {
-                input: JSON.stringify({ grant, proceed }),
-                env: state.env,
-                beforeInput: (pid) => {
-                  boundPid = pid;
-                  bindChild(pid);
-                },
-                timeoutMs: 30_000,
-                killProcessTree: true,
-                requireProcessTreeExtinction: true,
-                onOutputChunk: (chunk) => {
-                  stdout += String(chunk);
-                  const line = stdout
-                    .split("\n")
-                    .find((value) => value.startsWith('{"ready":true'));
-                  if (line) {
-                    ready.resolve(JSON.parse(line));
-                  }
-                },
+          return runUtf8CommandWithTimeout(
+            [process.execPath, ...resolveRuntimeWorkerArgv(receiverUrl)],
+            {
+              input: JSON.stringify({ grant, proceed }),
+              env: state.env,
+              beforeInput: (pid) => {
+                boundPid = pid;
+                bindChild(pid);
               },
-            );
-            commandResult = result;
-            return result;
-          } catch (error) {
-            commandError = error;
-            throw error;
-          }
+              timeoutMs: 30_000,
+              killProcessTree: true,
+              requireProcessTreeExtinction: true,
+              onOutputChunk: (chunk) => {
+                stdout += String(chunk);
+                const line = stdout.split("\n").find((value) => value.startsWith('{"ready":true'));
+                if (line) {
+                  ready.resolve(JSON.parse(line));
+                }
+              },
+            },
+          );
         });
         try {
           const binding = await Promise.race([
@@ -134,11 +105,12 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
         }
         return await pending;
       });
-      const outcome = await work.catch((error: unknown) => {
-        failure = error;
-      });
+      const outcome = await work.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
       if (fault === "healthy") {
-        expect(outcome, stdout).toMatchObject({ code: 0 });
+        expect(outcome, stdout).toMatchObject({ value: { code: 0 } });
         expect(JSON.parse(read(fragment))).toMatchObject({ channel: "beta" });
         expect(read(`${fragment}.bak`)).toBe(original);
       } else {

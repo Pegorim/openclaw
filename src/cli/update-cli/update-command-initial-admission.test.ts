@@ -11,7 +11,7 @@ import type { UpdateRecoveryFence } from "../../infra/update-run-recovery.js";
 import type { UpdateCommandOptions } from "./shared.js";
 import { executeMutableUpdate } from "./update-command-execution.js";
 import { withUpdateCommandExecutor } from "./update-command-executor.js";
-import type { updateGitInstall } from "./update-command-git.js";
+import { updateGitInstall } from "./update-command-git.js";
 import type { PackageInstallUpdateParams } from "./update-command-package.js";
 
 const { bindExecutionGuards, executionParams, mocks, successfulUpdate } =
@@ -19,6 +19,15 @@ const { bindExecutionGuards, executionParams, mocks, successfulUpdate } =
 const dirs = useAutoCleanupTempDirTracker(afterEach);
 let root: string;
 let env: NodeJS.ProcessEnv;
+
+function updateParams(kind: "git" | "package" = "package") {
+  const params = { ...executionParams(kind), root, shouldRestart: false };
+  const runId = createUpdateRun({ trigger: "cli" }, { env }).runId;
+  const run: NonNullable<UpdateCommandOptions["run"]> = { runId, env };
+  params.opts.run = run;
+  return { params, run };
+}
+
 beforeEach(() => {
   root = fs.realpathSync(dirs.make("update-initial-admission-"));
   for (const dir of ["tmp", "state", "dist"]) {
@@ -33,41 +42,24 @@ beforeEach(() => {
     OPENCLAW_CONFIG_PATH: path.join(root, "state", "openclaw.json"),
   };
   vi.spyOn(tempRoot, "resolvePreferredOpenClawTmpDir").mockReturnValue(path.join(root, "tmp"));
-  mocks.maybeStopService.mockResolvedValue({
-    stopped: false,
-    inspected: true,
-    runtimeInspected: true,
-    running: false,
-  });
-  mocks.validateCanary.mockResolvedValue({
-    status: "ok",
-    phase: "readiness",
-    steps: [],
-    durationMs: 1,
-    logTail: [],
-    doctorConfigWrites: true,
-  });
+  const offline = { stopped: false, inspected: true, runtimeInspected: true, running: false };
+  const ready = { status: "ok", phase: "readiness", steps: [], durationMs: 1, logTail: [] };
+  mocks.maybeStopService.mockResolvedValue(offline);
+  mocks.validateCanary.mockResolvedValue({ ...ready, doctorConfigWrites: true });
 });
 afterEach(() => vi.restoreAllMocks());
 
 it.each(["package", "artifact", "git"] as const)(
   "admits the acquired owner at the real %s preparation boundary through activation and Doctor",
   async (kind) => {
-    const params = {
-      ...executionParams(kind === "git" ? "git" : "package"),
-      root,
-      shouldRestart: false,
-    };
+    const { params, run } = updateParams(kind === "git" ? "git" : "package");
     if (kind === "artifact") {
       params.packageInstallSpec = path.join(root, "candidate.tgz");
       params.tag = params.packageInstallSpec;
     }
-    const runId = createUpdateRun({ trigger: "cli" }, { env }).runId;
-    const run: NonNullable<UpdateCommandOptions["run"]> = { runId, env };
-    params.opts.run = run;
     let admitted: UpdateRecoveryFence | undefined;
     let doctorAdmitted = false;
-    await withUpdateCommandExecutor(runId, async (executor) => {
+    await withUpdateCommandExecutor(run.runId, async (executor) => {
       mocks.prepareMutableUpdate.mockImplementation(async (_env, _timeout, admitExecutor) => {
         const fence = await executor.enter(root);
         admitExecutor(fence);
@@ -88,20 +80,15 @@ it.each(["package", "artifact", "git"] as const)(
         doctor(options.getDoctorContext?.());
         return successfulUpdate;
       });
-      mocks.runGitUpdate.mockImplementation(
-        async (options: Parameters<typeof updateGitInstall>[0]) => {
-          await options.inspectGitTarget?.({ schemaVersions: { state: 15, agent: 19 } });
-          await options.validateCandidate?.(root);
-          await options.beforeGitMutation?.({ schemaVersions: { state: 15, agent: 19 } });
-          doctor(options.getDoctorContext?.());
-          return { ...successfulUpdate, mode: "git" };
-        },
-      );
-      const result = await executeMutableUpdate(await bindExecutionGuards(params));
-      expect(result, JSON.stringify(mocks.runtimeError.mock.calls)).toMatchObject({
-        result: { status: "ok" },
-        mutationStarted: true,
+      vi.mocked(updateGitInstall).mockImplementation(async (options) => {
+        await options.inspectGitTarget?.({ schemaVersions: { state: 15, agent: 19 } });
+        await options.validateCandidate?.(root);
+        await options.beforeGitMutation?.({ schemaVersions: { state: 15, agent: 19 } });
+        doctor(options.getDoctorContext?.());
+        return { ...successfulUpdate, mode: "git" };
       });
+      const result = await executeMutableUpdate(await bindExecutionGuards(params));
+      expect(result).toMatchObject({ result: { status: "ok" }, mutationStarted: true });
       expect(doctorAdmitted).toBe(true);
       expect(admitted).toBeDefined();
       admitted?.assertCurrent();
@@ -118,26 +105,21 @@ it.each([
 ] as const)(
   "refuses %s instead of adopting an arbitrary first or replacement owner",
   async (change) => {
-    const params = { ...executionParams("package"), root, shouldRestart: false };
-    const runId = createUpdateRun({ trigger: "cli" }, { env }).runId;
+    const { params, run } = updateParams();
     let current = true;
-    const requesterAuthority = {
+    run.requesterAuthority = {
       requester: { channel: "test", senderId: "owner" },
       isCurrent: () => current,
     };
-    const run: NonNullable<UpdateCommandOptions["run"]> = { runId, env, requesterAuthority };
-    params.opts.run = run;
     const wrongRoot = path.join(root, "other");
     fs.mkdirSync(wrongRoot);
     let admitted = false;
     await withUpdateCommandExecutor(
-      change === "wrong-run" ? randomUUID() : runId,
+      change === "wrong-run" ? randomUUID() : run.runId,
       async (executor) => {
         mocks.prepareMutableUpdate.mockImplementation(async (_env, _timeout, admitExecutor) => {
           const fence = await executor.enter(change === "wrong-root" ? wrongRoot : root);
-          if (change === "requester-revoked") {
-            current = false;
-          }
+          current = change !== "requester-revoked";
           if (change === "recovery-pending") {
             params.opts.recovery = {};
           }

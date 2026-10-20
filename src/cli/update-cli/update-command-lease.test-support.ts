@@ -140,18 +140,14 @@ async function runUpdateLeaseScenario(): Promise<void> {
     if (scenario.readinessFailure === "execution") {
       throw new Error("readiness fixture failure");
     }
-    const findings =
-      scenario.readinessFailure === "finding"
-        ? [
-            {
-              checkId: "fixture/post-plugin-readiness",
-              severity: "error",
-              source: "fixture",
-              message: "Fixture plugin is not ready.",
-              fixHint: "Run the fixture repair command.",
-            },
-          ]
-        : [];
+    const finding = {
+      checkId: "fixture/post-plugin-readiness",
+      severity: "error",
+      source: "fixture",
+      message: "Fixture plugin is not ready.",
+      fixHint: "Run the fixture repair command.",
+    };
+    const findings = scenario.readinessFailure === "finding" ? [finding] : [];
     outputJson({ ok: findings.length === 0, checksRun: 1, checksSkipped: 0, findings }, "\n");
     process.exitCode = findings.length === 0 ? 0 : 1;
     return;
@@ -253,21 +249,18 @@ async function runUpdateLeaseScenario(): Promise<void> {
       const { beginDoctorMaintenance } = await import("../../commands/doctor-maintenance.js");
       const options = { repair: true, nonInteractive: true, workspaceSuggestions: false };
       const prompter = createDoctorPrompter({ runtime, options });
+      const context = { runtime, options, prompter };
       // One real maintenance owner serves every migration in this Doctor invocation.
       const maintenance = await beginDoctorMaintenance({ root: null, options, runtime });
       assert.ok(maintenance);
       try {
         const config = await maintenance.run(async () => {
           await using configResult = await loadAndMaybeMigrateDoctorConfig({
-            options,
-            prompter,
-            runtime,
+            ...context,
             confirm: (params) => prompter.confirm(params),
           });
           await runInitialConfigWriteHealth({
-            runtime,
-            options,
-            prompter,
+            ...context,
             configResult,
             cfg: configResult.cfg,
             cfgForPersistence: structuredClone(configResult.cfg),

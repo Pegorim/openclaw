@@ -21,6 +21,7 @@ import * as packageUpdate from "./update-command-package.js";
 
 afterEach(() => vi.restoreAllMocks());
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const recovery = (version: string) => ({ serviceRestartSafe: true as const, version });
 
 it.each(
   (["git", "package-to-git"] as const).flatMap((route) => [
@@ -64,12 +65,9 @@ it.each(
             activePackageRoot: gitRoot,
             afterVersion: "2026.9.4",
             failedStep: null,
-            recovery: { serviceRestartSafe: true, version: "2026.9.4" },
+            recovery: recovery("2026.9.4"),
           }),
-          cancel: async () => ({
-            steps: [],
-            recovery: { serviceRestartSafe: true, version: "2026.9.3" },
-          }),
+          cancel: async () => ({ steps: [], recovery: recovery("2026.9.3") }),
         };
       });
     vi.spyOn(gitRunner, "updateGitCheckout").mockImplementation(async ({ opts }) => {

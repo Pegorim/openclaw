@@ -1,24 +1,18 @@
-// Only external plugin work, disposable service discovery/policy and network health are fixtures. Keep
-// the migrated worker, finishUpdate, ledger, native client/receiver and effects real.
 import fs from "node:fs";
 import { registerHooks } from "node:module";
 
 const scratch = process.env.OPENCLAW_STATE_DIR!;
-const source = (relative: string) =>
-  new URL(
-    import.meta.url.endsWith(".js") ? relative.replace(/\.ts$/u, ".js") : relative,
-    import.meta.url,
-  ).href;
+const ext = import.meta.url.endsWith(".js") ? ".js" : ".ts";
+const source = (relative: string) => new URL(relative.replace(/\.ts$/u, ext), import.meta.url).href;
 // Consume fixture metadata before the real worker interprets its own arguments.
 const runtimeEntry = process.argv.splice(2, 1)[0];
 if (!runtimeEntry) {
   throw new Error("Legacy finalizer fixture requires its read-only worker declaration.");
 }
-const readOnlyEntrypoint: unknown = JSON.parse(runtimeEntry);
 const overrides: Record<string, string> = {
   [source("../../infra/runtime-process-entrypoints.ts")]:
     `import {runtimeProcessEntrypoints as actual} from ${JSON.stringify(source("../../infra/runtime-process-entrypoints.ts") + "?fixture-original")};
-    export const runtimeProcessEntrypoints = {...actual, sqliteReadOnly: ${JSON.stringify(readOnlyEntrypoint)}};`,
+    export const runtimeProcessEntrypoints = {...actual, sqliteReadOnly: ${JSON.stringify(JSON.parse(runtimeEntry))}};`,
   [source("./update-command-service-plan.ts")]: `
     export function resolveGatewayServiceManagementBlockMessageForUpdate(env) {
       if(env.OPENCLAW_STATE_DIR!==${JSON.stringify(scratch)}) throw new Error("Non-fixture service environment");
