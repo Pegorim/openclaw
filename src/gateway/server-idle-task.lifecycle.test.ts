@@ -41,6 +41,22 @@ function scheduleIdle(run: () => Promise<void>, log = { warn: vi.fn() }, retryDe
   });
 }
 
+function scheduleHandler(
+  load: () => Promise<void>,
+  later: () => Promise<void>,
+  log: { warn: (message: string) => void },
+) {
+  return scheduleGatewayHandlerPrewarm({
+    scheduler,
+    getConfig: () => ({}),
+    log,
+    items: [
+      { name: "first", load },
+      { name: "later", load: later },
+    ],
+  });
+}
+
 it.each(["idle", "handler"] as const)(
   "joins started %s work before the Gateway sidecar owner closes",
   async (kind) => {
@@ -55,18 +71,7 @@ it.each(["idle", "handler"] as const)(
     };
     const log = { warn: vi.fn() };
     const later = vi.fn(async () => {});
-    const handle =
-      kind === "idle"
-        ? scheduleIdle(run, log)
-        : scheduleGatewayHandlerPrewarm({
-            scheduler,
-            getConfig: () => ({}),
-            log,
-            items: [
-              { name: "first", load: run },
-              { name: "later", load: later },
-            ],
-          });
+    const handle = kind === "idle" ? scheduleIdle(run, log) : scheduleHandler(run, later, log);
     const owner = createGatewaySidecarStopOwner();
     owner.publish(handle);
     let stopping: Promise<void> | undefined;
@@ -102,15 +107,9 @@ it.each(["suspension", "restart signal"] as const)(
     expect(suspension?.commit() ?? Boolean(restart)).toBe(true);
     const run = vi.fn(async () => {});
     const handle = scheduleIdle(run, undefined, 10);
-    let stopping: Promise<void> | undefined;
     try {
       await clock.advanceBy(0);
-      let closed = false;
-      stopping = Promise.resolve(handle.stop()).then(() => {
-        closed = true;
-      });
-      await stopping;
-      expect(closed).toBe(true);
+      await expect(Promise.resolve(handle.stop())).resolves.toBeUndefined();
       expect(run).not.toHaveBeenCalled();
       expect(getActiveGatewayRootWorkCount()).toBe(0);
     } finally {
@@ -118,7 +117,6 @@ it.each(["suspension", "restart signal"] as const)(
       suspension?.release();
       restart?.rollback();
       await closing;
-      await stopping;
     }
     await clock.advanceBy(10);
     expect(run).not.toHaveBeenCalled();
@@ -137,21 +135,14 @@ it("joins the outgoing handler when shutdown begins in its warning callback", as
       events.push("closed");
     });
   });
-  const sidecar = scheduleGatewayHandlerPrewarm({
-    scheduler,
-    getConfig: () => ({}),
-    log: { warn },
-    items: [
-      {
-        name: "first",
-        load: async () => {
-          events.push("started");
-          throw new Error("cold load failed");
-        },
-      },
-      { name: "later", load: later },
-    ],
-  });
+  const sidecar = scheduleHandler(
+    async () => {
+      events.push("started");
+      throw new Error("cold load failed");
+    },
+    later,
+    { warn },
+  );
   try {
     await Promise.resolve();
     await clock.advanceBy(0);

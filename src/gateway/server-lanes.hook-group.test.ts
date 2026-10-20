@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, describe, expect, it } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { DEFAULT_CRON_MAX_CONCURRENT_RUNS } from "../config/cron-limits.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -28,19 +29,12 @@ function holdCronBudget() {
 
 async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
+    await delay(0);
   }
 }
 
 describe("cron+hook capacity group", () => {
   afterEach(async () => {
-    if (vi.isFakeTimers()) {
-      await vi.runOnlyPendingTimersAsync();
-      vi.clearAllTimers();
-    }
-    vi.useRealTimers();
     const { resetSessionSuspensionStateForTest } =
       await import("../agents/session-suspension.test-support.js");
     resetSessionSuspensionStateForTest();

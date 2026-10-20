@@ -18,10 +18,9 @@ import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission
 import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
-import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { getFreePort } from "../test-utils/ports.js";
 import { CLI_DEFAULT_OPERATOR_SCOPES } from "./method-scopes.js";
 import { dispatchGatewayRequestInProcess } from "./server-in-process-dispatch.js";
+import { closeKernelFixture, createKernelFixture } from "./server-kernel.fixture-test-support.js";
 import { createGatewayKernel } from "./server-kernel.js";
 import type { GatewayClient } from "./server-methods/types.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
@@ -30,19 +29,6 @@ import { createMaintenanceHandles } from "./server-runtime-services.test-harness
 import { expectCoreAgentDatabaseReadiness } from "./server-startup-readiness.test-support.js";
 import { withPreparedSessionEventRow } from "./session-event-prepared-row.js";
 import { getSessionRowProjection } from "./session-row-projection-access.js";
-import { KERNEL_TEST_ENV } from "./test-helpers.env.js";
-
-const gatewayConfig = (port: number, token: string) => ({
-  auth: { mode: "token" as const, token },
-  controlUi: { enabled: false },
-  port,
-});
-const kernelOptions = (token: string) => ({
-  auth: { mode: "token" as const, token },
-  bind: "loopback" as const,
-  controlUiEnabled: false,
-  sidecarStartup: "defer" as const,
-});
 function expectCalls(count: number, ...mocks: Array<(...args: never[]) => unknown>) {
   for (const mock of mocks) {
     expect(mock).toHaveBeenCalledTimes(count);
@@ -68,15 +54,13 @@ describe("createGatewayKernel", () => {
   it.each([false, true])(
     "starts recovered channels only before close (closing=%s)",
     async (closing) => {
-      const port = await getFreePort();
-      const state = await createOpenClawTestState({
-        label: "gateway-kernel-breaker-recovery-close",
+      const fixture = await createKernelFixture("gateway-kernel-breaker-recovery-close", {
         env: {
-          ...KERNEL_TEST_ENV,
           OPENCLAW_SKIP_CHANNELS: undefined,
           OPENCLAW_SKIP_PROVIDERS: undefined,
         },
       });
+      const { state } = fixture;
       const originalPluginRegistry = captureActivePluginRegistrySnapshot();
       const started = createDeferred();
       const startAccount = vi.fn<
@@ -102,9 +86,7 @@ describe("createGatewayKernel", () => {
       let kernel: Awaited<ReturnType<typeof createGatewayKernel>> | undefined;
       try {
         stageActivePluginRegistry(registry, null, "default");
-        const token = "gateway-kernel-breaker-recovery-token";
-        await state.writeConfig({
-          gateway: gatewayConfig(port, token),
+        await fixture.configure({
           channels: {
             telegram: {
               accounts: {
@@ -113,9 +95,7 @@ describe("createGatewayKernel", () => {
             },
           },
         });
-        state.applyEnv();
-        kernel = await createGatewayKernel(port, {
-          ...kernelOptions(token),
+        kernel = await fixture.open({
           channelAutostartSuppression: {
             reason: "crash-loop-breaker",
             message: "safe mode",
@@ -135,12 +115,9 @@ describe("createGatewayKernel", () => {
         expect(startAccount).toHaveBeenCalledTimes(closing ? 0 : 1);
         expect(kernel.channelManager.isAutoRestartScheduled("telegram", "default")).toBe(false);
       } finally {
-        try {
-          await kernel?.closeOnStartupFailure();
-        } finally {
-          restoreActivePluginRegistrySnapshot(originalPluginRegistry);
-          await state.cleanup();
-        }
+        await closeKernelFixture(kernel, state, () =>
+          restoreActivePluginRegistrySnapshot(originalPluginRegistry),
+        );
       }
     },
   );
@@ -148,12 +125,8 @@ describe("createGatewayKernel", () => {
   it.for(["direct", "public"] as const)(
     "fences hosted authority and joins shutdown owners during %s close",
     async (entry, { signal }) => {
-      const port = await getFreePort();
-      const state = await createOpenClawTestState({
-        label: `gateway-kernel-${entry}-close-readiness`,
-        env: { ...KERNEL_TEST_ENV },
-      });
-      const token = "gateway-kernel-close-readiness-token";
+      const fixture = await createKernelFixture(`gateway-kernel-${entry}-close-readiness`);
+      const { state, port } = fixture;
       const bootId = `gateway-kernel-${entry}-close`;
       const configReloaderStop = createDeferred();
       const recoveryStop = createDeferred();
@@ -197,13 +170,10 @@ describe("createGatewayKernel", () => {
       let pendingStop: Promise<void> | undefined;
       let pendingPublication: Promise<void> | undefined;
       try {
-        await state.writeConfig({
-          gateway: gatewayConfig(port, token),
-        });
-        state.applyEnv();
+        await fixture.configure();
         const options = {
           bootId,
-          ...kernelOptions(token),
+          ...fixture.serverOptions,
           hostLifecycle,
         };
         if (entry === "public") {
@@ -391,27 +361,19 @@ describe("createGatewayKernel", () => {
   );
 
   it("keeps startup readiness and sidecar shutdown at their lifecycle boundaries", async () => {
-    const port = await getFreePort();
-    const state = await createOpenClawTestState({
-      label: "gateway-kernel-deferred-readiness",
-      env: {
-        ...KERNEL_TEST_ENV,
-        OPENCLAW_TEST_MINIMAL_GATEWAY: "0",
-      },
+    const fixture = await createKernelFixture("gateway-kernel-deferred-readiness", {
+      env: { OPENCLAW_TEST_MINIMAL_GATEWAY: "0" },
     });
-    const token = "gateway-kernel-deferred-readiness-token";
-    const openKernel = () => createGatewayKernel(port, kernelOptions(token));
+    const { state, open: openKernel } = fixture;
     let kernel: Awaited<ReturnType<typeof createGatewayKernel>> | undefined;
     try {
-      await state.writeConfig({
-        gateway: gatewayConfig(port, token),
+      await fixture.configure({
         agents: {
           ownership: "explicit",
           defaults: { systemAgent: { agentId: "main" } },
           entries: { main: {}, worker: {} },
         },
       });
-      state.applyEnv();
       kernel = await openKernel();
       const activeKernel = kernel;
 
@@ -594,26 +556,20 @@ describe("createGatewayKernel", () => {
       expect(successfulPeer.stop).toHaveBeenCalledOnce();
       expect(kernel.runtimeState.gatewayLifetimeSidecars.snapshot()).toEqual([]);
     } finally {
-      try {
-        await kernel?.closeOnStartupFailure();
-      } finally {
-        await state.cleanup();
-      }
+      await closeKernelFixture(kernel, state);
     }
   });
 
   it("dispatches without a transport when optional chat identity bootstrap fails", async ({
     signal,
   }) => {
-    const port = await getFreePort();
-    const state = await createOpenClawTestState({
-      label: "gateway-kernel-no-transport",
+    const fixture = await createKernelFixture("gateway-kernel-no-transport", {
       env: {
         OPENCLAW_DIAGNOSTICS: "1",
         OPENCLAW_DIAGNOSTICS_TIMELINE_PATH: undefined,
-        ...KERNEL_TEST_ENV,
       },
     });
+    const { state } = fixture;
     const originalPluginRegistry = captureActivePluginRegistrySnapshot();
     const inspectAccount = vi.fn(() => ({ enabled: true, configured: true }));
     const capturedRegistryCleanup = vi.fn();
@@ -644,14 +600,10 @@ describe("createGatewayKernel", () => {
       capturedLoadedPluginRegistry = captureActivePluginRegistrySnapshot();
       const timelinePath = state.path("kernel-startup.jsonl");
       state.envVars.OPENCLAW_DIAGNOSTICS_TIMELINE_PATH = timelinePath;
-      const token = "gateway-kernel-no-transport-token";
-      await state.writeConfig({
-        gateway: gatewayConfig(port, token),
-      });
-      state.applyEnv();
+      await fixture.configure();
       stageActivePluginRegistry(createEmptyPluginRegistry(), null, "default");
 
-      kernel = await createGatewayKernel(port, kernelOptions(token));
+      kernel = await fixture.open();
       expect(loadIdentity).toHaveBeenCalledOnce();
       expect(kernel.transportBridge.current()).toBeUndefined();
       await expect(kernel.transportBridge.ensureSandboxHostPort()).rejects.toThrow(
@@ -698,71 +650,29 @@ describe("createGatewayKernel", () => {
           const attributes = event.attributes as { traceName?: string } | undefined;
           return attributes?.traceName ?? event.name;
         });
-      expect(measureNames).toEqual([
-        "config.snapshot.read",
-        "config.snapshot.read.file",
-        "config.snapshot.read.hash",
-        "config.snapshot.read.parse",
-        "config.snapshot.read.includes",
-        "config.snapshot.read.env",
-        "config.snapshot.read.validate",
-        "config.snapshot.read.materialize",
-        "config.snapshot.read.observe",
-        "plugins.metadata.scan",
-        "plugins.metadata.freeze",
-        "state.ownership",
-        "state.runtime-imports",
-        "state.schema-preflight",
-        "runtime.network-imports",
-        "runtime.network-bootstrap",
-        "config.runtime-imports",
-        "config.snapshot",
-        "config.auth",
-        "config.auth.snapshot-validate",
-        "config.auth.runtime-overrides",
-        "config.auth.startup-overrides",
-        "config.auth.secret-surface",
-        "config.auth.secret-preflight",
-        "config.auth.preflight-override",
-        "config.auth.ensure",
-        "config.auth.runtime-startup-overrides",
-        "config.auth.secrets-activate",
-        "agents.github-profile-cleanup",
-        "plugins.bootstrap-imports",
-        "cron.store-path",
-        "plugins.bootstrap",
-        "gateway.kernel-state",
-        "node-desktop.runtime-import",
-        "host-desktop.runtime-import",
-        "computer.runtime-import",
-        "device-identity",
-        "device-pairing",
-        "runtime.config",
-        "control-ui.root",
-        "terminal.launch-import",
-        "gateway.wizard-imports",
-        "tls.runtime",
-        "gateway.channel-manager-import",
-        "runtime.state",
-        "gateway.shutdown-runtime-import",
-        "gateway.lifecycle",
-        "gateway.core-runtime",
-        "runtime.post-early-imports",
-        "runtime.subscriptions",
-        "runtime.services",
-        "gateway.handlers",
-        "runtime.early",
-        "runtime.early.discovery",
-        "gateway.request-runtime",
-        "gateway.chat-metadata-lifecycle",
-        "gateway.config-revision-key",
-        "gateway.request-context",
-        "sessions.projection",
-        "gateway.instance-runtime-import",
-        "gateway.owner-profile",
-        "sessions.materialize",
-        "gateway.lifetime-sidecars",
-      ]);
+      expect(measureNames).toEqual(
+        [
+          "config.snapshot.read config.snapshot.read.file config.snapshot.read.hash",
+          "config.snapshot.read.parse config.snapshot.read.includes config.snapshot.read.env",
+          "config.snapshot.read.validate config.snapshot.read.materialize config.snapshot.read.observe",
+          "plugins.metadata.scan plugins.metadata.freeze",
+          "state.ownership state.runtime-imports state.schema-preflight",
+          "runtime.network-imports runtime.network-bootstrap config.runtime-imports config.snapshot",
+          "config.auth config.auth.snapshot-validate config.auth.runtime-overrides",
+          "config.auth.startup-overrides config.auth.secret-surface config.auth.secret-preflight",
+          "config.auth.preflight-override config.auth.ensure config.auth.runtime-startup-overrides",
+          "config.auth.secrets-activate agents.github-profile-cleanup plugins.bootstrap-imports",
+          "cron.store-path plugins.bootstrap gateway.kernel-state node-desktop.runtime-import",
+          "host-desktop.runtime-import computer.runtime-import device-identity device-pairing",
+          "runtime.config control-ui.root terminal.launch-import gateway.wizard-imports tls.runtime",
+          "gateway.channel-manager-import runtime.state gateway.shutdown-runtime-import",
+          "gateway.lifecycle gateway.core-runtime runtime.post-early-imports runtime.subscriptions",
+          "runtime.services gateway.handlers runtime.early runtime.early.discovery",
+          "gateway.request-runtime gateway.chat-metadata-lifecycle gateway.config-revision-key",
+          "gateway.request-context sessions.projection gateway.instance-runtime-import",
+          "gateway.owner-profile sessions.materialize gateway.lifetime-sidecars",
+        ].flatMap((phase) => phase.split(" ")),
+      );
     } finally {
       loadIdentity.mockRestore();
       try {
@@ -788,15 +698,10 @@ describe("createGatewayKernel", () => {
   });
 
   it("runs kernel teardown when required TLS material is unavailable", async () => {
-    const port = await getFreePort();
-    const state = await createOpenClawTestState({
-      label: "gateway-kernel-tls-failure",
-      env: { ...KERNEL_TEST_ENV },
-    });
-    const token = "gateway-kernel-tls-failure-token";
-    await state.writeConfig({
+    const fixture = await createKernelFixture("gateway-kernel-tls-failure");
+    const { state } = fixture;
+    await fixture.configure({
       gateway: {
-        ...gatewayConfig(port, token),
         tls: {
           enabled: true,
           autoGenerate: false,
@@ -805,11 +710,8 @@ describe("createGatewayKernel", () => {
         },
       },
     });
-    state.applyEnv();
     try {
-      await expect(createGatewayKernel(port, kernelOptions(token))).rejects.toThrow(
-        "gateway tls: cert/key missing",
-      );
+      await expect(fixture.open()).rejects.toThrow("gateway tls: cert/key missing");
       expect(getActiveSecretsRuntimeConfigSnapshot()).toBeNull();
       expect(getActiveGatewayRootWorkCount()).toBe(0);
     } finally {

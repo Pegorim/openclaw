@@ -4,11 +4,11 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { AsyncWorkScope, getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { getFreePort } from "../test-utils/ports.js";
 import { createInternalAgentTurnFacade } from "./agent-turn/internal-facade.js";
 import { withLocalGatewayRequestScope } from "./local-request-context.js";
 import { createGatewayMethodRegistry } from "./methods/registry.js";
 import { dispatchGatewayRequestInProcessRaw } from "./server-in-process-dispatch.js";
+import { createKernelFixture } from "./server-kernel.fixture-test-support.js";
 import { createGatewayKernel } from "./server-kernel.js";
 import type { GatewayRequestHandler } from "./server-methods/types.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
@@ -58,18 +58,8 @@ describe("in-process Gateway original execution ownership", () => {
   it.for(["raw", "typed"] as const)(
     "keeps %s execution alive after acceptance until its Gateway can release dependencies",
     async (surface, { signal }) => {
-      const state = await createOpenClawTestState({
-        label: `gateway-${surface}-execution`,
-        env: {
-          OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
-          OPENCLAW_SKIP_CANVAS_HOST: "1",
-          OPENCLAW_SKIP_CHANNELS: "1",
-          OPENCLAW_SKIP_CRON: "1",
-          OPENCLAW_SKIP_GMAIL_WATCHER: "1",
-          OPENCLAW_SKIP_PROVIDERS: "1",
-          OPENCLAW_TEST_MINIMAL_GATEWAY: "1",
-        },
-      });
+      const fixture = await createKernelFixture(`gateway-${surface}-execution`);
+      const { state } = fixture;
       const release = createDeferred();
       const drainEntered = createDeferred();
       const order: string[] = [];
@@ -83,14 +73,8 @@ describe("in-process Gateway original execution ownership", () => {
       let closing: Promise<void> | undefined;
       let request: Promise<unknown> | undefined;
       try {
-        const port = await getFreePort();
-        const token = "gateway-in-process-execution-token";
-        await state.writeConfig({ gateway: { auth: { mode: "token", token }, port } });
-        kernel = await createGatewayKernel(port, {
-          auth: { mode: "token", token },
-          bind: "loopback",
-          controlUiEnabled: false,
-        });
+        await fixture.configure();
+        kernel = await fixture.open({ sidecarStartup: undefined });
         kernel.kernel.setDispatchReady(true);
         kernel.kernel.unlockStartupMethods();
         kernel.kernel.markSidecarsReady();
@@ -120,17 +104,10 @@ describe("in-process Gateway original execution ownership", () => {
         }
         // These public in-process entry points must acquire their owner without ambient WS work.
         expect(getAsyncWorkSignal()).toBeUndefined();
+        const options = { client, context: kernel.gatewayRequestContext, methodRegistry };
         request =
           surface === "raw"
-            ? dispatchGatewayRequestInProcessRaw(
-                "lifetime.rawTail",
-                {},
-                {
-                  client,
-                  context: kernel.gatewayRequestContext,
-                  methodRegistry,
-                },
-              )
+            ? dispatchGatewayRequestInProcessRaw("lifetime.rawTail", {}, options)
             : createInternalAgentTurnFacade({
                 client,
                 getContext: () => kernel!.gatewayRequestContext,
