@@ -73,15 +73,9 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
       outcome === "settlement-failed" && failure instanceof AggregateError
         ? failure.cause
         : failure;
+    const failureFacts = [expect.objectContaining({ message: original.message })];
     expect(reported).toMatchObject({
-      result: {
-        status: "error",
-        steps: [
-          expect.objectContaining({
-            failureFacts: [expect.objectContaining({ message: original.message })],
-          }),
-        ],
-      },
+      result: { status: "error", steps: [{ failureFacts }] },
     });
     const recorded = getUpdateRun(run.runId, { env });
     if (outcome === "recovered") {
@@ -93,7 +87,7 @@ it.each(["recovered", "unreadable", "retained", "settlement-failed"] as const)(
           expect.objectContaining({
             step: "requested",
             status: "failed",
-            failureFacts: [expect.objectContaining({ message: original.message })],
+            failureFacts,
           }),
         ]),
       });

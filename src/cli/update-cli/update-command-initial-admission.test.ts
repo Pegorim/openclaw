@@ -11,6 +11,8 @@ import type { UpdateRecoveryFence } from "../../infra/update-run-recovery.js";
 import type { UpdateCommandOptions } from "./shared.js";
 import { executeMutableUpdate } from "./update-command-execution.js";
 import { withUpdateCommandExecutor } from "./update-command-executor.js";
+import type { updateGitInstall } from "./update-command-git.js";
+import type { PackageInstallUpdateParams } from "./update-command-package.js";
 
 const { bindExecutionGuards, executionParams, mocks, successfulUpdate } =
   await import("./update-command-execution.test-support.js");
@@ -77,36 +79,22 @@ it.each(["package", "artifact", "git"] as const)(
         expect(run.executorFence).toBe(fence);
       });
       const doctor = (
-        context: ReturnType<
-          NonNullable<
-            Parameters<
-              typeof import("./update-command-package.js").runPackageInstallUpdate
-            >[0]["getDoctorContext"]
-          >
-        >,
+        context: ReturnType<NonNullable<PackageInstallUpdateParams["getDoctorContext"]>>,
       ) => {
         expect(context?.executorFence).toBe(admitted);
         context?.assertCurrent?.();
         expect(context).toBeDefined();
         doctorAdmitted = true;
       };
-      mocks.runPackageUpdate.mockImplementation(
-        async (
-          options: Parameters<
-            typeof import("./update-command-package.js").runPackageInstallUpdate
-          >[0],
-        ) => {
-          await options.validateCandidate(root);
-          await options.beforeActivate();
-          activated = true;
-          doctor(options.getDoctorContext?.());
-          return successfulUpdate;
-        },
-      );
+      mocks.runPackageUpdate.mockImplementation(async (options: PackageInstallUpdateParams) => {
+        await options.validateCandidate(root);
+        await options.beforeActivate();
+        activated = true;
+        doctor(options.getDoctorContext?.());
+        return successfulUpdate;
+      });
       mocks.runGitUpdate.mockImplementation(
-        async (
-          options: Parameters<typeof import("./update-command-git.js").updateGitInstall>[0],
-        ) => {
+        async (options: Parameters<typeof updateGitInstall>[0]) => {
           await options.inspectGitTarget?.({ schemaVersions: { state: 15, agent: 19 } });
           await options.validateCandidate?.(root);
           await options.beforeGitMutation?.({ schemaVersions: { state: 15, agent: 19 } });

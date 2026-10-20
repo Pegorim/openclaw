@@ -50,11 +50,6 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
       let stdout = "";
       const runId = randomUUID();
       let boundPid: number | undefined;
-      const startedAt = performance.now();
-      const timingsMs: Record<string, number> = { admissionStarted: 0 };
-      const mark = (phase: string) => {
-        timingsMs[phase] ??= performance.now() - startedAt;
-      };
       let commandResult: Awaited<ReturnType<typeof runUtf8CommandWithTimeout>> | undefined;
       let commandError: unknown;
       let outcome:
@@ -68,20 +63,7 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
             boundPid,
             parentPid: process.pid,
             candidate: receiverUrl.href,
-            timingsMs,
-            command: commandResult
-              ? {
-                  code: commandResult.code,
-                  signal: commandResult.signal,
-                  termination: commandResult.termination,
-                  timedOut:
-                    commandResult.termination === "timeout" ||
-                    commandResult.termination === "no-output-timeout",
-                  killed: commandResult.killed,
-                  cleanup: commandResult.cleanup,
-                  stderr: commandResult.stderr,
-                }
-              : undefined,
+            command: commandResult,
             commandError: commandError === undefined ? undefined : formatErrorMessage(commandError),
             error:
               outcome !== undefined && "error" in outcome
@@ -93,9 +75,7 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
       });
       const work = withUpdateCommandExecutor(runId, async (owner) => {
         const fence = await owner.enter(root);
-        mark("executorAdmitted");
         const pending = withUpdateCommandExecutorChild(fence, root, async (grant, bindChild) => {
-          mark("childLaunchRequested");
           try {
             const result = await runUtf8CommandWithTimeout(
               [process.execPath, ...resolveRuntimeWorkerArgv(receiverUrl)],
@@ -103,10 +83,8 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
                 input: JSON.stringify({ grant, proceed }),
                 env: state.env,
                 beforeInput: (pid) => {
-                  mark("childSpawnObserved");
                   boundPid = pid;
                   bindChild(pid);
-                  mark("childBound");
                 },
                 timeoutMs: 30_000,
                 killProcessTree: true,
@@ -117,23 +95,15 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
                   const line = lines.find((value) => value.startsWith('{"ready":true'));
                   if (line) {
                     const binding = JSON.parse(line);
-                    mark("readyReceived");
                     ready.resolve(binding);
-                  }
-                  if (
-                    lines.slice(0, -1).some((value) => value.startsWith('{"result":"published"'))
-                  ) {
-                    mark("writeReturned");
                   }
                 },
               },
             );
             commandResult = result;
-            mark("commandReturned");
             return result;
           } catch (error) {
             commandError = error;
-            mark("commandRejected");
             throw error;
           }
         });
@@ -166,9 +136,7 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
             fs.writeFileSync(fragment, original);
           }
         } finally {
-          mark("releaseStarted");
           fs.writeFileSync(proceed, "go");
-          mark("released");
         }
         return await pending;
       });
@@ -176,7 +144,6 @@ it.for(["healthy", "original-owner-replaced", "include-parent-replaced"] as cons
         (value) => ({ value }),
         (error: unknown) => ({ error }),
       );
-      mark("completed");
       if (fault === "healthy") {
         expect("value" in outcome && outcome.value.code === 0, stdout).toBe(true);
         expect(JSON.parse(fs.readFileSync(fragment, "utf8")).channel).toBe("beta");
