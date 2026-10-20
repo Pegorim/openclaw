@@ -30,6 +30,7 @@ import {
   notifyChildStarted,
   turnStartedNotification,
   childTurnCompletedNotification,
+  itemNotification,
 } from "./native-subagent-monitor.test-support.js";
 import { buildCodexAppServerConnectionFingerprint } from "./plugin-app-cache-key.js";
 import { isJsonObject } from "./protocol.js";
@@ -62,6 +63,7 @@ import {
   createClientHarness,
   createCodexTestModel,
   createCodexTestOAuthProfile,
+  stubCodexInferenceTransportEnv,
 } from "./test-support.js";
 import { codexDynamicToolsFingerprint } from "./thread-fingerprints.js";
 
@@ -107,15 +109,7 @@ describe("Codex native configuration", () => {
   it.each(["denied", "revoked"] as const)(
     "binds the actual harness retry model when its permission is %s",
     async (permission) => {
-      // This in-memory managed transport has no custom CA or proxy. Host transport settings
-      // would correctly disqualify a real client from owned inference routing.
-      for (const name of ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "REQUEST_METHOD"]) {
-        vi.stubEnv(name, undefined);
-      }
-      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]) {
-        vi.stubEnv(name, undefined);
-        vi.stubEnv(name.toLowerCase(), undefined);
-      }
+      stubCodexInferenceTransportEnv();
       const catalogModel = "catalog-primary";
       const runtimeModel = "native-primary";
       const allowedModels = new Set([
@@ -306,8 +300,7 @@ describe("Codex native configuration", () => {
           permission === "denied" ? [runtimeModel] : [runtimeModel, "native-retry"],
         );
         await expect(run).rejects.toThrow("operator role cannot use this model");
-        expect(params.modelId).toBe(catalogModel);
-        expect(params.model.id).toBe(catalogModel);
+        expect(params).toMatchObject({ modelId: catalogModel, model: { id: catalogModel } });
         const transcript = await readTranscriptMessagesByIdentity(params);
         expect(transcript.filter((message) => message.role === "user")).toHaveLength(1);
       } finally {
@@ -563,24 +556,24 @@ describe("Codex native configuration", () => {
           expect(releaseModelExecution).toHaveBeenCalledOnce();
           return;
         }
-        for (const method of ["item/started", "item/completed"]) {
-          harness.send({
-            method,
-            params: {
-              threadId: "thread-existing",
-              turnId: "turn-1",
-              item: {
+        for (const phase of ["started", "completed"]) {
+          harness.send(
+            itemNotification(
+              {
                 type: "commandExecution",
                 id: "settled-supervised-command",
                 command: "printf synthetic-completed-work",
                 cwd: workspaceDir,
-                status: method === "item/started" ? "inProgress" : "completed",
-                ...(method === "item/completed"
+                status: phase === "started" ? "inProgress" : "completed",
+                ...(phase === "completed"
                   ? { aggregatedOutput: "synthetic-completed-work", exitCode: 0 }
                   : {}),
               },
-            },
-          });
+              "turn-1",
+              "thread-existing",
+              phase,
+            ),
+          );
         }
         harness.send({
           method: "turn/completed",
@@ -660,24 +653,20 @@ describe("Codex native configuration", () => {
           startOptions: expect.objectContaining({ homeScope: "user" }),
         }),
       );
-      const resumeRequest = requests.find((request) => request.method === "thread/resume");
-      const resumeParams = resumeRequest?.params as Record<string, unknown> | undefined;
-      expect(resumeParams).not.toHaveProperty("model");
-      expect(resumeParams).not.toHaveProperty("modelProvider");
+      const requestParams = (method: string) =>
+        requests.find((request) => request.method === method)?.params;
+      for (const method of ["thread/resume", "turn/start"]) {
+        const nativeParams = requestParams(method);
+        expect(nativeParams).not.toHaveProperty("model");
+        expect(nativeParams).not.toHaveProperty("modelProvider");
+        expect(nativeParams).toMatchObject({ approvalsReviewer, serviceTier: "priority" });
+      }
       if (nativeSearchEnabled) {
-        expect(resumeParams?.config).toMatchObject({
-          web_search: transport === "unix" ? "cached" : "disabled",
+        expect(requestParams("thread/resume")).toMatchObject({
+          config: { web_search: transport === "unix" ? "cached" : "disabled" },
         });
         expect(requests.some(({ method }) => method === "thread/start")).toBe(false);
       }
-      expect(resumeParams?.approvalsReviewer).toBe(approvalsReviewer);
-      expect(resumeParams?.serviceTier).toBe("priority");
-      const turnRequest = requests.find((request) => request.method === "turn/start");
-      const turnParams = turnRequest?.params as Record<string, unknown> | undefined;
-      expect(turnParams).not.toHaveProperty("model");
-      expect(turnParams).not.toHaveProperty("modelProvider");
-      expect(turnParams?.approvalsReviewer).toBe(approvalsReviewer);
-      expect(turnParams?.serviceTier).toBe("priority");
     },
   );
 });
@@ -750,14 +739,9 @@ it.each(["restore", "fresh"] as const)(
     await notifyChildStarted(client);
     try {
       if (fresh) {
-        await client.notify({
-          method: "item/completed",
-          params: {
-            threadId: "parent-thread",
-            turnId: "parent-a",
-            item: directSpawnItem("v2", "parent-thread", "child-thread"),
-          },
-        });
+        await client.notify(
+          itemNotification(directSpawnItem("v2", "parent-thread", "child-thread"), "parent-a"),
+        );
       } else {
         await monitor.prepareModelInput({
           threadId: "parent-thread",
@@ -767,20 +751,18 @@ it.each(["restore", "fresh"] as const)(
           readQualification: () => undefined,
           assertCurrent: () => {},
         });
-        await client.notify({
-          method: "item/completed",
-          params: {
-            threadId: "parent-thread",
-            turnId: "parent-a",
-            item: {
+        await client.notify(
+          itemNotification(
+            {
               type: "subAgentActivity",
               kind: "interacted",
               id: "accepted-input",
               agentThreadId: "child-thread",
               agentPath: "/root/child-thread",
             },
-          },
-        });
+            "parent-a",
+          ),
+        );
       }
       await client.notify(turnStartedNotification("unqualified-turn"));
       if (yielded) {

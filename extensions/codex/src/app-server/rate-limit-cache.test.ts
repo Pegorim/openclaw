@@ -14,6 +14,16 @@ function clientIdentity(): CodexAppServerClient {
   return {} as unknown as CodexAppServerClient;
 }
 
+const unavailable = {
+  limitId: null,
+  limitName: null,
+  secondary: null,
+  credits: null,
+  individualLimit: null,
+  planType: null,
+  rateLimitReachedType: null,
+};
+
 describe("Codex rate-limit cache", () => {
   it("isolates snapshots by physical client", () => {
     const first = clientIdentity();
@@ -54,14 +64,11 @@ describe("Codex rate-limit cache", () => {
       rateLimitReachedType: "rate_limit_reached",
     };
     const otherSnapshot = {
+      ...unavailable,
       limitId: "codex_other",
       limitName: "Other",
       primary: { usedPercent: 30, windowDurationMins: 60, resetsAt: 4000 },
-      secondary: null,
-      credits: null,
-      individualLimit: null,
       planType: "pro",
-      rateLimitReachedType: null,
     };
     rememberCodexRateLimitsRead(client, {
       rateLimits: codexSnapshot,
@@ -70,49 +77,31 @@ describe("Codex rate-limit cache", () => {
 
     mergeCodexRateLimitsUpdate(client, {
       rateLimits: {
-        limitId: null,
-        limitName: null,
+        ...unavailable,
         primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 5000 },
-        secondary: null,
-        credits: null,
-        individualLimit: null,
-        planType: null,
-        rateLimitReachedType: null,
       },
     });
     mergeCodexRateLimitsUpdate(client, {
       rateLimits: {
+        ...unavailable,
         limitId: "codex_other",
-        limitName: null,
         primary: { usedPercent: 75, windowDurationMins: 60, resetsAt: 6000 },
-        secondary: null,
-        credits: null,
-        individualLimit: null,
-        planType: null,
-        rateLimitReachedType: null,
       },
     });
     expect(readCodexRateLimitsRevision(client)).toBe(2);
 
     const mergedCodexSnapshot = {
+      ...unavailable,
       limitId: "codex",
-      limitName: null,
       primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 5000 },
-      secondary: null,
       credits: codexSnapshot.credits,
       individualLimit: codexSnapshot.individualLimit,
       planType: "pro",
-      rateLimitReachedType: null,
     };
     const mergedOtherSnapshot = {
+      ...mergedCodexSnapshot,
       limitId: "codex_other",
-      limitName: null,
       primary: { usedPercent: 75, windowDurationMins: 60, resetsAt: 6000 },
-      secondary: null,
-      credits: codexSnapshot.credits,
-      individualLimit: codexSnapshot.individualLimit,
-      planType: "pro",
-      rateLimitReachedType: null,
     };
     expect(readRecentCodexRateLimits(client)).toEqual({
       rateLimits: mergedCodexSnapshot,

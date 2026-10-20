@@ -7,20 +7,18 @@ import {
 
 const localWorkspaceRoot = path.resolve("gateway-workspace");
 const remoteWorkspaceRoot = "/remote/codex-workspace";
+const roots = { localWorkspaceRoot, remoteWorkspaceRoot };
+const localPath = (value: string, overrides: Partial<typeof roots> = {}) =>
+  mapCodexAppServerLocalWorkspacePath({ ...roots, ...overrides, value });
+const remotePath = (value: string, overrides: Partial<typeof roots> = {}) =>
+  mapCodexAppServerRemoteWorkspacePath({ ...roots, ...overrides, value });
 
 describe("Codex remote workspace paths", () => {
-  it.each([["/", "/reports/slack-upload.txt"]])(
-    "maps an artifact under gateway workspace %s into the remote workspace",
-    (root, value) => {
-      expect(
-        mapCodexAppServerRemoteWorkspacePath({
-          value,
-          localWorkspaceRoot: root,
-          remoteWorkspaceRoot,
-        }),
-      ).toBe(`${remoteWorkspaceRoot}/reports/slack-upload.txt`);
-    },
-  );
+  it("maps an artifact under a gateway root workspace into the remote workspace", () => {
+    expect(remotePath("/reports/slack-upload.txt", { localWorkspaceRoot: "/" })).toBe(
+      `${remoteWorkspaceRoot}/reports/slack-upload.txt`,
+    );
+  });
 
   it("preserves URL-backed and managed media sources", () => {
     for (const value of [
@@ -30,9 +28,7 @@ describe("Codex remote workspace paths", () => {
       "media://inbound/image.png",
       "data:image/png;base64,aGVsbG8=",
     ]) {
-      expect(
-        mapCodexAppServerLocalWorkspacePath({ value, localWorkspaceRoot, remoteWorkspaceRoot }),
-      ).toBe(value);
+      expect(localPath(value)).toBe(value);
     }
   });
 
@@ -42,27 +38,19 @@ describe("Codex remote workspace paths", () => {
       "reports/./slack-upload.txt",
       `${remoteWorkspaceRoot}/reports/./slack-upload.txt`,
     ]) {
-      expect(
-        mapCodexAppServerLocalWorkspacePath({ value, localWorkspaceRoot, remoteWorkspaceRoot }),
-      ).toBe(path.join(localWorkspaceRoot, "reports", "slack-upload.txt"));
+      expect(localPath(value)).toBe(path.join(localWorkspaceRoot, "reports", "slack-upload.txt"));
     }
   });
 
   it("preserves case-insensitive Windows drive-root workspace paths", () => {
-    expect(
-      mapCodexAppServerLocalWorkspacePath({
-        value: "c:\\Reports\\Upload.TXT",
-        localWorkspaceRoot,
-        remoteWorkspaceRoot: "C:\\",
-      }),
-    ).toBe(path.join(localWorkspaceRoot, "Reports", "Upload.TXT"));
+    expect(localPath("c:\\Reports\\Upload.TXT", { remoteWorkspaceRoot: "C:\\" })).toBe(
+      path.join(localWorkspaceRoot, "Reports", "Upload.TXT"),
+    );
   });
 
   it("projects gateway artifacts into Windows drive roots without duplicate slashes", () => {
     expect(
-      mapCodexAppServerRemoteWorkspacePath({
-        value: path.join(localWorkspaceRoot, "reports", "upload.txt"),
-        localWorkspaceRoot,
+      remotePath(path.join(localWorkspaceRoot, "reports", "upload.txt"), {
         remoteWorkspaceRoot: "C:\\",
       }),
     ).toBe("C:/reports/upload.txt");
@@ -70,11 +58,7 @@ describe("Codex remote workspace paths", () => {
 
   it("continues rejecting case-insensitive Windows sibling paths", () => {
     expect(() =>
-      mapCodexAppServerLocalWorkspacePath({
-        value: "c:\\work\\repo-other\\private.txt",
-        localWorkspaceRoot,
-        remoteWorkspaceRoot: "C:\\Work\\Repo",
-      }),
+      localPath("c:\\work\\repo-other\\private.txt", { remoteWorkspaceRoot: "C:\\Work\\Repo" }),
     ).toThrow("outside");
   });
 
@@ -85,20 +69,14 @@ describe("Codex remote workspace paths", () => {
       path.join(localWorkspaceRoot, "private.txt"),
       "file:///etc/passwd",
     ]) {
-      expect(() =>
-        mapCodexAppServerLocalWorkspacePath({ value, localWorkspaceRoot, remoteWorkspaceRoot }),
-      ).toThrow("outside");
+      expect(() => localPath(value)).toThrow("outside");
     }
   });
 
   it("rejects traversal inside a claimed remote workspace artifact", () => {
-    expect(() =>
-      mapCodexAppServerLocalWorkspacePath({
-        value: `${remoteWorkspaceRoot}/reports/../../private.txt`,
-        localWorkspaceRoot,
-        remoteWorkspaceRoot,
-      }),
-    ).toThrow("must stay inside");
+    expect(() => localPath(`${remoteWorkspaceRoot}/reports/../../private.txt`)).toThrow(
+      "must stay inside",
+    );
   });
 
   it("preserves workspace paths when no remote root is configured", () => {
@@ -108,12 +86,8 @@ describe("Codex remote workspace paths", () => {
   });
 
   it("continues rejecting gateway working directories outside the workspace", () => {
-    expect(() =>
-      mapCodexAppServerRemoteWorkspacePath({
-        value: path.resolve("outside-workspace", "report.txt"),
-        localWorkspaceRoot,
-        remoteWorkspaceRoot,
-      }),
-    ).toThrow("outside OpenClaw workspace root");
+    expect(() => remotePath(path.resolve("outside-workspace", "report.txt"))).toThrow(
+      "outside OpenClaw workspace root",
+    );
   });
 });
