@@ -143,16 +143,11 @@ it("joins the outgoing handler when shutdown begins in its warning callback", as
     later,
     { warn },
   );
-  try {
-    await Promise.resolve();
-    await clock.advanceBy(0);
-    await stopping;
-    expect(warn).toHaveBeenCalledOnce();
-    expect(events).toEqual(["started", "warning", "closed"]);
-    expect(rootsAfterStop).toBe(0);
-    expect(later).not.toHaveBeenCalled();
-  } finally {
-    await sidecar.stop();
-    await stopping;
-  }
+  await Promise.resolve();
+  await clock.advanceBy(0);
+  await stopping;
+  expect(warn).toHaveBeenCalledOnce();
+  expect(events).toEqual(["started", "warning", "closed"]);
+  expect(rootsAfterStop).toBe(0);
+  expect(later).not.toHaveBeenCalled();
 });

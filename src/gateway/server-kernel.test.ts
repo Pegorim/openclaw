@@ -35,6 +35,22 @@ function expectCalls(count: number, ...mocks: Array<(...args: never[]) => unknow
   }
 }
 
+function blockedSidecar(once = true) {
+  const entered = createDeferred();
+  const gate = createDeferred();
+  return {
+    entered: entered.promise,
+    release: gate.resolve,
+    stop: vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(async () => {
+        entered.resolve();
+        await gate.promise;
+      })
+      .mockImplementation(() => (once ? Promise.resolve() : gate.promise)),
+  };
+}
+
 function createRegisteredChannel(plugin: ChannelPlugin) {
   const source = "gateway-kernel-test";
   const registry = createTestRegistry([{ pluginId: plugin.id, plugin, source }]);
@@ -428,44 +444,28 @@ describe("createGatewayKernel", () => {
       const trailingSidecar = vi.fn(async () => {});
       kernel.registerGatewayLifetimeSidecars(lifetimeSidecar, { stop: trailingSidecar });
 
-      const { promise: firstPostReadyStop, resolve: releasePostReadyStop } = createDeferred();
-      const postReadySidecar = vi
-        .fn<() => Promise<void>>()
-        .mockImplementationOnce(() => firstPostReadyStop)
-        .mockResolvedValue(undefined);
-      kernel.registerPostReadySidecars({ stop: postReadySidecar });
-
-      const connectionStopEntered = createDeferred();
-      const releaseConnectionStop = createDeferred();
-      const releaseLateConnectionStop = createDeferred();
-      const connectionSidecar = {
-        stop: vi
-          .fn<() => Promise<void>>()
-          .mockImplementationOnce(async () => {
-            connectionStopEntered.resolve();
-            await releaseConnectionStop.promise;
-          })
-          .mockResolvedValue(undefined),
-      };
+      const postReadySidecar = blockedSidecar();
+      kernel.registerPostReadySidecars(postReadySidecar);
+      const connectionSidecar = blockedSidecar();
       kernel.registerConnectionDependentSidecars(connectionSidecar);
       const closeTransport = vi.fn(() => releaseConnection());
       const releaseConnection = kernel.connectionWork.registerConnection(closeTransport);
       const closePreludeReached = vi.spyOn(kernel.watchNodeHttpRuntime, "close");
       const closing = kernel.closeOnStartupFailure();
       void closing.catch(() => undefined);
-      await connectionStopEntered.promise;
-      const lateConnectionSidecar = { stop: vi.fn(() => releaseLateConnectionStop.promise) };
+      await connectionSidecar.entered;
+      const lateConnectionSidecar = blockedSidecar(false);
       kernel.registerConnectionDependentSidecars(lateConnectionSidecar);
       const lateGeneralSidecar = { stop: vi.fn(async () => {}) };
       const latePostReadySidecar = { stop: vi.fn(async () => {}) };
       kernel.registerGatewayLifetimeSidecars(lateGeneralSidecar);
       kernel.registerPostReadySidecars(latePostReadySidecar);
       expect(closeTransport).not.toHaveBeenCalled();
-      releaseConnectionStop.resolve();
+      connectionSidecar.release();
       await vi.waitFor(() => expect(lateConnectionSidecar.stop).toHaveBeenCalledOnce());
       expect(closeTransport).not.toHaveBeenCalled();
       expectCalls(0, lifetimeSidecar.stop, lateGeneralSidecar.stop, latePostReadySidecar.stop);
-      releaseLateConnectionStop.resolve();
+      lateConnectionSidecar.release();
       await vi.waitFor(() => {
         expect(lifetimeSidecar.stop).toHaveBeenCalledOnce();
       });
@@ -482,24 +482,20 @@ describe("createGatewayKernel", () => {
       await expect(reentrantStop).resolves.toBeUndefined();
       await expect(lateStop).resolves.toBeUndefined();
       await vi.waitFor(() => {
-        expect(postReadySidecar).toHaveBeenCalledOnce();
+        expect(postReadySidecar.stop).toHaveBeenCalledOnce();
       });
-      const { promise: lateLifetimeStop, resolve: releaseLateLifetimeStop } = createDeferred();
-      const lateLifetimeSidecar = { stop: vi.fn(() => lateLifetimeStop) };
+      const lateLifetimeSidecar = blockedSidecar(false);
       kernel.registerGatewayLifetimeSidecars(lateLifetimeSidecar);
-      let closeSettled = false;
-      const markClosed = () => {
-        closeSettled = true;
-      };
+      const markClosed = vi.fn();
       void closing.then(markClosed, markClosed);
-      releasePostReadyStop();
+      postReadySidecar.release();
       await vi.waitFor(() => {
         expect(closePreludeReached).toHaveBeenCalledOnce();
       });
-      expect(closeSettled).toBe(false);
+      expect(markClosed).not.toHaveBeenCalled();
       const duringSealSidecar = { stop: vi.fn(async () => {}) };
       kernel.registerGatewayLifetimeSidecars(duringSealSidecar);
-      releaseLateLifetimeStop();
+      lateLifetimeSidecar.release();
       await expect(closing).resolves.toBeUndefined();
       closePreludeReached.mockRestore();
       expectCalls(
@@ -511,7 +507,7 @@ describe("createGatewayKernel", () => {
         reentrantSidecar.stop,
         lateSidecar.stop,
         duringSealSidecar.stop,
-        postReadySidecar,
+        postReadySidecar.stop,
       );
       expect(kernel.runtimeState.gatewayLifetimeSidecars.snapshot()).toEqual([]);
       expect(kernel.runtimeState.postReadySidecars.snapshot()).toEqual([]);
@@ -534,18 +530,10 @@ describe("createGatewayKernel", () => {
       kernel.registerGatewayLifetimeSidecars(persistentSidecar, successfulPeer);
 
       await expect(kernel.closeOnStartupFailure()).rejects.toMatchObject({
-        errors: [
-          {
-            message:
-              "shutdown step failed (gateway lifetime sidecars): persistent sidecar cleanup failed",
-            cause: persistentError,
-          },
-          {
-            message:
-              "shutdown step failed (late sidecar cleanup): persistent sidecar cleanup failed",
-            cause: persistentError,
-          },
-        ],
+        errors: ["gateway lifetime sidecars", "late sidecar cleanup"].map((step) => ({
+          message: `shutdown step failed (${step}): ${persistentError.message}`,
+          cause: persistentError,
+        })),
       });
       expect(persistentStop).toHaveBeenCalledOnce();
       expect(successfulPeer.stop).toHaveBeenCalledOnce();
