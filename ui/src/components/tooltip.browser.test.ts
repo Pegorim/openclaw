@@ -1,6 +1,6 @@
 import { flush } from "solid-js";
 import { afterEach, describe, expect, it } from "vitest";
-import { expectSharedTooltipSkin } from "./tooltip.test-support.ts";
+import { element, expectSharedTooltipSkin } from "./tooltip.test-support.ts";
 import { focusWithoutTooltip, type TooltipElement } from "./tooltip.ts";
 import "../styles/base.css";
 
@@ -56,12 +56,12 @@ function tooltipBody(tooltip: TooltipElement) {
 
 async function fixture(disabled = false) {
   const host = document.createElement("div");
-  const tooltip = document.createElement("openclaw-tooltip");
-  tooltip.content = "More information about this action";
-  tooltip.disabled = disabled;
-  tooltip.delay = 0;
-  const trigger = document.createElement("button");
-  trigger.textContent = "Details";
+  const tooltip = element("openclaw-tooltip", {
+    content: "More information about this action",
+    disabled,
+    delay: 0,
+  });
+  const trigger = element("button", { textContent: "Details" });
   trigger.style.cssText = "position: fixed; left: 200px; top: 200px";
   trigger.setAttribute("aria-describedby", "original-description");
   tooltip.append(trigger);
@@ -178,8 +178,7 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip pointer ownership", 
               height: triggerBounds.top - popupBounds.bottom,
             };
       expect(bounds.height).toBeGreaterThan(0);
-      const action = document.createElement("button");
-      action.textContent = "Tool access";
+      const action = element("button", { textContent: "Tool access" });
       action.style.cssText = `position: fixed; left: ${bounds.left}px; top: ${bounds.top}px; width: ${bounds.width}px; height: ${bounds.height}px`;
       document.body.append(action);
       let activated = false;
@@ -198,16 +197,16 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip pointer ownership", 
     const { page } = await import("vitest/browser");
     const f = await fixture();
     f.tooltip.pointerThrough = true;
-    const card = document.createElement("div");
-    card.slot = "content";
-    card.innerHTML = "<strong>CPU usage</strong><dl><dt>Main thread</dt><dd>12%</dd></dl>";
+    const card = element("div", {
+      slot: "content",
+      innerHTML: "<strong>CPU usage</strong><dl><dt>Main thread</dt><dd>12%</dd></dl>",
+    });
     f.tooltip.append(card);
     await commitTooltip(f.tooltip);
     await openTooltip(f);
     const body = tooltipBody(f.tooltip);
     const bounds = body.getBoundingClientRect();
-    const action = document.createElement("button");
-    action.textContent = "Minimize diagnostics";
+    const action = element("button", { textContent: "Minimize diagnostics" });
     action.style.cssText = `position: fixed; left: ${bounds.left}px; top: ${bounds.top}px; width: ${bounds.width}px; height: ${bounds.height}px`;
     document.body.append(action);
     expect(
@@ -249,8 +248,7 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip transition ownership
     const f = await fixture();
     const body = tooltipBody(f.tooltip);
     body.style.setProperty("--control-ui-transition-fast", "200ms");
-    const outside = document.createElement("button");
-    outside.textContent = "Outside";
+    const outside = element("button", { textContent: "Outside" });
     f.host.append(outside);
     await page.elementLocator(outside).hover();
     expect(f.trigger.matches(":hover")).toBe(false);
@@ -449,8 +447,7 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip public lifecycle", (
     async ({ input, dismissal }) => {
       const { page } = await import("vitest/browser");
       const f = await fixture();
-      const outside = document.createElement("button");
-      outside.textContent = "Outside";
+      const outside = element("button", { textContent: "Outside" });
       outside.style.cssText = "position: fixed; left: 20px; top: 20px";
       f.host.append(outside);
       f.tooltip.openOnClick = input === "click";
@@ -541,8 +538,7 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip public lifecycle", (
       .getAttribute("aria-describedby")!
       .split(" ")
       .find((id) => id !== "original-description")!;
-    const replacement = document.createElement("button");
-    replacement.textContent = "Replacement";
+    const replacement = element("button", { textContent: "Replacement" });
     replacement.setAttribute("aria-labelledby", "replacement-label");
     replacement.setAttribute("aria-describedby", "replacement-description");
     f.host.append(replacement);
@@ -568,8 +564,7 @@ describe.runIf("__vitest_browser__" in globalThis)("tooltip public lifecycle", (
     f.tooltip.remove();
     await Promise.resolve();
     expect(f.trigger.getAttribute("aria-describedby")).toBe("original-description");
-    const replacement = document.createElement("button");
-    replacement.textContent = "Replacement";
+    const replacement = element("button", { textContent: "Replacement" });
     f.host.append(replacement);
     f.tooltip.anchor = replacement;
     f.host.append(f.tooltip);

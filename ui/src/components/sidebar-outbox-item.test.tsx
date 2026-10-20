@@ -1,28 +1,15 @@
 /* @vitest-environment jsdom */
-import type { JSX } from "@solidjs/web";
-import { render as mountSolid } from "@solidjs/web";
 import { flush } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createGatewayHarness, client } from "../app/overlays-access.test-support.ts";
 import { disposeSidebarContextLifecycles } from "../test-helpers/app-sidebar-context-lifecycle.ts";
 import { createContext, createSessions } from "../test-helpers/app-sidebar.ts";
+import { cleanupSolid, mountSolid } from "../test-helpers/mount-solid.ts";
 import type { SidebarInboxEntry } from "./sidebar-attention-entries.ts";
 import { renderSidebarOutboxItem } from "./sidebar-outbox-item.tsx";
 
-const container = document.createElement("div");
-let dispose: (() => void) | undefined;
-function render(view: (() => JSX.Element) | null, host: HTMLElement) {
-  dispose?.();
-  if (view && !host.isConnected) {
-    document.body.append(host);
-  }
-  dispose = view ? mountSolid(view, host) : undefined;
-  flush();
-}
-
 afterEach(() => {
-  render(null, container);
-  container.remove();
+  cleanupSolid();
   disposeSidebarContextLifecycles();
   vi.restoreAllMocks();
 });
@@ -73,7 +60,10 @@ it.each([
         dispose() {},
       },
     };
-    render(() => renderSidebarOutboxItem({ entry, onNavigate: navigate }, context), container);
+    const { container } = mountSolid(() =>
+      renderSidebarOutboxItem({ entry, onNavigate: navigate }, context),
+    );
+    flush();
     const link = container.querySelector<HTMLAnchorElement>("a")!;
     expect(link.textContent).toBe("Review");
     expect(link.getAttribute("aria-label")).toBe("Review in chat");

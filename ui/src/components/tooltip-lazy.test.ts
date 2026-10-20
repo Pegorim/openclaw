@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTooltip,
+  element,
   dispatchMousePointer,
   hoverTrigger,
   settleTooltip,
@@ -18,8 +19,7 @@ describe("lazy tooltip content materialization", () => {
 
   it("waits for the native surface to render before opening an anchor preview", async () => {
     const tooltip = document.createElement("openclaw-tooltip");
-    const anchor = document.createElement("button");
-    anchor.textContent = "Preview";
+    const anchor = element("button", { textContent: "Preview" });
     document.body.append(anchor, tooltip);
 
     tooltip.previewForAnchor(anchor, "Preview details", "focus");
@@ -65,8 +65,7 @@ describe("lazy tooltip content materialization", () => {
     "materializes an anchor preview from %s intent",
     async (input) => {
       const tooltip = document.createElement("openclaw-tooltip");
-      const anchor = document.createElement("button");
-      anchor.textContent = "Preview";
+      const anchor = element("button", { textContent: "Preview" });
       document.body.append(anchor, tooltip);
       await settleTooltip(tooltip);
       expect(tooltipSurface(tooltip)?.querySelector(".tooltip-content")).toBeNull();

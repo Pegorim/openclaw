@@ -4,23 +4,25 @@ import "./tooltip.ts";
 
 export type TooltipElement = HTMLElementTagNameMap["openclaw-tooltip"];
 
+export function element<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  props: Partial<HTMLElementTagNameMap[K]> = {},
+  ...children: Node[]
+) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
 export function createTooltip(content: string, triggerText = "trigger") {
-  const tooltip = document.createElement("openclaw-tooltip");
-  tooltip.content = content;
-  const trigger = document.createElement("button");
-  trigger.textContent = triggerText;
-  tooltip.append(trigger);
-  return { tooltip, trigger };
+  const trigger = element("button", { textContent: triggerText });
+  return { tooltip: element("openclaw-tooltip", { content }, trigger), trigger };
 }
 
 export function createRichTooltip(content: string, triggerText = "trigger") {
-  const tooltip = document.createElement("openclaw-tooltip");
-  const trigger = document.createElement("button");
-  trigger.textContent = triggerText;
-  const card = document.createElement("div");
-  card.slot = "content";
-  card.textContent = content;
-  tooltip.append(trigger, card);
+  const { tooltip, trigger } = createTooltip("", triggerText);
+  const card = element("div", { slot: "content", textContent: content });
+  tooltip.append(card);
   return { tooltip, trigger, card };
 }
 
