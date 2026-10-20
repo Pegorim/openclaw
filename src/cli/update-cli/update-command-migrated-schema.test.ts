@@ -72,6 +72,16 @@ function setSchema(file: string, version: number) {
   db.exec(`PRAGMA user_version = ${version}`);
 }
 
+const firstTurn = () => [
+  { type: "message", id: "request", parentId: null, message: { role: "user", content: "hi" } },
+  {
+    type: "message",
+    id: "reply",
+    parentId: "request",
+    message: { role: "assistant", content: "ok" },
+  },
+];
+
 it.each([
   { agentId: "main", changed: "none", blocked: undefined },
   { agentId: "verification", changed: "none", blocked: undefined },
@@ -106,20 +116,7 @@ it.each([
         appendTranscriptEventsInTransaction(
           database,
           { agentId, sessionKey: `agent:${agentId}:update-check`, sessionId: "serving-check" },
-          [
-            {
-              type: "message",
-              id: "request",
-              parentId: null,
-              message: { role: "user", content: "Reply with update-verified-run" },
-            },
-            {
-              type: "message",
-              id: "reply",
-              parentId: "request",
-              message: { role: "assistant", content: "update-verified-run" },
-            },
-          ],
+          firstTurn(),
         ),
       { agentId, env },
     );

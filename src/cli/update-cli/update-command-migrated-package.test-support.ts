@@ -14,6 +14,7 @@ import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js"
 import { expectNoCalls } from "../daemon-cli/lifecycle-assertions.test-support.js";
 import {
   finishParams,
+  processResult,
   updateResult,
   updateStep,
 } from "./update-command-maintenance-fixtures.test-support.js";
@@ -151,14 +152,11 @@ export async function expectMigratedPackageFinalization(
         const tail = captured.subarray(-1024 * 1024);
         // A cancelled candidate publishes neither a terminal row nor a result artifact.
         return {
+          ...processResult({ code: 124, killed: true, termination: "timeout" }),
           stdout: Buffer.alloc(0),
           stderr: tail,
           windowsEncoding: null,
           stderrTruncatedBytes: captured.byteLength - tail.byteLength,
-          code: 124,
-          signal: null,
-          killed: true,
-          termination: "timeout",
           cleanup: "cooperative",
         };
       }
@@ -218,13 +216,10 @@ export async function expectMigratedPackageFinalization(
         JSON.stringify({ result, exitCode, terminalRunId: run.runId, candidateStartAttempted }),
       );
       return {
+        ...processResult(),
         stdout: Buffer.from("candidate finalization result\n"),
         stderr: Buffer.alloc(0),
         windowsEncoding: null,
-        code: 0,
-        signal: null,
-        killed: false,
-        termination: "exit",
         cleanup: "normal",
       };
     },
