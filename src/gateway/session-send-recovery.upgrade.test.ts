@@ -54,26 +54,13 @@ it("keeps latest-stable pending rows visible without replaying missing operator 
         accepted_at: Date.now(),
       }),
     );
+    const columns = Object.keys(stableRow);
     const insert = database.db.prepare(`
-      INSERT INTO session_pending_inputs
-        (input_id, session_key, session_id, idempotency_key, run_id, request_hash,
-         message_json, lifecycle_generation, state, accepted_at, consumed_event_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO session_pending_inputs (${columns.join(", ")})
+      VALUES (${columns.map(() => "?").join(", ")})
     `);
     for (const row of rows) {
-      insert.run(
-        row.input_id,
-        row.session_key,
-        row.session_id,
-        row.idempotency_key,
-        row.run_id,
-        row.request_hash,
-        row.message_json,
-        row.lifecycle_generation,
-        row.state,
-        row.accepted_at,
-        row.consumed_event_id,
-      );
+      insert.run(...Object.values(row));
     }
     const config: OpenClawConfig = {
       agents: { entries: { main: {} } },
@@ -100,17 +87,17 @@ it("keeps latest-stable pending rows visible without replaying missing operator 
     expect(runtime.resumeChatInput).not.toHaveBeenCalled();
     expect(runtime.dispatchAgent).not.toHaveBeenCalled();
     const visible = await readChatPendingInputs(scope, { limit: 20, maxChars: 1_000 });
-    expect(visible.total).toBe(3);
-    expect(visible.items).toEqual([
-      expect.objectContaining({
-        id: "stable-queued",
-        state: "interrupted",
-        message: expect.objectContaining({
-          content: "Synthetic input accepted by the stable release",
-        }),
-      }),
-      expect.objectContaining({ id: "stable-interrupted", state: "interrupted" }),
-      expect.objectContaining({ id: "stable-cancelled", state: "cancelled" }),
-    ]);
+    expect(visible).toMatchObject({
+      total: 3,
+      items: [
+        {
+          id: "stable-queued",
+          state: "interrupted",
+          message: { content: "Synthetic input accepted by the stable release" },
+        },
+        { id: "stable-interrupted", state: "interrupted" },
+        { id: "stable-cancelled", state: "cancelled" },
+      ],
+    });
   });
 });

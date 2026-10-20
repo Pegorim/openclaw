@@ -43,14 +43,42 @@ afterEach(() => {
   closeOpenClawAgentDatabasesForTest();
 });
 
-async function captureMutationAuthorization(
-  params: Parameters<typeof resolveSessionMutationAuthorizationAsync>[0],
+function authorizationFor(context: GatewayRequestContext) {
+  return async (
+    requestClient: GatewayClient,
+    method: string,
+    requestParams: Record<string, unknown>,
+    sessionScope?: Parameters<typeof resolveSessionMutationAuthorizationAsync>[0]["sessionScope"],
+  ) => {
+    const result = await resolveSessionMutationAuthorizationAsync({
+      client: requestClient,
+      method,
+      requestParams,
+      context,
+      sessionScope,
+    });
+    if (result.authorization?.release) {
+      authorizationReleases.push(result.authorization.release);
+    }
+    return result;
+  };
+}
+
+function receiveEvent(
+  cfg: Parameters<typeof canReceivePreparedSessionEvent>[0]["cfg"],
+  requestClient: GatewayClient,
+  sessionKey: string,
 ) {
-  const result = await resolveSessionMutationAuthorizationAsync(params);
-  if (result.authorization?.release) {
-    authorizationReleases.push(result.authorization.release);
-  }
-  return result;
+  return canReceivePreparedSessionEvent({ cfg, client: requestClient, sessionKeys: [sessionKey] });
+}
+
+function seedSession(
+  sessionKey: string,
+  sessionId: string,
+  fields: Parameters<typeof upsertSessionEntryCore>[1],
+  agentId = "main",
+) {
+  return upsertSessionEntryCore({ agentId, sessionKey }, { sessionId, updatedAt: 1, ...fields });
 }
 
 type SharingTarget = Parameters<typeof resolveSessionSharingRole>[0]["target"];
@@ -83,29 +111,29 @@ describe("session sharing policy", () => {
         createdActor: { type: "human", source: "profile", id: creatorId },
       });
       const context = createDirectChatContext({ getRuntimeConfig: () => cfg });
-      const authorize = (requestClient: GatewayClient, many = false) =>
-        captureMutationAuthorization({
-          client: requestClient,
-          method: many ? "sessions.patchMany" : "sessions.patch",
-          requestParams: many
+      const authorize = authorizationFor(context);
+      const communicate = (requestClient: GatewayClient, many = false) =>
+        authorize(
+          requestClient,
+          many ? "sessions.patchMany" : "sessions.patch",
+          many
             ? { targets: [{ key: scope.sessionKey }], patch: { communication: null } }
             : { key: scope.sessionKey, communication: { receive: "never" } },
-          context,
-        });
+        );
       for (const many of [false, true]) {
-        expect((await authorize(peer, many)).error).toMatchObject({ code: "FORBIDDEN" });
-        expect((await authorize(creator, many)).error).toBeNull();
+        expect((await communicate(peer, many)).error).toMatchObject({ code: "FORBIDDEN" });
+        expect((await communicate(creator, many)).error).toBeNull();
       }
       const admin = roleClient("write", "communication-admin");
       admin.connect.scopes = ["operator.admin"];
-      expect((await authorize(admin)).error).toBeNull();
+      expect((await communicate(admin)).error).toBeNull();
       expect(
-        (await authorize({ ...admin, internal: { syntheticClient: true } })).error,
+        (await communicate({ ...admin, internal: { syntheticClient: true } })).error,
       ).toMatchObject({
         code: "FORBIDDEN",
         message: "Session communication settings require a direct human request.",
       });
-      const admitted = await authorize(creator);
+      const admitted = await communicate(creator);
       creator.authenticatedUserProfile = peer.authenticatedUserProfile;
       expect(() => admitted.authorization?.assertCurrent()).toThrow(
         SessionMutationAuthorizationChangedError,
@@ -141,19 +169,19 @@ describe("session sharing policy", () => {
         { identityId: memberId, addedBy: ownerId, expectedSessionId: "narrow-owned" },
       );
       const context = createDirectChatContext({ getRuntimeConfig: () => cfg });
+      const authorize = authorizationFor(context);
       const mutation = async (requestClient: GatewayClient) => {
         const admission = authorizeOperatorScopesForMethod(
           "sessions.patch",
           requestClient.connect.scopes ?? [],
         );
         expect(admission.allowed).toBe(true);
-        return captureMutationAuthorization({
-          client: requestClient,
-          method: "sessions.patch",
-          requestParams: { key: scope.sessionKey, label: "updated" },
-          context,
-          sessionScope: admission.allowed ? admission.sessionScope : undefined,
-        });
+        return authorize(
+          requestClient,
+          "sessions.patch",
+          { key: scope.sessionKey, label: "updated" },
+          admission.allowed ? admission.sessionScope : undefined,
+        );
       };
       expect((await mutation(member)).error).toBeNull();
       member.connect.scopes = ["operator.sessions.write"];
@@ -189,13 +217,9 @@ describe("session sharing policy", () => {
       owner.connect.scopes = ["operator.sessions.write"];
       const cfg = rolePolicyConfig();
       setRuntimeConfigSnapshot(cfg);
-      const captured = await captureMutationAuthorization({
-        client: owner,
-        method: "sessions.create",
-        requestParams: {},
-        sessionScope: "operator.sessions.write",
-        context: createDirectChatContext({ getRuntimeConfig: () => cfg }),
-      });
+      const captured = await authorizationFor(
+        createDirectChatContext({ getRuntimeConfig: () => cfg }),
+      )(owner, "sessions.create", {}, "operator.sessions.write");
       expect(captured.error).toBeNull();
       expect(captured.authorization).toBeDefined();
       expect(() => captured.authorization?.assertCurrent()).not.toThrow();
@@ -214,15 +238,10 @@ describe("session sharing policy", () => {
       const owner = ensureProfileForEmail("foreign-agent-owner@example.test");
       using _ = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
       const sessionKey = "agent:main:existing-maintainer-session";
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey },
-        {
-          sessionId: "existing-maintainer-session",
-          updatedAt: 1,
-          visibility: "shared",
-          createdActor: { type: "human", source: "profile", id: owner.id },
-        },
-      );
+      await seedSession(sessionKey, "existing-maintainer-session", {
+        visibility: "shared",
+        createdActor: { type: "human", source: "profile", id: owner.id },
+      });
 
       expect(
         await authorizeResolvedSessionMutationAsync({
@@ -233,6 +252,7 @@ describe("session sharing policy", () => {
         }),
       ).toMatchObject({ code: "FORBIDDEN", message: expect.stringContaining("main") });
       const context = { getRuntimeConfig: () => cfg } as GatewayRequestContext;
+      const authorize = authorizationFor(context);
       for (const [method, requestParams] of [
         ["agent", { sessionKey }],
         ["chat.send", { sessionKey }],
@@ -248,12 +268,7 @@ describe("session sharing policy", () => {
         ["tools.invoke", { sessionKey }],
         ["wake", { sessionKey }],
       ] as const) {
-        const denied = await captureMutationAuthorization({
-          client: writer,
-          method,
-          requestParams,
-          context,
-        });
+        const denied = await authorize(writer, method, requestParams);
         expect(denied.error, method).toMatchObject({
           code: "FORBIDDEN",
           message: expect.stringContaining("main"),
@@ -264,12 +279,7 @@ describe("session sharing policy", () => {
         ["sessions.goal.update", { sessionKey, action: "pause" }],
         ["sessions.goal.clear", { sessionKey }],
       ] as const) {
-        const permitted = await captureMutationAuthorization({
-          client: writer,
-          method,
-          requestParams,
-          context,
-        });
+        const permitted = await authorize(writer, method, requestParams);
         expect(permitted.error, method).toBeNull();
       }
     });
@@ -283,15 +293,10 @@ describe("session sharing policy", () => {
       using _ = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
       const ownerId = owner.authenticatedUserProfile?.profileId;
       const sessionKey = "agent:main:team-shared";
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey },
-        {
-          sessionId: "session-team-shared",
-          updatedAt: 1,
-          visibility: "shared",
-          createdActor: { type: "human", source: "profile", id: ownerId! },
-        },
-      );
+      await seedSession(sessionKey, "session-team-shared", {
+        visibility: "shared",
+        createdActor: { type: "human", source: "profile", id: ownerId! },
+      });
       const sharedTarget = await resolveSessionSharingTargetAsync({ cfg, sessionKey });
       expect(sharedTarget).not.toBeNull();
       if (!sharedTarget) {
@@ -324,22 +329,16 @@ describe("session sharing policy", () => {
           "sessions.companion.reset",
           "wake",
         ]) {
-          const participation = await captureMutationAuthorization({
-            client: viewer,
-            method,
-            requestParams: { sessionKey },
-            context: { getRuntimeConfig: () => cfg } as GatewayRequestContext,
-          });
+          const participation = await authorizationFor({
+            getRuntimeConfig: () => cfg,
+          } as GatewayRequestContext)(viewer, method, { sessionKey });
           expect(participation.error, `${roleName}: ${method}`).toMatchObject({
             details: { code: "SESSION_PARTICIPATION_REQUIRED" },
           });
         }
-        const assignment = await captureMutationAuthorization({
-          client: viewer,
-          method: "sessions.assignOwner",
-          requestParams: { key: sessionKey },
-          context: { getRuntimeConfig: () => cfg } as GatewayRequestContext,
-        });
+        const assignment = await authorizationFor({
+          getRuntimeConfig: () => cfg,
+        } as GatewayRequestContext)(viewer, "sessions.assignOwner", { key: sessionKey });
         expect(assignment.error).toMatchObject({
           details: { code: "SESSION_PARTICIPATION_REQUIRED" },
         });
@@ -350,12 +349,9 @@ describe("session sharing policy", () => {
           "sessions.companion.ask",
           "sessions.companion.state",
         ]) {
-          const read = await captureMutationAuthorization({
-            client: viewer,
-            method,
-            requestParams: { sessionKey },
-            context: { getRuntimeConfig: () => cfg } as GatewayRequestContext,
-          });
+          const read = await authorizationFor({
+            getRuntimeConfig: () => cfg,
+          } as GatewayRequestContext)(viewer, method, { sessionKey });
           expect(read.error, `${roleName}: ${method}`).toBeNull();
         }
 
@@ -418,13 +414,7 @@ describe("session sharing policy", () => {
         createSessionListEntryFilter({ cfg, client: client({}) })?.(sessionKey, sharedTarget.entry),
       ).toBe(false);
       expect(createSessionListEntryFilter({ cfg, client: systemOwner })).toBeUndefined();
-      expect(
-        await canReceivePreparedSessionEvent({
-          cfg,
-          client: client({}) as never,
-          sessionKeys: [sessionKey],
-        }),
-      ).toBe(false);
+      expect(await receiveEvent(cfg, client({}), sessionKey)).toBe(false);
     });
   });
 
@@ -457,12 +447,8 @@ describe("session sharing policy", () => {
           resolveSessionSharingRole({ cfg, client: writer, target: restricted, isMember: false }),
         ).toBe("viewer");
         const context = { getRuntimeConfig: () => cfg } as GatewayRequestContext;
-        const authorization = await captureMutationAuthorization({
-          client: writer,
-          method: "chat.send",
-          requestParams: { sessionKey },
-          context,
-        });
+        const authorize = authorizationFor(context);
+        const authorization = await authorize(writer, "chat.send", { sessionKey });
         expect(authorization.error).not.toBeNull();
       }
     });
@@ -486,15 +472,10 @@ describe("session sharing policy", () => {
         createdActor: { type: "human" as const, source: "profile" as const, id: creatorId },
       };
       await upsertSessionEntryCore({ agentId: "main", sessionKey: foreignKey }, foreignEntry);
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey: ownKey },
-        {
-          sessionId: "session-team-own",
-          updatedAt: 1,
-          visibility: "shared",
-          createdActor: { type: "human", source: "profile", id: restrictedId },
-        },
-      );
+      await seedSession(ownKey, "session-team-own", {
+        visibility: "shared",
+        createdActor: { type: "human", source: "profile", id: restrictedId },
+      });
       addSessionMember(
         { agentId: "main", sessionKey: foreignKey },
         { identityId: restrictedId, addedBy: creatorId, expectedSessionId: foreignEntry.sessionId },
@@ -509,29 +490,12 @@ describe("session sharing policy", () => {
           createdActor: { type: "human", source: "profile", id: restrictedId },
         }),
       ).toBe(true);
-      expect(
-        await canReceivePreparedSessionEvent({
-          cfg,
-          client: restricted as never,
-          sessionKeys: [foreignKey],
-        }),
-      ).toBe(false);
-      expect(
-        await canReceivePreparedSessionEvent({
-          cfg,
-          client: creator as never,
-          sessionKeys: [foreignKey],
-        }),
-      ).toBe(true);
-      expect(
-        await canReceivePreparedSessionEvent({
-          cfg,
-          client: restricted as never,
-          sessionKeys: [ownKey],
-        }),
-      ).toBe(true);
+      expect(await receiveEvent(cfg, restricted, foreignKey)).toBe(false);
+      expect(await receiveEvent(cfg, creator, foreignKey)).toBe(true);
+      expect(await receiveEvent(cfg, restricted, ownKey)).toBe(true);
 
       const context = { getRuntimeConfig: () => cfg } as GatewayRequestContext;
+      const authorize = authorizationFor(context);
       for (const [method, requestParams] of [
         ["chat.history", { sessionKey: foreignKey }],
         ["chat.metadata", { sessionKey: foreignKey }],
@@ -562,44 +526,24 @@ describe("session sharing policy", () => {
         ["taskSuggestions.create", { sessionKey: foreignKey }],
         ["wake", { sessionKey: foreignKey }],
       ] as const) {
-        const hidden = await captureMutationAuthorization({
-          client: restricted,
-          method,
-          requestParams,
-          context,
-        });
+        const hidden = await authorize(restricted, method, requestParams);
         expect(hidden.error, method).toMatchObject({
           code: "INVALID_REQUEST",
           message: `Session "${foreignKey}" was not found.`,
         });
       }
       for (const method of ["chat.history", "chat.send"] as const) {
-        const creatorRead = await captureMutationAuthorization({
-          client: creator,
-          method,
-          requestParams: { sessionKey: foreignKey },
-          context,
-        });
+        const creatorRead = await authorize(creator, method, { sessionKey: foreignKey });
         expect(creatorRead.error, `creator ${method}`).toBeNull();
       }
-      const ownRead = await captureMutationAuthorization({
-        client: restricted,
-        method: "chat.history",
-        requestParams: { sessionKey: ownKey },
-        context,
-      });
+      const ownRead = await authorize(restricted, "chat.history", { sessionKey: ownKey });
       expect(ownRead.error).toBeNull();
       expect(
         createSessionListEntryFilter({ cfg: {}, client: restricted })?.(foreignKey, foreignEntry),
       ).toBe(true);
       const admin = client({ user: restrictedId, scopes: ["operator.admin"] });
       expect(createSessionListEntryFilter({ cfg, client: admin })).toBeUndefined();
-      const adminRead = await captureMutationAuthorization({
-        client: admin,
-        method: "chat.history",
-        requestParams: { sessionKey: foreignKey },
-        context,
-      });
+      const adminRead = await authorize(admin, "chat.history", { sessionKey: foreignKey });
       expect(adminRead.error).toBeNull();
     });
   });
@@ -645,18 +589,14 @@ describe("session sharing policy", () => {
       const cfg = {};
       setRuntimeConfigSnapshot(cfg);
       const sessionKey = "agent:main:dashboard:categorized-adoption";
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey },
-        {
-          sessionId: "session-categorized-adoption",
-          updatedAt: 1,
-          visibility: "read-only",
-          category: "Personal",
-          createdActor: { type: "human", source: "profile", id: "owner@example.com" },
-        },
-      );
+      await seedSession(sessionKey, "session-categorized-adoption", {
+        visibility: "read-only",
+        category: "Personal",
+        createdActor: { type: "human", source: "profile", id: "owner@example.com" },
+      });
 
       const context = { getRuntimeConfig: () => cfg } as GatewayRequestContext;
+      const authorize = authorizationFor(context);
       for (const [method, requestParams] of [
         ["sessions.create", { key: sessionKey, category: "Projects" }],
         ["sessions.fork", { sessionKey }],
@@ -664,20 +604,14 @@ describe("session sharing policy", () => {
         ["sessions.branches.switch", { sessionKey }],
       ] as const) {
         expect(
-          await captureMutationAuthorization({
-            client: client({ user: "owner@example.com" }),
-            method,
-            requestParams,
-            context,
-          }),
+          await authorize(client({ user: "owner@example.com" }), method, requestParams),
           method,
         ).toMatchObject({ error: null, authorization: expect.any(Object) });
-        const participation = await captureMutationAuthorization({
-          client: client({ user: "viewer@example.com" }),
+        const participation = await authorize(
+          client({ user: "viewer@example.com" }),
           method,
           requestParams,
-          context,
-        });
+        );
         expect(participation.error, method).toMatchObject({
           details: { code: "SESSION_PARTICIPATION_REQUIRED" },
         });
@@ -697,32 +631,26 @@ describe("session sharing policy", () => {
           const cappedClient = roleClient("view", `assignment-${visibility}`);
           using _ = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
           prepareGatewayRecipientProfile(cappedClient);
-          await upsertSessionEntryCore(
-            { agentId: "main", sessionKey },
-            {
-              sessionId: `session-assignment-${visibility}`,
-              updatedAt: 1,
-              visibility,
-              createdActor: { type: "human", source: "profile", id: "owner@example.com" },
-            },
-          );
-          const authorization = await captureMutationAuthorization({
-            client: client({ user: "viewer@example.com" }),
-            method: "sessions.assignOwner",
-            requestParams: { key: sessionKey, owner: { type: "agent", id: "main" } },
-            context: { getRuntimeConfig: () => cfg } as GatewayRequestContext,
+          await seedSession(sessionKey, `session-assignment-${visibility}`, {
+            visibility,
+            createdActor: { type: "human", source: "profile", id: "owner@example.com" },
           });
+          const authorization = await authorizationFor({
+            getRuntimeConfig: () => cfg,
+          } as GatewayRequestContext)(
+            client({ user: "viewer@example.com" }),
+            "sessions.assignOwner",
+            { key: sessionKey, owner: { type: "agent", id: "main" } },
+          );
 
           expect(authorization.error).toBeNull();
           expect(() => authorization.authorization?.assertCurrent()).not.toThrow();
 
-          const capped = await captureMutationAuthorization({
-            client: cappedClient,
-            method: "sessions.assignOwner",
-            requestParams: { key: sessionKey, owner: { type: "agent", id: "main" } },
-            context: {
-              getRuntimeConfig: () => rolePolicyConfig(),
-            } as GatewayRequestContext,
+          const capped = await authorizationFor({
+            getRuntimeConfig: () => rolePolicyConfig(),
+          } as GatewayRequestContext)(cappedClient, "sessions.assignOwner", {
+            key: sessionKey,
+            owner: { type: "agent", id: "main" },
           });
           expect(capped.error).toMatchObject({
             details: { code: "SESSION_PARTICIPATION_REQUIRED" },
@@ -807,20 +735,14 @@ describe("session sharing policy", () => {
         [viewer, false],
       ] as const) {
         expect(isListed(requestClient, sessionKey, entry)).toBe(visible);
-        expect(
-          await canReceivePreparedSessionEvent({
-            cfg,
-            client: requestClient as never,
-            sessionKeys: [sessionKey],
-          }),
-        ).toBe(visible);
+        expect(await receiveEvent(cfg, requestClient, sessionKey)).toBe(visible);
         for (const requestedKey of [sessionKey, sessionAlias]) {
           for (const request of directRequests(requestedKey)) {
-            const { error } = await captureMutationAuthorization({
-              client: requestClient,
-              ...request,
-              context,
-            });
+            const { error } = await authorizationFor(context)(
+              requestClient,
+              request.method,
+              request.requestParams,
+            );
             if (visible) {
               expect(error).toBeNull();
             } else {
@@ -851,23 +773,17 @@ describe("session sharing policy", () => {
         agents: { entries: { main: {}, work: {} } },
       } as never;
       setRuntimeConfigSnapshot(cfg);
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey: "global" },
-        { sessionId: "session-main-global", updatedAt: 1, visibility: "shared" },
-      );
-      await upsertSessionEntryCore(
-        { agentId: "work", sessionKey: "global" },
+      await seedSession("global", "session-main-global", { visibility: "shared" });
+      await seedSession(
+        "global",
+        "session-work-global",
         {
-          sessionId: "session-work-global",
-          updatedAt: 1,
           visibility: "read-only",
           createdActor: { type: "human", source: "profile", id: "owner@example.com" },
         },
+        "work",
       );
-      await upsertSessionEntryCore(
-        { agentId: "main", sessionKey: "agent:main:solo-draft" },
-        { sessionId: "session-solo-draft", updatedAt: 1, visibility: "draft" },
-      );
+      await seedSession("agent:main:solo-draft", "session-solo-draft", { visibility: "draft" });
       const run = createRpcSourceForTest(
         {},
         {
@@ -886,6 +802,7 @@ describe("session sharing policy", () => {
         },
         getRuntimeConfig: () => cfg,
       } as never;
+      const authorize = authorizationFor(context);
       const outsider = client({ user: "outsider@example.com" });
 
       for (const [method, requestParams] of [
@@ -894,12 +811,7 @@ describe("session sharing policy", () => {
         ["progressCard.get", { sessionKey: "global", agentId: "work" }],
         ["progressCard.put", { sessionKey: "global", agentId: "work" }],
       ] as const) {
-        const { error } = await captureMutationAuthorization({
-          client: outsider,
-          method,
-          requestParams,
-          context,
-        });
+        const { error } = await authorize(outsider, method, requestParams);
         if (method === "progressCard.get") {
           expect(error).toBeNull();
         } else {
@@ -907,19 +819,11 @@ describe("session sharing policy", () => {
         }
       }
       for (const method of ["progressCard.get", "progressCard.put"]) {
-        const read = await captureMutationAuthorization({
-          client: outsider,
-          method,
-          requestParams: { sessionKey: "global", agentId: "main" },
-          context,
-        });
+        const read = await authorize(outsider, method, { sessionKey: "global", agentId: "main" });
         expect(read.error).toBeNull();
       }
-      const soloSend = await captureMutationAuthorization({
-        client: client({}),
-        method: "chat.send",
-        requestParams: { sessionKey: "agent:main:solo-draft" },
-        context,
+      const soloSend = await authorize(client({}), "chat.send", {
+        sessionKey: "agent:main:solo-draft",
       });
       expect(soloSend.error).toBeNull();
     });

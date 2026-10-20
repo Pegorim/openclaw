@@ -12,30 +12,24 @@ import type { GatewayClient, GatewayRequestContext } from "./server-methods/type
 import { resolveSessionMutationAuthorizationAsync } from "./session-sharing-authorization-async.js";
 import {
   authorizeResolvedSessionMutationAsync,
-  resolveSessionSharingTargetAsync,
   SessionMutationAuthorizationChangedError,
 } from "./session-sharing.js";
+import { sharingPolicyClient } from "./session-sharing.test-utils.js";
 
 afterEach(() => closeOpenClawAgentDatabasesForTest());
 
 function sandboxRoleClient(role: "view" | "write"): GatewayClient {
   const profile = ensureProfileForEmail(`sandbox-required-${role}@example.test`);
   setUserProfileRole(profile.id, role);
+  return sharingPolicyClient({ user: profile.id });
+}
+
+function roleDefinition(others: "view" | "write", sandbox?: "required") {
   return {
-    connect: {
-      minProtocol: 1,
-      maxProtocol: 1,
-      client: { id: "openclaw-control-ui", version: "test", platform: "test", mode: "webchat" },
-      role: "operator",
-      scopes: ["operator.read", "operator.write"],
-    },
-    authenticatedUserId: profile.id,
-    authenticatedUserProfile: {
-      profileId: profile.id,
-      displayName: null,
-      hasAvatar: false,
-      updatedAt: 1,
-    },
+    sessions: { others },
+    agents: "*" as const,
+    scopes: ["operator.read", "operator.write"],
+    ...(sandbox ? { sandbox } : {}),
   };
 }
 
@@ -47,17 +41,8 @@ describe("session sharing sandbox requirements", () => {
           roles: {
             default: "view",
             definitions: {
-              view: {
-                sessions: { others: "view" },
-                agents: "*",
-                scopes: ["operator.read", "operator.write"],
-                sandbox: "required",
-              },
-              write: {
-                sessions: { others: "write" },
-                agents: "*",
-                scopes: ["operator.read", "operator.write"],
-              },
+              view: roleDefinition("view", "required"),
+              write: roleDefinition("write"),
             },
           },
         },
@@ -100,14 +85,6 @@ describe("session sharing sandbox requirements", () => {
         },
       );
 
-      const hostTarget = await resolveSessionSharingTargetAsync({
-        cfg,
-        sessionKey: hostSessionKey,
-      });
-      expect(hostTarget).not.toBeNull();
-      if (!hostTarget) {
-        throw new Error("expected persisted maintainer session");
-      }
       expect(
         await authorizeResolvedSessionMutationAsync({
           cfg,
@@ -118,6 +95,21 @@ describe("session sharing sandbox requirements", () => {
       ).toMatchObject({ code: "FORBIDDEN", message: expect.stringMatching(/sandbox/i) });
 
       const context = { getRuntimeConfig: () => cfg } as GatewayRequestContext;
+      const authorize = async (
+        client: GatewayClient,
+        method: string,
+        requestParams: Record<string, unknown>,
+        selectedContext = context,
+      ) => {
+        const result = await resolveSessionMutationAuthorizationAsync({
+          client,
+          method,
+          requestParams,
+          context: selectedContext,
+        });
+        authorizations.defer(() => result.authorization?.release?.());
+        return result;
+      };
       for (const method of [
         "agent",
         "chat.send",
@@ -135,46 +127,23 @@ describe("session sharing sandbox requirements", () => {
         const requestParams = method.startsWith("sessions.")
           ? { key: hostSessionKey }
           : { sessionKey: hostSessionKey };
-        expect(
-          (
-            await resolveSessionMutationAuthorizationAsync({
-              client: guest,
-              method,
-              requestParams,
-              context,
-            })
-          ).error,
-          method,
-        ).toMatchObject({ code: "FORBIDDEN", message: expect.stringMatching(/sandbox/i) });
+        expect((await authorize(guest, method, requestParams)).error, method).toMatchObject({
+          code: "FORBIDDEN",
+          message: expect.stringMatching(/sandbox/i),
+        });
       }
-      const patch = await resolveSessionMutationAuthorizationAsync({
-        client: guest,
-        method: "sessions.patch",
-        requestParams: { key: hostSessionKey },
-        context,
-      });
-      authorizations.defer(() => patch.authorization?.release?.());
+      const patch = await authorize(guest, "sessions.patch", { key: hostSessionKey });
       expect(patch.error).toBeNull();
 
       for (const participant of [guest, maintainer]) {
-        const sandboxRun = await resolveSessionMutationAuthorizationAsync({
-          client: participant,
-          method: "chat.send",
-          requestParams: { sessionKey: sandboxSessionKey },
-          context,
+        const sandboxRun = await authorize(participant, "chat.send", {
+          sessionKey: sandboxSessionKey,
         });
-        authorizations.defer(() => sandboxRun.authorization?.release?.());
         expect(sandboxRun.error).toBeNull();
       }
 
       cfg.gateway!.roles!.definitions.view!.sandbox = "inherit";
-      const admittedHostRun = await resolveSessionMutationAuthorizationAsync({
-        client: guest,
-        method: "chat.send",
-        requestParams: { sessionKey: hostSessionKey },
-        context,
-      });
-      authorizations.defer(() => admittedHostRun.authorization?.release?.());
+      const admittedHostRun = await authorize(guest, "chat.send", { sessionKey: hostSessionKey });
       expect(admittedHostRun.error).toBeNull();
       expect(admittedHostRun.authorization).toBeDefined();
       cfg.gateway!.roles!.definitions.view!.sandbox = "required";
@@ -182,13 +151,9 @@ describe("session sharing sandbox requirements", () => {
         SessionMutationAuthorizationChangedError,
       );
 
-      const unscoped = await resolveSessionMutationAuthorizationAsync({
-        client: guest,
-        method: "chat.send",
-        requestParams: { sessionKey: hostSessionKey },
-        context: { getRuntimeConfig: () => ({}) } as GatewayRequestContext,
-      });
-      authorizations.defer(() => unscoped.authorization?.release?.());
+      const unscoped = await authorize(guest, "chat.send", { sessionKey: hostSessionKey }, {
+        getRuntimeConfig: () => ({}),
+      } as GatewayRequestContext);
       expect(unscoped.error).toBeNull();
     });
   });

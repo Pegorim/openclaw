@@ -90,13 +90,16 @@ async function arrangePausedChild(
   });
   const caller = { agentId: "main", sessionKey: parent, assertCurrent: vi.fn() };
   const cfg = getRuntimeConfig();
-  const resume = bindParentSubagentResume({
-    cfg,
-    caller,
-    childSessionKey,
-    childSessionId: sessionId,
-    childLifecycleRevision: lifecycleRevision,
-  });
+  const bind = (overrides: Partial<Parameters<typeof bindParentSubagentResume>[0]> = {}) =>
+    bindParentSubagentResume({
+      cfg,
+      caller,
+      childSessionKey,
+      childSessionId: sessionId,
+      childLifecycleRevision: lifecycleRevision,
+      ...overrides,
+    });
+  const resume = bind();
   const prepare = (overrides: Partial<Parameters<typeof prepareParentSubagentResume>[0]> = {}) =>
     prepareParentSubagentResume({
       cfg,
@@ -108,7 +111,39 @@ async function arrangePausedChild(
       assertAdmissionCurrent: vi.fn(() => ({ sessionId, lifecycleRevision, updatedAt: 1 })),
       ...overrides,
     });
-  return { cfg, caller, entry, resume, prepare, childSessionKey, storePath };
+  return { cfg, caller, entry, resume, prepare, bind, childSessionKey, storePath };
+}
+
+type PausedChild = Awaited<ReturnType<typeof arrangePausedChild>>;
+
+async function appendReply(state: PausedChild, text: string) {
+  const { terminalReply } = prepareAgentRunTerminalReply({ rawText: text });
+  await appendTranscriptMessage(
+    { agentId: "main", sessionKey: state.childSessionKey, sessionId, storePath: state.storePath },
+    {
+      message: {
+        role: "assistant",
+        content: text,
+        stopReason: "stop",
+        __openclaw: { runId: nextRunId },
+      },
+    },
+  );
+  return terminalReply;
+}
+
+async function expectAnnounced(
+  announce: typeof fixture.announce,
+  text: string,
+  terminalReply: ReturnType<typeof prepareAgentRunTerminalReply>["terminalReply"],
+) {
+  expect(announce).toHaveBeenCalledTimes(1);
+  expect(announce).toHaveBeenCalledWith(
+    expect.objectContaining({ childRunId: nextRunId, requesterSessionKey: parent, terminalReply }),
+  );
+  const prepared = await readSubagentRunAnnounceResult(subagentRuns.get(nextRunId)!);
+  expect(prepared.text).toBe(text);
+  expect(prepared.isCurrent()).toBe(true);
 }
 
 it.each(["agent:main:subagent:resume-child"])(
@@ -156,13 +191,7 @@ it.each([
   "refuses a same-sessionId resume with changed lifecycle $original -> $current",
   async ({ original, current }) => {
     const state = await arrangePausedChild(undefined, original);
-    expect(() =>
-      bindParentSubagentResume({
-        ...state,
-        childSessionId: sessionId,
-        childLifecycleRevision: current,
-      }),
-    ).toThrow(/incarnation/);
+    expect(() => state.bind({ childLifecycleRevision: current })).toThrow(/incarnation/);
     const adopt = await state.prepare({
       assertAdmissionCurrent: () => ({ sessionId, lifecycleRevision: current, updatedAt: 1 }),
     });
@@ -187,11 +216,7 @@ it.each(["identity", "revision"] as const)(
     await restoreSubagentRunsFromDisk({ runs: subagentRuns });
     await fixture.settle();
     const originalIdentity = subagentRuns.get(previousRunId)?.childSessionIdentity;
-    const resume = bindParentSubagentResume({
-      ...state,
-      childSessionId: sessionId,
-      childLifecycleRevision: "original-incarnation",
-    });
+    const resume = state.bind();
     const announce = fixture.announce.mockResolvedValue("delivered");
     const adopt = await state.prepare({ resume });
     await expect(adopt()).resolves.toBe(previousRunId);
@@ -202,18 +227,7 @@ it.each(["identity", "revision"] as const)(
     });
     expect(subagentRuns.get(nextRunId)?.childSessionIdentity).toEqual(originalIdentity);
     const text = `${"Completed legacy task detail. ".repeat(200)}The legacy task is complete.`;
-    const { terminalReply } = prepareAgentRunTerminalReply({ rawText: text });
-    await appendTranscriptMessage(
-      { agentId: "main", sessionKey: state.childSessionKey, sessionId, storePath: state.storePath },
-      {
-        message: {
-          role: "assistant",
-          content: text,
-          stopReason: "stop",
-          __openclaw: { runId: nextRunId },
-        },
-      },
-    );
+    const terminalReply = await appendReply(state, text);
     emitAgentEvent({
       runId: nextRunId,
       stream: "lifecycle",
@@ -228,18 +242,7 @@ it.each(["identity", "revision"] as const)(
       status: "terminal",
       outcome: { status: "ok" },
     });
-    expect(announce).toHaveBeenCalledTimes(1);
-    expect(announce).toHaveBeenCalledWith(
-      expect.objectContaining({
-        childRunId: nextRunId,
-        requesterSessionKey: parent,
-        terminalReply,
-      }),
-    );
-    const completed = subagentRuns.get(nextRunId)!;
-    const prepared = await readSubagentRunAnnounceResult(completed);
-    expect(prepared.text).toBe(text);
-    expect(prepared.isCurrent()).toBe(true);
+    await expectAnnounced(announce, text, terminalReply);
     expect(subagentRuns.get(nextRunId)?.cleanupCompletedAt).toBeDefined();
     expect(fixture.cleanup).not.toHaveBeenCalled();
   },
@@ -271,9 +274,7 @@ it.each(["selection", "admission"] as const)(
     publishSystemEventStoreResolver(() => `${originalStorePath}.replacement`);
     if (stage === "selection") {
       expect(shouldResumeParentSubagent(state)).toBe(false);
-      expect(() => bindParentSubagentResume({ ...state, childSessionId: sessionId })).toThrow(
-        /controlled/,
-      );
+      expect(() => state.bind()).toThrow(/controlled/);
     } else {
       await expect(adopt()).rejects.toThrow(/controlled/);
     }
@@ -299,11 +300,7 @@ it.each(["resume", "cancel"] as const)(
     await fixture.settle();
     expect(shouldResumeParentSubagent(state)).toBe(false);
     if (action === "resume") {
-      const resume = bindParentSubagentResume({
-        ...state,
-        childSessionId: sessionId,
-        childLifecycleRevision: lifecycleRevision,
-      });
+      const resume = state.bind();
       const adopt = await state.prepare({ resume });
       await expect(adopt()).resolves.toBe(previousRunId);
       expect(subagentRuns.get(nextRunId)?.taskRunId).toBe(previousRunId);
@@ -395,18 +392,7 @@ it("delivers a result once after the former synchronous wait window, through the
   vi.setSystemTime(now + 60_000);
   expect(announce).not.toHaveBeenCalled();
   const text = `${"Completed resumed task detail. ".repeat(200)}The resumed task is complete.`;
-  const { terminalReply } = prepareAgentRunTerminalReply({ rawText: text });
-  await appendTranscriptMessage(
-    { agentId: "main", sessionKey: state.childSessionKey, sessionId, storePath: state.storePath },
-    {
-      message: {
-        role: "assistant",
-        content: text,
-        stopReason: "stop",
-        __openclaw: { runId: nextRunId },
-      },
-    },
-  );
+  const terminalReply = await appendReply(state, text);
   completion.resolve({
     status: "ok",
     startedAt: now,
@@ -414,17 +400,7 @@ it("delivers a result once after the former synchronous wait window, through the
     terminalReply,
   });
   await fixture.settle();
-  expect(announce).toHaveBeenCalledTimes(1);
-  expect(announce).toHaveBeenCalledWith(
-    expect.objectContaining({
-      childRunId: nextRunId,
-      requesterSessionKey: parent,
-      terminalReply,
-    }),
-  );
-  const prepared = await readSubagentRunAnnounceResult(subagentRuns.get(nextRunId)!);
-  expect(prepared.text).toBe(text);
-  expect(prepared.isCurrent()).toBe(true);
+  await expectAnnounced(announce, text, terminalReply);
   emitAgentEvent({
     runId: previousRunId,
     stream: "lifecycle",
@@ -446,23 +422,9 @@ it("does not grant control to a separate completion recipient", async () => {
   publishSystemEventStoreResolver((key) =>
     key === state.entry.controllerSessionKey ? "controller-store" : "completion-store",
   );
-  expect(() =>
-    bindParentSubagentResume({
-      cfg: state.cfg,
-      caller: state.caller,
-      childSessionKey: state.childSessionKey,
-      childSessionId: sessionId,
-    }),
-  ).toThrow(/controlled/);
+  expect(() => state.bind()).toThrow(/controlled/);
   const controller = { ...state.caller, sessionKey: "agent:main:dashboard:actual-controller" };
-  expect(
-    bindParentSubagentResume({
-      cfg: state.cfg,
-      caller: controller,
-      childSessionKey: state.childSessionKey,
-      childSessionId: sessionId,
-    }).taskRunId,
-  ).toBe(previousRunId);
+  expect(state.bind({ caller: controller }).taskRunId).toBe(previousRunId);
 });
 
 it("retires queued resume execution when the successor is cancelled", async () => {
