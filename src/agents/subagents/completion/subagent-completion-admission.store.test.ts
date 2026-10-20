@@ -238,38 +238,26 @@ describe("native subagent completion worker admission", () => {
     });
   });
 
-  it("rolls back both owners after the native subagent write fails", async () => {
+  it.each([
+    ["native write failure", /completion crash cut/],
+    ["mismatched delivery generations", /one owner generation/],
+    ["newer sibling identity", /completion owner (changed|was replaced)/],
+  ] as const)("leaves both owners unchanged after %s", async (cut, error) => {
     await withAdmissionState(async ({ input, database, context, admit }) => {
+      if (cut === "native write failure") {
+        database.db.exec(
+          "CREATE TRIGGER reject_completion AFTER UPDATE ON subagent_runs BEGIN SELECT RAISE(ABORT, 'completion crash cut'); END",
+        );
+      } else if (cut === "mismatched delivery generations") {
+        input.subagent.delivery!.generation = 2;
+      } else {
+        seedSubagentCompletionDelivery({
+          subagent: { ...structuredClone(input.expected), generation: 2, runId: "newer-run" },
+          databaseOptions: { database },
+        });
+      }
       const before = readSubagentRun(database, input.expected.runId);
-      database.db.exec(
-        "CREATE TRIGGER reject_completion AFTER UPDATE ON subagent_runs BEGIN SELECT RAISE(ABORT, 'completion crash cut'); END",
-      );
-      await expect(admit()).rejects.toThrow("completion crash cut");
-      expect(await loadPendingSessionDeliveries(context)).toEqual([]);
-      expect(readSubagentRun(database, input.expected.runId)).toEqual(before);
-    });
-  });
-
-  it("refuses mismatched queue and native delivery generations before either write", async () => {
-    await withAdmissionState(async ({ input, database, context, admit }) => {
-      const before = readSubagentRun(database, input.expected.runId);
-      input.subagent.delivery!.generation = 2;
-      await expect(admit()).rejects.toThrow("one owner generation");
-      expect(await loadPendingSessionDeliveries(context)).toEqual([]);
-      expect(readSubagentRun(database, input.expected.runId)).toEqual(before);
-    });
-  });
-
-  it("refuses a durable replacement with a newer sibling identity", async () => {
-    await withAdmissionState(async ({ input, database, context, admit }) => {
-      const replacement = {
-        ...structuredClone(input.expected),
-        generation: 2,
-        runId: "newer-run",
-      };
-      seedSubagentCompletionDelivery({ subagent: replacement, databaseOptions: { database } });
-      const before = readSubagentRun(database, input.expected.runId);
-      await expect(admit()).rejects.toThrow(/completion owner (changed|was replaced)/);
+      await expect(admit()).rejects.toThrow(error);
       expect(await loadPendingSessionDeliveries(context)).toEqual([]);
       expect(readSubagentRun(database, input.expected.runId)).toEqual(before);
     });
