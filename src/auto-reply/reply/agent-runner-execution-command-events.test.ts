@@ -1,16 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TemplateContext } from "../templating.js";
 import type { GetReplyOptions } from "../types.js";
 import {
-  createAgentTurnExecutionDefaults,
+  createMinimalRunAgentTurnParams,
   setupAgentRunnerExecutionTestState,
   getExecuteAgentTurnForTest,
-  createMockTypingSignaler,
-  createFollowupRun,
 } from "./agent-runner-execution.test-support.js";
 import type { EmbeddedAgentParams } from "./agent-runner-execution.test-support.js";
 
 const state = await setupAgentRunnerExecutionTestState();
+
+function mockEvents(
+  ...events: Array<Parameters<NonNullable<EmbeddedAgentParams["onAgentEvent"]>>[0]>
+) {
+  state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+    for (const event of events) {
+      await params.onAgentEvent?.(event);
+    }
+    return { payloads: [{ text: "final" }], meta: {} };
+  });
+}
+
+async function execute(opts: GetReplyOptions) {
+  return (await getExecuteAgentTurnForTest())({
+    ...createMinimalRunAgentTurnParams({ opts }),
+    commandBody: "hello",
+  });
+}
+
+function modelWait(phase: "update" | "end", progressText?: string) {
+  return {
+    itemId: "model-wait",
+    kind: "model-wait",
+    suppressDurableProgress: true,
+    phase,
+    ...(progressText === undefined ? {} : { progressText }),
+  };
+}
 
 describe("executeAgentTurn: command events", () => {
   it("forwards plan, approval, command output, and patch events", async () => {
@@ -18,8 +43,8 @@ describe("executeAgentTurn: command events", () => {
     const onApprovalEvent = vi.fn();
     const onCommandOutput = vi.fn();
     const onPatchSummary = vi.fn();
-    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
-      await params.onAgentEvent?.({
+    mockEvents(
+      {
         stream: "plan",
         data: {
           phase: "update",
@@ -33,8 +58,8 @@ describe("executeAgentTurn: command events", () => {
             "legacy string",
           ],
         },
-      });
-      await params.onAgentEvent?.({
+      },
+      {
         stream: "approval",
         data: {
           phase: "requested",
@@ -43,8 +68,8 @@ describe("executeAgentTurn: command events", () => {
           title: "Command approval requested",
           approvalId: "approval-1",
         },
-      });
-      await params.onAgentEvent?.({
+      },
+      {
         stream: "command_output",
         data: {
           itemId: "command:exec-1",
@@ -53,8 +78,8 @@ describe("executeAgentTurn: command events", () => {
           toolCallId: "exec-1",
           output: "README.md",
         },
-      });
-      await params.onAgentEvent?.({
+      },
+      {
         stream: "patch",
         data: {
           itemId: "patch:patch-1",
@@ -66,29 +91,10 @@ describe("executeAgentTurn: command events", () => {
           deleted: [],
           summary: "1 added, 1 modified",
         },
-      });
-      return { payloads: [{ text: "final" }], meta: {} };
-    });
+      },
+    );
 
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    const pendingToolTasks = new Set<Promise<void>>();
-    await executeAgentTurn({
-      commandBody: "hello",
-      followupRun: createFollowupRun(),
-      sessionCtx: {
-        Provider: "whatsapp",
-        MessageSid: "msg",
-      } as unknown as TemplateContext,
-      opts: {
-        onPlanUpdate,
-        onApprovalEvent,
-        onCommandOutput,
-        onPatchSummary,
-      } satisfies GetReplyOptions,
-      typingSignals: createMockTypingSignaler(),
-      ...createAgentTurnExecutionDefaults(),
-      pendingToolTasks,
-    });
+    await execute({ onPlanUpdate, onApprovalEvent, onCommandOutput, onPatchSummary });
 
     expect(onPlanUpdate).toHaveBeenCalledWith({
       phase: "update",
@@ -157,85 +163,35 @@ describe("executeAgentTurn: command events", () => {
       return { payloads: [{ text: "final" }], meta: {} };
     });
 
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    await executeAgentTurn({
-      commandBody: "hello",
-      followupRun: createFollowupRun(),
-      sessionCtx: { Provider: "whatsapp", MessageSid: "msg" } as TemplateContext,
-      opts: { onItemEvent },
-      typingSignals: createMockTypingSignaler(),
-      ...createAgentTurnExecutionDefaults(),
-    });
+    await execute({ onItemEvent });
 
     expect(onItemEvent.mock.calls.map(([payload]) => payload)).toEqual([
-      {
-        itemId: "model-wait",
-        kind: "model-wait",
-        suppressDurableProgress: true,
-        phase: "update",
-        progressText: "Waiting for the local model to respond",
-      },
-      {
-        itemId: "model-wait",
-        kind: "model-wait",
-        suppressDurableProgress: true,
-        phase: "update",
-        progressText: "Waiting for a free model slot",
-      },
-      {
-        itemId: "model-wait",
-        kind: "model-wait",
-        suppressDurableProgress: true,
-        phase: "end",
-      },
-      {
-        itemId: "model-wait",
-        kind: "model-wait",
-        suppressDurableProgress: true,
-        phase: "update",
-        progressText: "Waiting for the local model to respond",
-      },
-      {
-        itemId: "model-wait",
-        kind: "model-wait",
-        suppressDurableProgress: true,
-        phase: "end",
-      },
+      modelWait("update", "Waiting for the local model to respond"),
+      modelWait("update", "Waiting for a free model slot"),
+      modelWait("end"),
+      modelWait("update", "Waiting for the local model to respond"),
+      modelWait("end"),
     ]);
   });
 
   it("forwards Codex command tool results as command output completion", async () => {
     const onCommandOutput = vi.fn();
-    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
-      await params.onAgentEvent?.({
-        stream: "tool",
-        data: {
-          phase: "result",
-          itemId: "command:exec-1",
-          toolCallId: "exec-1",
-          name: "exec",
-          status: "completed",
-          result: {
-            exitCode: 0,
-            durationMs: 42,
-          },
+    mockEvents({
+      stream: "tool",
+      data: {
+        phase: "result",
+        itemId: "command:exec-1",
+        toolCallId: "exec-1",
+        name: "exec",
+        status: "completed",
+        result: {
+          exitCode: 0,
+          durationMs: 42,
         },
-      });
-      return { payloads: [{ text: "final" }], meta: {} };
+      },
     });
 
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    await executeAgentTurn({
-      commandBody: "hello",
-      followupRun: createFollowupRun(),
-      sessionCtx: {
-        Provider: "whatsapp",
-        MessageSid: "msg",
-      } as unknown as TemplateContext,
-      opts: { onCommandOutput } satisfies GetReplyOptions,
-      typingSignals: createMockTypingSignaler(),
-      ...createAgentTurnExecutionDefaults(),
-    });
+    await execute({ onCommandOutput });
 
     expect(onCommandOutput).toHaveBeenCalledWith({
       itemId: "command:exec-1",
@@ -253,35 +209,21 @@ describe("executeAgentTurn: command events", () => {
 
   it("marks Codex command tool result errors as failed command output", async () => {
     const onCommandOutput = vi.fn();
-    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
-      await params.onAgentEvent?.({
-        stream: "tool",
-        data: {
-          phase: "result",
-          itemId: "command:exec-1",
-          toolCallId: "exec-1",
-          name: "exec",
-          isError: true,
-          result: {
-            content: [{ type: "text", text: "command failed" }],
-          },
+    mockEvents({
+      stream: "tool",
+      data: {
+        phase: "result",
+        itemId: "command:exec-1",
+        toolCallId: "exec-1",
+        name: "exec",
+        isError: true,
+        result: {
+          content: [{ type: "text", text: "command failed" }],
         },
-      });
-      return { payloads: [{ text: "final" }], meta: {} };
+      },
     });
 
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    await executeAgentTurn({
-      commandBody: "hello",
-      followupRun: createFollowupRun(),
-      sessionCtx: {
-        Provider: "whatsapp",
-        MessageSid: "msg",
-      } as unknown as TemplateContext,
-      opts: { onCommandOutput } satisfies GetReplyOptions,
-      typingSignals: createMockTypingSignaler(),
-      ...createAgentTurnExecutionDefaults(),
-    });
+    await execute({ onCommandOutput });
 
     expect(onCommandOutput).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -296,8 +238,8 @@ describe("executeAgentTurn: command events", () => {
 
   it("does not synthesize command output from bare exec tool results", async () => {
     const onCommandOutput = vi.fn();
-    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
-      await params.onAgentEvent?.({
+    mockEvents(
+      {
         stream: "tool",
         data: {
           phase: "result",
@@ -305,8 +247,8 @@ describe("executeAgentTurn: command events", () => {
           toolCallId: "exec-1",
           isError: false,
         },
-      });
-      await params.onAgentEvent?.({
+      },
+      {
         stream: "command_output",
         data: {
           itemId: "command:exec-1",
@@ -317,22 +259,10 @@ describe("executeAgentTurn: command events", () => {
           status: "completed",
           exitCode: 0,
         },
-      });
-      return { payloads: [{ text: "final" }], meta: {} };
-    });
+      },
+    );
 
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    await executeAgentTurn({
-      commandBody: "hello",
-      followupRun: createFollowupRun(),
-      sessionCtx: {
-        Provider: "whatsapp",
-        MessageSid: "msg",
-      } as unknown as TemplateContext,
-      opts: { onCommandOutput } satisfies GetReplyOptions,
-      typingSignals: createMockTypingSignaler(),
-      ...createAgentTurnExecutionDefaults(),
-    });
+    await execute({ onCommandOutput });
 
     expect(onCommandOutput).toHaveBeenCalledTimes(1);
     expect(onCommandOutput).toHaveBeenCalledWith(

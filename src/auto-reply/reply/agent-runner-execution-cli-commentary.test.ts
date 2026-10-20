@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
 import type { RunCliAgentParams } from "../../agents/cli-runner/types.js";
 import {
@@ -6,12 +6,11 @@ import {
   getReplyPayloadMetadata,
   setReplyPayloadMetadata,
 } from "../reply-payload.js";
-import type { TemplateContext } from "../templating.js";
 import type { BlockReplyContext, GetReplyOptions, ReplyPayload } from "../types.js";
 import {
   createFollowupRun,
   initialFallbackAttemptOptions,
-  createMockTypingSignaler,
+  createMinimalRunAgentTurnParams,
   getExecuteAgentTurnForTest,
   loadActualRunCliAgentForTest,
   setupAgentRunnerExecutionTestState,
@@ -110,38 +109,61 @@ function createClaudeCliFollowupRun() {
 function createTurnParams(opts: GetReplyOptions, blockStreamingEnabled: boolean) {
   const followupRun = createClaudeCliFollowupRun();
   return {
+    ...createMinimalRunAgentTurnParams({
+      followupRun,
+      opts,
+      sessionCtx: { Provider: "telegram", MessageSid: "msg" },
+    }),
     commandBody: "hi",
-    followupRun,
-    sessionCtx: { Provider: "telegram", MessageSid: "msg" } as unknown as TemplateContext,
-    opts,
-    typingSignals: createMockTypingSignaler(),
-    blockReplyPipeline: null,
     blockStreamingEnabled,
-    resolvedBlockStreamingBreak: "message_end" as const,
-    applyReplyToMode: <T>(payload: T) => payload,
-    shouldEmitToolResult: () => true,
-    shouldEmitToolOutput: () => false,
-    pendingToolTasks: new Set<Promise<void>>(),
-    isHeartbeat: false,
     sessionKey: followupRun.run.sessionKey,
-    getActiveSessionEntry: () => undefined,
-    resolvedVerboseLevel: "off" as const,
   };
+}
+
+beforeEach(() => {
+  useClaudeCliFallback();
+});
+
+function useRawBlockDelivery() {
+  state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
+    (params: { onBlockReply: NonNullable<GetReplyOptions["onBlockReply"]> }) => params.onBlockReply,
+  );
+}
+
+type Callback<K extends keyof GetReplyOptions> = NonNullable<GetReplyOptions[K]>;
+function replySpies() {
+  return {
+    onBlockReply: vi.fn<Callback<"onBlockReply">>(async () => undefined),
+    onPreparedBlockReply: vi.fn<Callback<"onPreparedBlockReply">>(async () => undefined),
+    onPartialReply: vi.fn<Callback<"onPartialReply">>(async () => undefined),
+    onItemEvent: vi.fn<Callback<"onItemEvent">>(async () => undefined),
+  };
+}
+
+function mockCommentary(source: string, itemId: string, finalText: string) {
+  state.runCliAgentMock.mockImplementationOnce(
+    async (params: { runId: string; emitCommentaryText?: boolean }) => {
+      expect(params.emitCommentaryText).toBe(true);
+      const { emitAgentEvent } = await import("../../infra/agent-events.js");
+      emitAgentEvent({
+        runId: params.runId,
+        stream: "item",
+        data: { kind: "preamble", itemId, progressText: source },
+      });
+      return { payloads: [{ text: finalText }], meta: {} };
+    },
+  );
 }
 
 describe("executeAgentTurn: CLI durable commentary", () => {
   it("delivers commentary from a real JSONL CLI subprocess", async () => {
-    useClaudeCliFallback();
+    useRawBlockDelivery();
     state.runCliAgentMock.mockImplementationOnce(async (params: RunCliAgentParams) => {
       return await (
         await loadActualRunCliAgentForTest()
       )(params);
     });
-    state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
-      (params: { onBlockReply: NonNullable<GetReplyOptions["onBlockReply"]> }) =>
-        params.onBlockReply,
-    );
-    const onBlockReply = vi.fn<NonNullable<GetReplyOptions["onBlockReply"]>>(async () => undefined);
+    const { onBlockReply } = replySpies();
     const executeAgentTurn = await getExecuteAgentTurnForTest();
     const result = await executeAgentTurn(createTurnParams({ onBlockReply }, true));
 
@@ -162,10 +184,8 @@ describe("executeAgentTurn: CLI durable commentary", () => {
       label: 'CLI backend "claude-cli"',
       capabilities: ["thread-bootstrap-projection"],
     });
-    expect(result.kind).toBe("success");
-    if (result.kind === "success") {
-      expect(result.runResult.payloads).toEqual([{ text: "Subprocess final answer." }]);
-    }
+    assert(result.kind === "success");
+    expect(result.runResult.payloads).toEqual([{ text: "Subprocess final answer." }]);
     expect(onBlockReply).toHaveBeenCalledOnce();
     expect(onBlockReply.mock.calls[0]?.[0]).toMatchObject({
       text: "The subprocess findings are durable.",
@@ -197,35 +217,10 @@ describe("executeAgentTurn: CLI durable commentary", () => {
   ])(
     "prepares completed CLI commentary for block streaming: $source",
     async ({ source, expected }) => {
-      useClaudeCliFallback();
-      state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
-        (params: { onBlockReply: NonNullable<GetReplyOptions["onBlockReply"]> }) =>
-          params.onBlockReply,
-      );
-      state.runCliAgentMock.mockImplementationOnce(
-        async (params: { runId: string; emitCommentaryText?: boolean }) => {
-          expect(params.emitCommentaryText).toBe(true);
-          const agentEvents = await import("../../infra/agent-events.js");
-          agentEvents.emitAgentEvent({
-            runId: params.runId,
-            stream: "item",
-            data: {
-              kind: "preamble",
-              itemId: "commentary-durable-1",
-              progressText: source,
-            },
-          });
-          return { payloads: [{ text: "Short final wrap-up." }], meta: {} };
-        },
-      );
+      useRawBlockDelivery();
+      mockCommentary(source, "commentary-durable-1", "Short final wrap-up.");
 
-      const onBlockReply = vi.fn<NonNullable<GetReplyOptions["onBlockReply"]>>(
-        async () => undefined,
-      );
-      const onPreparedBlockReply = vi.fn<NonNullable<GetReplyOptions["onPreparedBlockReply"]>>(
-        async () => undefined,
-      );
-      const onItemEvent = vi.fn<NonNullable<GetReplyOptions["onItemEvent"]>>(async () => undefined);
+      const { onBlockReply, onPreparedBlockReply, onItemEvent } = replySpies();
       const executeAgentTurn = await getExecuteAgentTurnForTest();
       const result = await executeAgentTurn(
         createTurnParams(
@@ -251,21 +246,15 @@ describe("executeAgentTurn: CLI durable commentary", () => {
           suppressDurableProgress: true,
         });
       });
-      expect(result.kind).toBe("success");
-      if (result.kind === "success") {
-        expect(result.runResult.payloads).toEqual([{ text: "Short final wrap-up." }]);
-      }
+      assert(result.kind === "success");
+      expect(result.runResult.payloads).toEqual([{ text: "Short final wrap-up." }]);
     },
   );
 
   it.each(["raw", "prepared", "both"] as const)(
     "forwards native CLI input through the %s sink without model normalization",
     async (mode) => {
-      useClaudeCliFallback();
-      state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
-        (params: { onBlockReply: NonNullable<GetReplyOptions["onBlockReply"]> }) =>
-          params.onBlockReply,
-      );
+      useRawBlockDelivery();
       const nativePayload: ReplyPayload = setReplyPayloadMetadata(
         {
           text: "Which color?",
@@ -289,15 +278,7 @@ describe("executeAgentTurn: CLI durable commentary", () => {
         assistantMessageIndex: 11,
         deliveryIntentId: "native-question-1",
       };
-      const onBlockReply = vi.fn<NonNullable<GetReplyOptions["onBlockReply"]>>(
-        async () => undefined,
-      );
-      const onPreparedBlockReply = vi.fn<NonNullable<GetReplyOptions["onPreparedBlockReply"]>>(
-        async () => undefined,
-      );
-      const onPartialReply = vi.fn<NonNullable<GetReplyOptions["onPartialReply"]>>(
-        async () => undefined,
-      );
+      const { onBlockReply, onPreparedBlockReply, onPartialReply } = replySpies();
       state.runCliAgentMock.mockImplementationOnce(async (params: RunCliAgentParams) => {
         if (mode !== "prepared") {
           expect(params.onBlockReply).toBe(onBlockReply);
@@ -346,7 +327,6 @@ describe("executeAgentTurn: CLI durable commentary", () => {
   )(
     "keeps prepared CLI payload facts through normalization (completed=$completed): $text",
     async ({ text, completed }) => {
-      useClaudeCliFallback();
       const { createBlockReplyDeliveryHandler } =
         await vi.importActual<typeof import("./reply-delivery.js")>("./reply-delivery.js");
       const normalizeMediaPaths = vi.fn(async (payload: ReplyPayload) => {
@@ -380,9 +360,7 @@ describe("executeAgentTurn: CLI durable commentary", () => {
         });
         return { payloads: [{ text: "Final answer." }], meta: {} };
       });
-      const onPreparedBlockReply = vi.fn<NonNullable<GetReplyOptions["onPreparedBlockReply"]>>(
-        async () => undefined,
-      );
+      const { onPreparedBlockReply } = replySpies();
       const executeAgentTurn = await getExecuteAgentTurnForTest();
 
       await executeAgentTurn(createTurnParams({ onPreparedBlockReply }, !completed));
@@ -396,29 +374,10 @@ describe("executeAgentTurn: CLI durable commentary", () => {
   );
 
   it("delivers commentary payloads without block streaming", async () => {
-    useClaudeCliFallback();
-    state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
-      (params: { onBlockReply: NonNullable<GetReplyOptions["onBlockReply"]> }) =>
-        params.onBlockReply,
-    );
-    state.runCliAgentMock.mockImplementationOnce(
-      async (params: { runId: string; emitCommentaryText?: boolean }) => {
-        expect(params.emitCommentaryText).toBe(true);
-        const agentEvents = await import("../../infra/agent-events.js");
-        agentEvents.emitAgentEvent({
-          runId: params.runId,
-          stream: "item",
-          data: {
-            kind: "preamble",
-            itemId: "commentary-payload-1",
-            progressText: "A durable commentary update.",
-          },
-        });
-        return { payloads: [{ text: "Final answer." }], meta: {} };
-      },
-    );
+    useRawBlockDelivery();
+    mockCommentary("A durable commentary update.", "commentary-payload-1", "Final answer.");
 
-    const onBlockReply = vi.fn<NonNullable<GetReplyOptions["onBlockReply"]>>(async () => undefined);
+    const { onBlockReply } = replySpies();
     const executeAgentTurn = await getExecuteAgentTurnForTest();
     const result = await executeAgentTurn(
       createTurnParams({ onBlockReply, commentaryPayloadsEnabled: true }, false),
@@ -431,9 +390,7 @@ describe("executeAgentTurn: CLI durable commentary", () => {
         isCommentary: true,
       });
     });
-    expect(result.kind).toBe("success");
-    if (result.kind === "success") {
-      expect(result.runResult.payloads).toEqual([{ text: "Final answer." }]);
-    }
+    assert(result.kind === "success");
+    expect(result.runResult.payloads).toEqual([{ text: "Final answer." }]);
   });
 });

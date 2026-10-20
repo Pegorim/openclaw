@@ -32,6 +32,56 @@ import type { FallbackRunnerParams } from "./agent-runner-execution.test-support
 
 const state = await setupAgentRunnerExecutionTestState();
 
+function createCliFollowupRun() {
+  const followupRun = createFollowupRun();
+  followupRun.run.provider = "claude-cli";
+  followupRun.run.model = "claude-sonnet-4-6";
+  state.isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
+  return followupRun;
+}
+
+async function sessionFixture(
+  sessionKey: string,
+  fields: Partial<SessionEntry>,
+  storedBindings = fields.cliSessionBindings,
+) {
+  const storePath = makeTestSessionStorePath();
+  const entry: SessionEntry = { sessionId: "session", updatedAt: 1, ...fields };
+  await replaceSessionEntry(
+    { sessionKey, storePath },
+    { ...entry, cliSessionBindings: storedBindings },
+  );
+  return { storePath, entry, followupRun: createCliFollowupRun() };
+}
+
+function useCliFallback() {
+  state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
+    result: await params.run(
+      "claude-cli",
+      "claude-sonnet-4-6",
+      initialFallbackAttemptOptions(params),
+    ),
+    provider: "claude-cli",
+    model: "claude-sonnet-4-6",
+    attempts: [],
+  }));
+}
+
+function sessionTurn(
+  followupRun: ReturnType<typeof createFollowupRun>,
+  sessionKey: string,
+  storePath: string,
+  entry: SessionEntry,
+) {
+  return {
+    ...createMinimalRunAgentTurnParams({ followupRun }),
+    sessionKey,
+    storePath,
+    activeSessionStore: { [sessionKey]: entry },
+    getActiveSessionEntry: () => entry,
+  };
+}
+
 function rejectUnexpectedCompactionSuccessor(): never {
   throw new Error("Unexpected compaction successor during CLI admission test");
 }
@@ -39,29 +89,12 @@ function rejectUnexpectedCompactionSuccessor(): never {
 describe("executeAgentTurn: CLI admission", () => {
   it("reads cold CLI fallback metadata while another connection holds a shared-state write transaction", async () => {
     const sessionKey = "agent:main:cli-read-contention";
-    const storePath = makeTestSessionStorePath();
     const binding = { sessionId: "existing-native-session" };
-    const entry: SessionEntry = {
-      sessionId: "session",
-      updatedAt: 1,
+    const { storePath, entry, followupRun } = await sessionFixture(sessionKey, {
       lifecycleRevision: "current",
       cliSessionBindings: { "claude-cli": binding },
-    };
-    await replaceSessionEntry({ sessionKey, storePath }, entry);
-    const followupRun = createFollowupRun();
-    followupRun.run.provider = "claude-cli";
-    followupRun.run.model = "claude-sonnet-4-6";
-    state.isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
-    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
-      result: await params.run(
-        "claude-cli",
-        "claude-sonnet-4-6",
-        initialFallbackAttemptOptions(params),
-      ),
-      provider: "claude-cli",
-      model: "claude-sonnet-4-6",
-      attempts: [],
-    }));
+    });
+    useCliFallback();
     let holder: DatabaseSync | undefined;
     state.runCliAgentMock.mockImplementationOnce(async () => {
       expect(holder?.isTransaction).toBe(true);
@@ -94,13 +127,7 @@ describe("executeAgentTurn: CLI admission", () => {
     });
     try {
       const executeAgentTurn = await getExecuteAgentTurnForTest();
-      const result = await executeAgentTurn({
-        ...createMinimalRunAgentTurnParams({ followupRun }),
-        sessionKey,
-        storePath,
-        activeSessionStore: { [sessionKey]: entry },
-        getActiveSessionEntry: () => entry,
-      });
+      const result = await executeAgentTurn(sessionTurn(followupRun, sessionKey, storePath, entry));
       expect(result).toMatchObject({
         kind: "success",
         runResult: { payloads: [{ text: "done" }] },
@@ -133,34 +160,22 @@ describe("executeAgentTurn: CLI admission", () => {
         : kind === "heartbeat"
           ? "global"
           : "agent:main:cli-binding-settlement";
-    const storePath = makeTestSessionStorePath();
-    const entry: SessionEntry = {
-      sessionId: "session",
-      updatedAt: 1,
-      ...(kind === "revised" ? { lifecycleRevision: "original" } : {}),
-    };
     const rejected = kind === "rejected" || kind === "rejected-clear";
     const revisionChanged = kind === "revised" || kind === "revision-established";
     const placementRetired = kind === "retired-placement";
     const binding = { sessionId: "admitted-native-session", authProfileId: "anthropic:cli" };
     const settledBinding = { ...binding, sessionId: "settled-native-session" };
-    await replaceSessionEntry(
-      { sessionKey, storePath },
-      {
-        ...entry,
-        cliSessionBindings: { "claude-cli": binding },
-      },
+    const { storePath, entry, followupRun } = await sessionFixture(
+      sessionKey,
+      kind === "revised" ? { lifecycleRevision: "original" } : {},
+      { "claude-cli": binding },
     );
-    const followupRun = createFollowupRun();
-    followupRun.run.provider = "claude-cli";
-    followupRun.run.model = "claude-sonnet-4-6";
     if (kind === "preserved") {
       followupRun.run.inputProvenance = {
         kind: "inter_session",
         sourceTool: "exec_approval_followup",
       };
     }
-    state.isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
     state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
       const first = await params.run(
         "claude-cli",
@@ -243,12 +258,8 @@ describe("executeAgentTurn: CLI admission", () => {
     try {
       const executeAgentTurn = await getExecuteAgentTurnForTest();
       const result = await executeAgentTurn({
-        ...createMinimalRunAgentTurnParams({ followupRun }),
-        sessionKey,
-        storePath,
+        ...sessionTurn(followupRun, sessionKey, storePath, entry),
         isHeartbeat: kind === "heartbeat",
-        activeSessionStore: { [sessionKey]: entry },
-        getActiveSessionEntry: () => entry,
       });
       if (revisionChanged || placementRetired) {
         expect(result.kind).toBe("final");
@@ -279,7 +290,6 @@ describe("executeAgentTurn: CLI admission", () => {
     "honors a forked child's one-shot marker and current owner (%s)",
     async (operation) => {
       const sessionKey = "agent:main:cli-fork-child";
-      const storePath = makeTestSessionStorePath();
       const parentBinding = {
         sessionId: "parent-native-session",
         resumeCheckpointId: "parent-checkpoint",
@@ -288,16 +298,9 @@ describe("executeAgentTurn: CLI admission", () => {
       const controller = new AbortController();
       const abortError = new DOMException("fork cancelled", "AbortError");
       const successorBinding = { sessionId: "child-native-session" };
-      const entry: SessionEntry = {
-        sessionId: "session",
-        updatedAt: 1,
+      const { storePath, entry, followupRun } = await sessionFixture(sessionKey, {
         cliSessionBindings: { "claude-cli": parentBinding },
-      };
-      await replaceSessionEntry({ sessionKey, storePath }, entry);
-      const followupRun = createFollowupRun();
-      followupRun.run.provider = "claude-cli";
-      followupRun.run.model = "claude-sonnet-4-6";
-      state.isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
+      });
       cliBackendsTesting.setDepsForTest({
         resolvePluginSetupCliBackend: () => undefined,
         resolveRuntimeCliBackends: () => [
@@ -309,18 +312,7 @@ describe("executeAgentTurn: CLI admission", () => {
           },
         ],
       });
-      state.runWithModelFallbackMock.mockImplementationOnce(
-        async (params: FallbackRunnerParams) => ({
-          result: await params.run(
-            "claude-cli",
-            "claude-sonnet-4-6",
-            initialFallbackAttemptOptions(params),
-          ),
-          provider: "claude-cli",
-          model: "claude-sonnet-4-6",
-          attempts: [],
-        }),
-      );
+      useCliFallback();
       const readBinding = () =>
         loadSessionEntry({ sessionKey, storePath })?.cliSessionBindings?.["claude-cli"];
       state.runCliAgentMock.mockImplementationOnce(async (params: RunCliAgentParams) => {
@@ -370,14 +362,8 @@ describe("executeAgentTurn: CLI admission", () => {
       try {
         const executeAgentTurn = await getExecuteAgentTurnForTest();
         const result = await executeAgentTurn({
-          ...createMinimalRunAgentTurnParams({
-            followupRun,
-            opts: { abortSignal: controller.signal },
-          }),
-          sessionKey,
-          storePath,
-          activeSessionStore: { [sessionKey]: entry },
-          getActiveSessionEntry: () => entry,
+          ...sessionTurn(followupRun, sessionKey, storePath, entry),
+          opts: { abortSignal: controller.signal },
         });
         expect(state.runCliAgentMock).toHaveBeenCalledTimes(1);
         if (operation !== "success") {
@@ -398,21 +384,13 @@ describe("executeAgentTurn: CLI admission", () => {
     "retains the %s reply after its continuity write loses ownership",
     async (kind) => {
       const sessionKey = "agent:main:cli-owner-loss";
-      const storePath = makeTestSessionStorePath();
       const binding = { sessionId: "previous-native-session" };
-      const entry: SessionEntry = {
-        sessionId: "session",
-        updatedAt: 1,
+      const { storePath, entry, followupRun } = await sessionFixture(sessionKey, {
         cliSessionBindings: { "claude-cli": binding },
-      };
-      await replaceSessionEntry({ sessionKey, storePath }, entry);
-      const followupRun = createFollowupRun();
-      followupRun.run.provider = "claude-cli";
-      followupRun.run.model = "claude-sonnet-4-6";
+      });
       if (kind === "room-event") {
         followupRun.currentInboundEventKind = "room_event";
       }
-      state.isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
       const context = buildPreparedCliRunContext();
       const output = {
         text: kind === "rejected-clear" ? GENERIC_EXTERNAL_RUN_FAILURE_TEXT : "Captured reply",
@@ -464,13 +442,7 @@ describe("executeAgentTurn: CLI admission", () => {
       );
       try {
         const executeAgentTurn = await getExecuteAgentTurnForTest();
-        await executeAgentTurn({
-          ...createMinimalRunAgentTurnParams({ followupRun }),
-          sessionKey,
-          storePath,
-          activeSessionStore: { [sessionKey]: entry },
-          getActiveSessionEntry: () => entry,
-        });
+        await executeAgentTurn(sessionTurn(followupRun, sessionKey, storePath, entry));
         expect(state.runCliAgentMock).toHaveBeenCalledOnce();
         expect(state.runEmbeddedAgentMock).not.toHaveBeenCalled();
         expect(
@@ -484,17 +456,7 @@ describe("executeAgentTurn: CLI admission", () => {
   );
 
   it("carries the admitted session permission and placement into the CLI grant", async () => {
-    state.isCliProviderMock.mockReturnValue(true);
-    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
-      result: await params.run(
-        "claude-cli",
-        "claude-sonnet-4-6",
-        initialFallbackAttemptOptions(params),
-      ),
-      provider: "claude-cli",
-      model: "claude-sonnet-4-6",
-      attempts: [],
-    }));
+    useCliFallback();
     let sessionEntry: SessionEntry = {
       sessionId: "session",
       updatedAt: 1,
@@ -597,9 +559,8 @@ describe("executeAgentTurn: CLI admission", () => {
       expect(nodeInvoke).toHaveBeenCalledOnce();
       return { payloads: [{ text: "done" }], meta: {} };
     });
-    const followupRun = createFollowupRun();
-    followupRun.run.provider = "claude-cli";
-    followupRun.run.model = "claude-sonnet-4-6";
+    const followupRun = createCliFollowupRun();
+    state.isCliProviderMock.mockReturnValue(true);
     const restoreAdmission = installSessionPlacementAdmissionProvider({
       assertCompactionSuccessorAllowed: rejectUnexpectedCompactionSuccessor,
       executeLocalTurn: async (_claim, runLocal) => {

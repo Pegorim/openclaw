@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { FailoverError } from "../../agents/failover-error.js";
-import type { SessionEntry } from "../../config/sessions.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import type { TemplateContext } from "../templating.js";
 import {
@@ -21,18 +20,24 @@ import type { FallbackRunnerParams } from "./agent-runner-execution.test-support
 const state = await setupAgentRunnerExecutionTestState();
 
 describe("executeAgentTurn: context failures", () => {
-  it("preserves the active session when embedded overflow recovery fails", async () => {
-    state.isContextOverflowErrorMock.mockReturnValue(true);
-    state.runEmbeddedAgentMock.mockResolvedValueOnce({
-      payloads: [],
-      meta: {
-        error: {
-          message: "400 The prompt is too long: 203557, model maximum context length: 196607",
-        },
-      },
-    });
-
-    const activeSessionEntry = { sessionId: "session", updatedAt: 1 } as SessionEntry;
+  it.each([
+    [
+      "embedded overflow recovery",
+      "400 The prompt is too long: 203557, model maximum context length: 196607",
+    ],
+    ["thrown compaction", "Auto-compaction failed: nothing to compact"],
+  ])("preserves the active session when %s fails", async (failure, message) => {
+    if (failure === "thrown compaction") {
+      state.isCompactionFailureErrorMock.mockReturnValue(true);
+      state.runEmbeddedAgentMock.mockRejectedValueOnce(new Error(message));
+    } else {
+      state.isContextOverflowErrorMock.mockReturnValue(true);
+      state.runEmbeddedAgentMock.mockResolvedValueOnce({
+        payloads: [],
+        meta: { error: { message } },
+      });
+    }
+    const activeSessionEntry = { sessionId: "session", updatedAt: 1 };
     const activeSessionStore = { "agent:main:main": activeSessionEntry };
     const followupRun = createFollowupRun();
     followupRun.run.agentId = "main";
@@ -41,10 +46,7 @@ describe("executeAgentTurn: context failures", () => {
     const result = await executeAgentTurn({
       ...createMinimalRunAgentTurnParams({
         followupRun,
-        sessionCtx: {
-          Provider: "webchat",
-          MessageSid: "msg",
-        } as unknown as TemplateContext,
+        sessionCtx: { Provider: "webchat", MessageSid: "msg" },
       }),
       replyOperation,
       sessionKey: "agent:main:main",
@@ -61,56 +63,7 @@ describe("executeAgentTurn: context failures", () => {
         deliverDespiteSourceReplySuppression: true,
       });
     }
-    expect(failMock).toHaveBeenCalledWith(
-      "run_failed",
-      expect.objectContaining({
-        message: "400 The prompt is too long: 203557, model maximum context length: 196607",
-      }),
-    );
-    expect(activeSessionStore["agent:main:main"]?.sessionId).toBe("session");
-    expect(updateSessionIdMock).not.toHaveBeenCalled();
-    expect(state.updateSessionStoreMock).not.toHaveBeenCalled();
-  });
-
-  it("preserves the active session when compaction failure is thrown before reply", async () => {
-    state.isCompactionFailureErrorMock.mockReturnValue(true);
-    state.runEmbeddedAgentMock.mockRejectedValueOnce(
-      new Error("Auto-compaction failed: nothing to compact"),
-    );
-
-    const activeSessionEntry = { sessionId: "session", updatedAt: 1 } as SessionEntry;
-    const activeSessionStore = { "agent:main:main": activeSessionEntry };
-    const followupRun = createFollowupRun();
-    followupRun.run.agentId = "main";
-    const { replyOperation, failMock, updateSessionIdMock } = createMockReplyOperation();
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
-    const result = await executeAgentTurn({
-      ...createMinimalRunAgentTurnParams({
-        followupRun,
-        sessionCtx: {
-          Provider: "webchat",
-          MessageSid: "msg",
-        } as unknown as TemplateContext,
-      }),
-      replyOperation,
-      sessionKey: "agent:main:main",
-      getActiveSessionEntry: () => activeSessionEntry,
-      activeSessionStore,
-      storePath: makeTestSessionStorePath(),
-    });
-
-    expect(result.kind).toBe("final");
-    if (result.kind === "final") {
-      expect(result.payload.text).toContain("kept this conversation mapped to the current session");
-      expect(result.payload.text).toContain("fresh session or using a model");
-      expectRecordFields(requireRecord(getReplyPayloadMetadata(result.payload), "reply metadata"), {
-        deliverDespiteSourceReplySuppression: true,
-      });
-    }
-    expect(failMock).toHaveBeenCalledWith(
-      "run_failed",
-      expect.objectContaining({ message: "Auto-compaction failed: nothing to compact" }),
-    );
+    expect(failMock).toHaveBeenCalledWith("run_failed", expect.objectContaining({ message }));
     expect(activeSessionStore["agent:main:main"]?.sessionId).toBe("session");
     expect(updateSessionIdMock).not.toHaveBeenCalled();
     expect(state.updateSessionStoreMock).not.toHaveBeenCalled();
