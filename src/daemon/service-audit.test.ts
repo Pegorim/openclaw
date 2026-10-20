@@ -20,6 +20,12 @@ import {
 import { seedCompletedRuntimePinMigration } from "./test-helpers/service-audit-runtime-pin.js";
 
 type AuditOptions = Parameters<typeof inspectGatewayServiceConfig>[0];
+type Audit = Awaited<ReturnType<typeof inspectGatewayServiceConfig>>;
+const findIssue = (result: Audit, code: string) =>
+  result.issues.find((entry) => entry.code === code);
+function expectIssue(result: Audit, code: string, fields: Record<string, unknown>) {
+  expect(findIssue(result, code)).toMatchObject({ code, ...fields });
+}
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 let runtimePinStateDir: string;
 beforeEach(() => {
@@ -96,17 +102,12 @@ describe("auditGatewayServiceConfig runtime", () => {
         sqliteSelectionError,
       });
       const result = await auditBun();
-      expect(result.issues).toContainEqual(
-        expect.objectContaining({
-          code: codes.gatewayRuntimeBun,
-          message: expect.stringContaining(
-            "Bun 1.4.3+ with WAL-reset-safe node:sqlite is required",
-          ),
-          detail: sqliteSelectionError
-            ? `/opt/homebrew/bin/bun: ${sqliteSelectionError}`
-            : "/opt/homebrew/bin/bun",
-        }),
-      );
+      expectIssue(result, codes.gatewayRuntimeBun, {
+        message: expect.stringContaining("Bun 1.4.3+ with WAL-reset-safe node:sqlite is required"),
+        detail: sqliteSelectionError
+          ? `/opt/homebrew/bin/bun: ${sqliteSelectionError}`
+          : "/opt/homebrew/bin/bun",
+      });
     },
   );
 
@@ -114,12 +115,7 @@ describe("auditGatewayServiceConfig runtime", () => {
     const error = new Error("Bun runtime probe failed at /opt/bun (cwd /root): EACCES");
     resolveBunRuntimeInfoMock.mockResolvedValue({ status: "probe-failed", error });
     const result = await auditBun();
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        code: codes.gatewayRuntimeProbeFailed,
-        detail: error.message,
-      }),
-    );
+    expectIssue(result, codes.gatewayRuntimeProbeFailed, { detail: error.message });
     expect(needsNodeRuntimeMigration(result.issues)).toBe(false);
     expect(hasIssue(result, codes.gatewayRuntimeBun)).toBe(false);
   });
@@ -136,13 +132,10 @@ describe("auditGatewayServiceConfig runtime", () => {
       capabilityError,
     });
     const result = await audit();
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        code: codes.gatewayRuntimeNode,
-        message: capabilityError,
-        detail: "/usr/bin/node",
-      }),
-    );
+    expectIssue(result, codes.gatewayRuntimeNode, {
+      message: capabilityError,
+      detail: "/usr/bin/node",
+    });
     expect(needsNodeRuntimeMigration(result.issues)).toBe(true);
   });
 
@@ -171,12 +164,7 @@ describe("auditGatewayServiceConfig runtime", () => {
       { HOME: "/tmp", OPENCLAW_STATE_DIR: runtimePinStateDir },
       1234,
     );
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        code: codes.gatewayRuntimeProbeFailed,
-        detail: error.message,
-      }),
-    );
+    expectIssue(result, codes.gatewayRuntimeProbeFailed, { detail: error.message });
     expect(needsNodeRuntimeMigration(result.issues)).toBe(false);
   });
 });
@@ -193,9 +181,9 @@ describe("auditGatewayServiceConfig PATH", () => {
     );
     expect(hasIssue(result, codes.gatewayRuntimeNodeVersionManager)).toBe(true);
     expect(hasIssue(result, codes.gatewayPathNonMinimal)).toBe(true);
-    const issue = result.issues.find((entry) => entry.code === codes.gatewayPathMissingDirs);
-    expect(issue?.message).toContain("/opt/homebrew/bin");
-    expect(issue?.message).toContain("/opt/homebrew/sbin");
+    const missing = findIssue(result, codes.gatewayPathMissingDirs);
+    expect(missing?.message).toContain("/opt/homebrew/bin");
+    expect(missing?.message).toContain("/opt/homebrew/sbin");
   });
 
   it("allows the expected active bin while rejecting unrelated manager paths", async () => {
@@ -217,9 +205,7 @@ describe("auditGatewayServiceConfig PATH", () => {
       { env, platform: "darwin", expectedServicePath },
     );
     expect(hasIssue(result, codes.gatewayPathMissingDirs)).toBe(false);
-    expect(result.issues.find((entry) => entry.code === codes.gatewayPathNonMinimal)?.detail).toBe(
-      "/Users/testuser/.asdf/shims",
-    );
+    expectIssue(result, codes.gatewayPathNonMinimal, { detail: "/Users/testuser/.asdf/shims" });
   });
 
   it.each(["current/bin", "aliases/default/bin"])(
@@ -296,12 +282,9 @@ describe("auditGatewayServiceConfig environment sources", () => {
         },
       },
     );
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        code: "gateway-egress-proxy-env-embedded",
-        environmentKeys: ["NODE_EXTRA_CA_CERTS"],
-      }),
-    );
+    expectIssue(result, "gateway-egress-proxy-env-embedded", {
+      environmentKeys: ["NODE_EXTRA_CA_CERTS"],
+    });
     expect(result.definitionDrift).toContainEqual(
       expect.objectContaining({
         kind: "outdated",
@@ -352,8 +335,8 @@ describe("auditGatewayServiceConfig environment sources", () => {
       expect(hasIssue(result, codes.gatewayTokenEmbedded)).toBe(embedded);
       expect(hasIssue(result, codes.gatewayTokenMismatch)).toBe(mismatch);
       expect(hasIssue(result, codes.gatewayPasswordEmbedded)).toBe(embedded);
-      const managed = result.issues.find((entry) => entry.code === codes.gatewayManagedEnvEmbedded);
-      const proxy = result.issues.find((entry) => entry.code === codes.gatewayProxyEnvEmbedded);
+      const managed = findIssue(result, codes.gatewayManagedEnvEmbedded);
+      const proxy = findIssue(result, codes.gatewayProxyEnvEmbedded);
       if (embedded) {
         expect(managed?.environmentKeys).toEqual(["OPENROUTER_API_KEY", "TAVILY_API_KEY"]);
         expect(proxy?.environmentKeys).toEqual([
@@ -509,9 +492,7 @@ describe("auditGatewayServiceConfig systemd", () => {
       platform: "linux",
       command: null,
     });
-    expect(
-      result.issues.find((entry) => entry.code === codes.systemdUnitBackupUnsafe),
-    ).toMatchObject({
+    expectIssue(result, codes.systemdUnitBackupUnsafe, {
       level: "recommended",
       detail: expect.stringContaining("OPENCLAW_GATEWAY_PASSWORD, OPENCLAW_GATEWAY_TOKEN"),
     });
@@ -528,9 +509,7 @@ describe("auditGatewayServiceConfig systemd", () => {
     await fs.writeFile(`${unitPath}.bak`, "Environment=OPERATOR_SETTING=kept\n");
     await fs.chmod(`${unitPath}.bak`, 0o644);
     const result = await auditUnit();
-    expect(
-      result.issues.find((entry) => entry.code === codes.systemdUnitBackupUnsafe),
-    ).toMatchObject({
+    expectIssue(result, codes.systemdUnitBackupUnsafe, {
       level: "recommended",
       detail: expect.stringContaining("mode: 644"),
     });
