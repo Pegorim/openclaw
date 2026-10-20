@@ -10,7 +10,7 @@ import {
 } from "../../lib/chat/control-ui-database.runtime.ts";
 import { collectGarbageForTest } from "../../test-helpers/garbage-collection.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
-import { cacheChatBoardSnapshot } from "./chat-board-snapshot.ts";
+import { cacheChatBoardSnapshotAfterHydration } from "./chat-board-snapshot.ts";
 import { MAX_CACHED_CHAT_SESSIONS } from "./session-cache.ts";
 import {
   appendChatMessageToCache,
@@ -187,7 +187,13 @@ describe("persistent chat session snapshots", () => {
         receivedAtMs: 100,
       },
     });
-    cacheChatBoardSnapshot(memory, snapshotHost, { sessionKey: rawKey(sessionKey) }, null);
+    cacheChatBoardSnapshotAfterHydration(
+      { ...snapshotHost, chatMessagesBySession: memory },
+      { sessionKey: rawKey(sessionKey) },
+      null,
+      100,
+      () => true,
+    );
     await store.flush();
     expect((await new SessionSnapshotStore().read(sessionKey))?.board).toBeNull();
   });

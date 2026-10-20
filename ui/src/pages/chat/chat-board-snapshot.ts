@@ -1,5 +1,4 @@
 import { chatHistoryRequests } from "./chat-history-state.ts";
-import type { ChatPageHost } from "./chat-state-host.ts";
 import {
   cacheChatSessionSnapshot,
   readChatSessionSnapshot,
@@ -10,12 +9,12 @@ import {
 type ChatMessageCacheHost = Parameters<typeof cacheChatSessionSnapshot>[1];
 type ChatMessageCacheTarget = Parameters<typeof cacheChatSessionSnapshot>[2];
 
-export function cacheChatBoardSnapshot(
+function cacheChatBoardSnapshot(
   cache: ChatMessageCache,
   host: ChatMessageCacheHost,
   target: ChatMessageCacheTarget,
   snapshot: unknown,
-  receivedAtMs = Date.now(),
+  receivedAtMs: number,
 ): void {
   const existing = readChatSessionSnapshot(cache, host, target);
   if (snapshot !== null ? existing?.board?.snapshot === snapshot : existing?.board === null) {
@@ -28,7 +27,7 @@ export function cacheChatBoardSnapshot(
 }
 
 export function cacheChatBoardSnapshotAfterHydration(
-  host: ChatPageHost,
+  host: ChatMessageCacheHost & { chatMessagesBySession: ChatMessageCache },
   target: ChatMessageCacheTarget,
   snapshot: unknown,
   receivedAtMs: number,
