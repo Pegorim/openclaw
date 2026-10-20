@@ -81,18 +81,13 @@ allowed_sandbox_modes = ["read-only", "danger-full-access"]`,
     expect(withMcpElicitationsApprovalPolicy(runtime.approvalPolicy)).toBe("untrusted");
   });
 
-  it.each([
-    {
-      name: "configured path",
-      options: { requirementsPath: "/custom/codex/requirements.toml" },
-      expected: "/custom/codex/requirements.toml",
-    },
-    {
-      name: "Windows ProgramData path",
-      options: { platform: "win32" as const, env: { ProgramData: "D:\\ManagedData" } },
-      expected: "D:\\ManagedData\\OpenAI\\Codex\\requirements.toml",
-    },
-  ])("reads local requirements from the $name", ({ options, expected }) => {
+  it.each<[Omit<NonNullable<RuntimeParams>, "pluginConfig">, string]>([
+    [{ requirementsPath: "/custom/codex/requirements.toml" }, "/custom/codex/requirements.toml"],
+    [
+      { platform: "win32", env: { ProgramData: "D:\\ManagedData" } },
+      "D:\\ManagedData\\OpenAI\\Codex\\requirements.toml",
+    ],
+  ])("reads local requirements with %j", (options, expected) => {
     const readPaths: string[] = [];
     const runtime = resolveCodexAppServerRuntimeOptions({
       pluginConfig: {},

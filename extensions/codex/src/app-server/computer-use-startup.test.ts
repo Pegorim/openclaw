@@ -29,6 +29,7 @@ describe.each(["service", "cache"])("createIsolatedCodexAppServerClient %s refre
   });
 
   it("refreshes the managed artifacts before startup", async () => {
+    const inspection = { platform: "darwin" as const, inspectServiceApp: inspectServiceFixture };
     const root = tempDirs.make("openclaw-computer-use-startup-");
     const agentDir = path.join(root, "agent");
     const codexHome = path.join(agentDir, "codex-home");
@@ -67,23 +68,20 @@ describe.each(["service", "cache"])("createIsolatedCodexAppServerClient %s refre
       },
     ]);
     vi.spyOn(service, "resolveCodexComputerUseServiceAppSourcePath").mockImplementation((params) =>
-      resolveServiceSource({
-        ...params,
-        platform: "darwin",
-        inspectServiceApp: inspectServiceFixture,
-      }),
+      resolveServiceSource({ ...params, ...inspection }),
     );
     vi.spyOn(service, "ensureCodexComputerUseServiceApp").mockImplementation((params) =>
       ensureService({
         ...params,
-        platform: "darwin",
-        inspectServiceApp: inspectServiceFixture,
+        ...inspection,
         copyServiceApp: (source, target) => fs.cp(source, target, { recursive: true }),
       }),
     );
 
-    const selected = { epoch: 1, fingerprint: "desktop-original" };
-    vi.spyOn(generation, "waitForCodexDesktopGeneration").mockResolvedValue(selected);
+    vi.spyOn(generation, "waitForCodexDesktopGeneration").mockResolvedValue({
+      epoch: 1,
+      fingerprint: "desktop-original",
+    });
 
     let initializations = 0;
     const harness = createClientHarness({

@@ -54,6 +54,7 @@ describe("managed unified Computer Use marketplace", () => {
     codexHome: string,
     installed: boolean,
     config: () => object,
+    computerUse: CodexPluginConfig["computerUse"] = {},
     afterRequest?: (method: string) => void,
   ) {
     const { client } = createClientHarness();
@@ -77,13 +78,18 @@ describe("managed unified Computer Use marketplace", () => {
       afterRequest?.(method);
       return result;
     });
-    return { client, request };
+    return {
+      client,
+      request,
+      agentDir: path.dirname(codexHome),
+      pluginConfig: { computerUse: { enabled: true, ...computerUse } },
+    };
   }
 
   it.each(["stale", "disabled"])(
     "reconciles an installed unified cache during automatic readiness (%s)",
     async (cacheState) => {
-      const { agentDir, codexHome, params: marketplaceParams } = await fixture();
+      const { codexHome, params: marketplaceParams } = await fixture();
       const marketplace = await publishMarketplace(marketplaceParams);
       const source = unifiedPluginPath(marketplace);
       const cache = path.join(codexHome, "plugins/cache/openai-bundled/unified-computer-use/2.0.0");
@@ -95,30 +101,19 @@ describe("managed unified Computer Use marketplace", () => {
       await writeJson(path.join(cache, ".mcp.json"), stale);
       const before = await fs.lstat(cache);
       const beforeMcp = await fs.readFile(path.join(cache, ".mcp.json"), "utf8");
-      const { client, request } = nativeClient(codexHome, true, () => ({
-        plugins: { "computer-use@openai-bundled": { enabled: cacheState !== "disabled" } },
-      }));
-      const params = {
-        client,
-        request,
-        agentDir,
-        pluginConfig: {
-          computerUse: {
-            enabled: true,
-            autoInstall: true,
-            pluginCacheMode: "shared",
-            strictReadiness: false,
-          },
-        } satisfies CodexPluginConfig,
-      };
+      const params = nativeClient(
+        codexHome,
+        true,
+        () => nativePolicy({ enabled: cacheState !== "disabled" }),
+        { autoInstall: true, pluginCacheMode: "shared", strictReadiness: false },
+      );
       if (cacheState === "disabled") {
         await expectSetupErrorStatus(ensureComputerUse(params), disabledStatus);
       } else {
         await expect(ensureComputerUse(params)).resolves.toMatchObject({ ready: true });
       }
       const after = await fs.lstat(cache);
-      expect(after.isDirectory()).toBe(true);
-      expect(after.isSymbolicLink()).toBe(false);
+      expect([after.isDirectory(), after.isSymbolicLink()]).toEqual([true, false]);
       expect(await fs.readFile(path.join(cache, ".mcp.json"), "utf8")).toBe(
         cacheState === "disabled" ? beforeMcp : currentMcp,
       );
@@ -128,7 +123,7 @@ describe("managed unified Computer Use marketplace", () => {
         expect(await fs.readFile(path.join(cache, ".mcp.json"), "utf8")).toBe(currentMcp);
       }
       expect((await fs.lstat(cache)).ino).toBe(cacheState === "stale" ? after.ino : before.ino);
-      const methods = vi.mocked(request).mock.calls.map(([method]) => method);
+      const methods = vi.mocked(params.request).mock.calls.map(([method]) => method);
       expect(methods).not.toContain("plugin/install");
       if (cacheState === "disabled") {
         expect(methods).not.toContain("mcpServerStatus/list");
@@ -172,15 +167,8 @@ describe("managed unified Computer Use marketplace", () => {
         path.join(candidate.bundledMarketplacePath, "plugins", "browser-use"),
       );
       await expect(ensureMarketplace(params)).resolves.toBe(target);
-      const { client, request } = nativeClient(codexHome, true, () => ({}));
-      await expect(
-        ensureComputerUse({
-          client,
-          request,
-          agentDir: path.dirname(codexHome),
-          pluginConfig: { computerUse: { enabled: true, pluginName: "computer-use" } },
-        }),
-      ).resolves.toMatchObject({
+      const native = nativeClient(codexHome, true, () => ({}), { pluginName: "computer-use" });
+      await expect(ensureComputerUse(native)).resolves.toMatchObject({
         ready: true,
         pluginName: "unified-computer-use",
         mcpServerName: "cua_repl",
@@ -213,16 +201,15 @@ describe("managed unified Computer Use marketplace", () => {
   ] as const)(
     "$action with autoInstall=$autoInstall and native disable at $disableAt (installed=$installed)",
     async ({ action, autoInstall, disableAt, installed }) => {
-      const { agentDir, codexHome, params: marketplaceParams } = await fixture();
+      const { codexHome, params: marketplaceParams } = await fixture();
       await publishMarketplace(marketplaceParams);
       let nativeDisabled = disableAt === "initial";
       let installing = false;
-      const { client, request } = nativeClient(
+      const params = nativeClient(
         codexHome,
         installed,
-        () => ({
-          plugins: { "computer-use@openai-bundled": { enabled: !nativeDisabled } },
-        }),
+        () => nativePolicy({ enabled: !nativeDisabled }),
+        { autoInstall },
         (method) => {
           if (method === "experimentalFeature/enablement/set") {
             installing = true;
@@ -232,12 +219,6 @@ describe("managed unified Computer Use marketplace", () => {
           }
         },
       );
-      const params = {
-        client,
-        request,
-        agentDir,
-        pluginConfig: { computerUse: { enabled: true, autoInstall } },
-      };
       if (action === "install" || disableAt === "never") {
         await expect(
           action === "install" ? installComputerUse(params) : ensureComputerUse(params),
@@ -248,7 +229,9 @@ describe("managed unified Computer Use marketplace", () => {
           pluginName: "unified-computer-use",
           tools: ["js"],
         });
-        expect(vi.mocked(request).mock.calls.map(([method]) => method)).toContain("plugin/install");
+        expect(vi.mocked(params.request).mock.calls.map(([method]) => method)).toContain(
+          "plugin/install",
+        );
         return;
       }
       if (action === "status") {
@@ -265,7 +248,7 @@ describe("managed unified Computer Use marketplace", () => {
       } else {
         await expectSetupErrorStatus(ensureComputerUse(params), disabledStatus);
       }
-      const methods = vi.mocked(request).mock.calls.map(([method]) => method);
+      const methods = vi.mocked(params.request).mock.calls.map(([method]) => method);
       expect(methods).not.toContain("plugin/install");
       expect(methods).not.toContain("mcpServerStatus/list");
       if (disableAt === "initial") {
@@ -301,7 +284,6 @@ describe("managed unified Computer Use marketplace", () => {
     const siblingSource = "./plugins/new-sibling";
     const siblingManifest = { name: "new-sibling", version: "1.0.0" };
     const sourcePlugin = path.join(candidate.bundledMarketplacePath, siblingSource);
-    await fs.mkdir(path.join(sourcePlugin, ".codex-plugin"), { recursive: true });
     await writeJson(path.join(sourcePlugin, ".codex-plugin", "plugin.json"), siblingManifest);
     const manifestPath = path.join(target, ".agents", "plugins", "marketplace.json");
     const manifest = await readJson(manifestPath);
@@ -322,25 +304,13 @@ describe("managed unified Computer Use marketplace", () => {
 
   it("retains explicit legacy native server and per-tool policy boundaries", () => {
     expect(
-      hasLegacyCodexComputerUseMcpPolicy({ mcp_servers: { "computer-use": { enabled: false } } }),
-    ).toBe(true);
-    expect(
-      hasLegacyCodexComputerUseMcpPolicy({
-        plugins: {
-          "computer-use@openai-bundled": {
-            mcp_servers: { "computer-use": { enabled_tools: ["list_apps"] } },
-          },
-        },
-      }),
-    ).toBe(true);
-    expect(
-      hasLegacyCodexComputerUseMcpPolicy({
-        plugins: { "computer-use@openai-bundled": { enabled: true } },
-      }),
-    ).toBe(false);
-    expect(
-      hasLegacyCodexComputerUseMcpPolicy({ mcp_servers: { cua_repl: { enabled: false } } }),
-    ).toBe(false);
+      [
+        { mcp_servers: { "computer-use": { enabled: false } } },
+        nativePolicy({ mcp_servers: { "computer-use": { enabled_tools: ["list_apps"] } } }),
+        nativePolicy({ enabled: true }),
+        { mcp_servers: { cua_repl: { enabled: false } } },
+      ].map(hasLegacyCodexComputerUseMcpPolicy),
+    ).toEqual([true, true, false, false]);
   });
 
   it("keeps a usable legacy plugin and refuses incomplete replacement assets before publication", async () => {
@@ -386,7 +356,12 @@ async function publishMarketplace(params: Parameters<typeof ensureMarketplace>[0
 }
 
 async function writeJson(file: string, value: unknown, mode?: number) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, JSON.stringify(value), { mode });
+}
+
+function nativePolicy(policy: object) {
+  return { plugins: { "computer-use@openai-bundled": policy } };
 }
 
 async function readJson(file: string) {
@@ -406,7 +381,6 @@ async function writeUnifiedCandidate(
   const bundledMarketplacePath = path.join(resources, "plugins", "openai-bundled");
   const pluginRoot = path.join(bundledMarketplacePath, "plugins");
   const runtimeRoot = path.join(resources, "cua_node");
-  await fs.mkdir(path.join(bundledMarketplacePath, ".agents", "plugins"), { recursive: true });
   const names = ["computer-use", "unified-computer-use", "browser-use"];
   await writeJson(path.join(bundledMarketplacePath, ".agents/plugins/marketplace.json"), {
     name: "openai-bundled",
@@ -416,7 +390,6 @@ async function writeUnifiedCandidate(
     })),
   });
   for (const name of names) {
-    await fs.mkdir(path.join(pluginRoot, name, ".codex-plugin"), { recursive: true });
     await writeJson(path.join(pluginRoot, name, ".codex-plugin/plugin.json"), {
       name,
       version: "2.0.0",

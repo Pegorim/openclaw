@@ -37,9 +37,9 @@ function expectUncollectableSpawn(
   expect(spawn?.description).not.toContain("collect=true");
 }
 
-async function expectCollectionRejected(bridge: ReturnType<typeof createBridge>, callId: string) {
+async function expectCollectionRejected(bridge: ReturnType<typeof createBridge>) {
   const result = await bridge.handleToolCall({
-    callId,
+    callId: "uncollectable",
     threadId: "thread",
     turnId: "turn",
     tool: "sessions_spawn",
@@ -73,15 +73,13 @@ describe("Codex collector availability", () => {
         registeredSpecs: nativeSpecs,
         loading,
       });
-      expect(resumed.specs).toEqual(nativeSpecs);
-      expect(resumed.availableSpecs).toEqual(nativeSpecs);
+      expect([resumed.specs, resumed.availableSpecs]).toEqual([nativeSpecs, nativeSpecs]);
       expect(resumed.availableTools.map((tool) => tool.name)).toEqual(["sessions_spawn"]);
       expectUncollectableSpawn(
         resumed.availableTools.find((tool) => tool.name === "sessions_spawn"),
       );
-      await expectCollectionRejected(resumed, "uncollectable-upgrade");
+      await expectCollectionRejected(resumed);
 
-      // A fresh native registration uses new factory instances and the omitted Swarm default.
       const tools = createCollectorTools();
       const initial = createBridge(tools, { registeredTools: tools, loading });
       const inherited = createBridge(tools, {
@@ -157,6 +155,6 @@ describe("Codex collector availability", () => {
         expect.arrayContaining([expect.objectContaining({ tool: "agents_wait" })]),
       );
     }
-    await expectCollectionRejected(bridge, "uncollectable");
+    await expectCollectionRejected(bridge);
   });
 });
