@@ -29,7 +29,6 @@ import {
 import { getSubagentActivationRuns, subagentRuns } from "../registry/subagent-registry-memory.js";
 import {
   assertSubagentRegistryWriteOutcomeKnown,
-  mutateSubagentRuns,
   restoreSubagentRunsFromDisk,
 } from "../registry/subagent-registry-persistence.js";
 import { loadSubagentRegistryFromSqlite } from "../registry/subagent-registry-state.fixture.test-support.js";
@@ -43,6 +42,7 @@ import {
   currentCompletionRun,
   armRequesterWake,
   settleRequesterCompletionBatch,
+  updateCompletionOwner,
 } from "./subagent-completion-admission.test-helpers.js";
 import {
   admitCorrelatedSubagentSessionDelivery,
@@ -53,8 +53,6 @@ function records() {
   const now = Date.now();
   const subagent = createSubagentRunRecord({
     runId: "completion-run",
-    childSessionKey: "agent:main:subagent:child",
-    requesterSessionKey: "agent:main:main",
     requesterAgentId: "main",
     generation: 1,
     expectsCompletionMessage: true,
@@ -190,11 +188,9 @@ describe("native subagent completion worker admission", () => {
 
   it("commits queue and native owner atomically, then acknowledges replay without rewriting them", async () => {
     await withAdmissionState(async ({ input, database, admit }) => {
-      await mutateSubagentRuns([input.subagent.runId], (rows) => ({
-        value: undefined,
-        postimages: new Map([
-          [input.subagent.runId, { ...rows.get(input.subagent.runId)!, label: "before admission" }],
-        ]),
+      await updateCompletionOwner(input.subagent.runId, (current) => ({
+        ...current,
+        label: "before admission",
       }));
       const result = await admit();
       expect(result).toMatchObject({
@@ -221,13 +217,11 @@ describe("native subagent completion worker admission", () => {
       expect(
         database.db.prepare("SELECT COUNT(*) AS count FROM delivery_queue_entries").get()?.count,
       ).toBe(1);
-      const updateAcknowledged = vi.fn((rows: ReadonlyMap<string, typeof input.subagent>) => ({
-        value: undefined,
-        postimages: new Map([
-          [input.subagent.runId, { ...rows.get(input.subagent.runId)!, label: "after replay" }],
-        ]),
+      const updateAcknowledged = vi.fn((current: typeof input.subagent) => ({
+        ...current,
+        label: "after replay",
       }));
-      await mutateSubagentRuns([input.subagent.runId], updateAcknowledged);
+      await updateCompletionOwner(input.subagent.runId, updateAcknowledged);
       expect(updateAcknowledged).toHaveBeenCalledOnce();
       expect(readSubagentRun(database, input.subagent.runId)).toMatchObject({
         label: "after replay",
@@ -334,13 +328,9 @@ describe("native subagent completion worker admission", () => {
           if (command.type === "sessionDelivery.admitSubagentCompletion") {
             crossed = true;
             if (change === "replacement" || change === "metadata successor") {
-              successor = mutateSubagentRuns(
-                [input.expected.runId],
-                (rows) => {
-                  const current = expectDefined(
-                    rows.get(input.expected.runId),
-                    "admitted successor predecessor",
-                  );
+              successor = updateCompletionOwner(
+                input.expected.runId,
+                (current) => {
                   expect(current.delivery?.status).toBe("in_progress");
                   const next = structuredClone(current);
                   if (change === "replacement") {
@@ -349,7 +339,7 @@ describe("native subagent completion worker admission", () => {
                   } else {
                     next.task = "metadata updated after completion admission";
                   }
-                  return { value: undefined, postimages: new Map([[next.runId, next]]) };
+                  return next;
                 },
                 { context },
               );
@@ -469,8 +459,8 @@ it("settles a requester cohort after concurrently admitted children complete", a
       return receipt;
     });
     const completions = inputs.map(({ subagent }, index) =>
-      mutateSubagentRuns([subagent.runId], (rows) => {
-        const next = structuredClone(rows.get(subagent.runId)!);
+      updateCompletionOwner(subagent.runId, (current) => {
+        const next = structuredClone(current);
         next.execution = {
           ...next.execution,
           status: "terminal",
@@ -482,7 +472,7 @@ it("settles a requester cohort after concurrently admitted children complete", a
           resultText: `child result ${index}`,
           capturedAt: Date.now(),
         };
-        return { value: undefined, postimages: new Map([[next.runId, next]]) };
+        return next;
       }),
     );
     const settled = settleRequesterCompletionBatch({
@@ -496,28 +486,25 @@ it("settles a requester cohort after concurrently admitted children complete", a
       release.resolve();
       await Promise.all(completions);
       await expect(settled).resolves.toEqual({ applied: true, publication: "published" });
-      await mutateSubagentRuns([ids[0]!], (rows) => {
-        const current = rows.get(ids[0]!)!;
-        return {
-          value: undefined,
-          postimages: new Map([[current.runId, { ...current, label: "after batch settlement" }]]),
-        };
-      });
+      await updateCompletionOwner(ids[0]!, (current) => ({
+        ...current,
+        label: "after batch settlement",
+      }));
       const stored = loadSubagentRegistryFromSqlite();
       for (const [index, input] of inputs.entries()) {
         expect(currentCompletionRun(input)).toMatchObject({
           execution: { status: "terminal", outcome: { status: "ok" } },
           delivery: { status: "delivered" },
+          requesterSettleWake: undefined,
         });
         expect(currentCompletionRun(input).completion?.resultText).toBeUndefined();
-        expect(currentCompletionRun(input).requesterSettleWake).toBeUndefined();
         expect(stored.get(input.subagent.runId)).toMatchObject({
           execution: { status: "terminal", outcome: { status: "ok" } },
           completion: { resultText: `child result ${index}` },
           delivery: { status: "delivered" },
+          requesterSettleWake: undefined,
           ...(index === 0 ? { label: "after batch settlement" } : {}),
         });
-        expect(stored.get(input.subagent.runId)?.requesterSettleWake).toBeUndefined();
       }
     } finally {
       release.resolve();

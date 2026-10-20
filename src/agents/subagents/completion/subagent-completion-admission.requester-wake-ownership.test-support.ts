@@ -3,7 +3,6 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabase,
 } from "../../../state/openclaw-state-db.js";
-import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import { loadSubagentRegistryFromSqlite } from "../registry/subagent-registry-state.fixture.test-support.js";
 import {
   armRequesterWake,
@@ -20,10 +19,23 @@ export function registerRequesterWakeOwnershipTests({
   database: () => OpenClawStateDatabase;
   persistOwner: (input: ReturnType<typeof records>) => unknown;
 }) {
+  const stored = (input: ReturnType<typeof records>) =>
+    loadSubagentRegistryFromSqlite().get(input.subagent.runId);
+  const reconcile = (input: ReturnType<typeof records>) => {
+    const database = getDatabase();
+    return runOpenClawStateWriteTransaction(
+      () =>
+        mutateSubagentCompletionInDatabase(database, {
+          kind: "reconcileCancelled",
+          expected: input.subagent,
+          now: Date.now(),
+        }),
+      { database },
+    );
+  };
   it.each(["owner", "incarnation"] as const)(
     "reconciles aged cancellation only with known child ownership (missing: %s)",
     (missing) => {
-      const database = getDatabase();
       const input = failedRecords("cancelled", { status: "error", error: "stopped" });
       const endedAt = Date.now() - 9 * 24 * 60 * 60_000;
       input.subagent.execution.endedAt = endedAt;
@@ -38,19 +50,9 @@ export function registerRequesterWakeOwnershipTests({
         input.subagent.childSessionIdentity = undefined;
       }
       persistOwner(input);
-      const before = loadSubagentRegistryFromSqlite().get(input.subagent.runId);
-
-      const result = runOpenClawStateWriteTransaction(
-        () =>
-          mutateSubagentCompletionInDatabase(database, {
-            kind: "reconcileCancelled",
-            expected: input.subagent,
-            now: Date.now(),
-          }),
-        { database },
-      );
-
-      const after = loadSubagentRegistryFromSqlite().get(input.subagent.runId);
+      const before = stored(input);
+      const result = reconcile(input);
+      const after = stored(input);
       if (missing === "owner") {
         expect(result.records).toEqual([]);
         expect(after).toEqual(before);
@@ -77,27 +79,23 @@ export function registerRequesterWakeOwnershipTests({
       persistOwner(input);
 
       await expect(
-        settleRequesterCompletionBatch({
-          entries: [input.subagent],
+        settleRequesterCompletionBatch({ entries: [input.subagent] }),
+      ).resolves.toMatchObject({
+        applied: true,
+        publication: "published",
+      });
 
-          context: captureOpenClawStateWorkerContext(),
-          assertCurrent: () => {},
-          onCommitted: () => {},
-          onPublished: () => {},
-        }),
-      ).resolves.toMatchObject({ applied: true, publication: "published" });
-
-      const retained = loadSubagentRegistryFromSqlite().get(input.subagent.runId);
+      const retained = stored(input);
       if (requesterTurnRunId) {
         expect(retained).toMatchObject({
           childSessionKey: "global",
           childAgentId: "main",
           requesterTurnRunId,
           retireAfterRequesterTurn: true,
+          requesterSettleWake: undefined,
+          browserCleanupDispatchedAt: undefined,
+          cleanupCompletedAt: undefined,
         });
-        expect(retained?.requesterSettleWake).toBeUndefined();
-        expect(retained?.browserCleanupDispatchedAt).toBeUndefined();
-        expect(retained?.cleanupCompletedAt).toBeUndefined();
       } else {
         expect(retained).toBeUndefined();
       }
