@@ -32,6 +32,38 @@ import { withPreparedSessionEventRow } from "./session-event-prepared-row.js";
 import { getSessionRowProjection } from "./session-row-projection-access.js";
 import { KERNEL_TEST_ENV } from "./test-helpers.env.js";
 
+const gatewayConfig = (port: number, token: string) => ({
+  auth: { mode: "token" as const, token },
+  controlUi: { enabled: false },
+  port,
+});
+const kernelOptions = (token: string) => ({
+  auth: { mode: "token" as const, token },
+  bind: "loopback" as const,
+  controlUiEnabled: false,
+  sidecarStartup: "defer" as const,
+});
+function expectCalls(count: number, ...mocks: Array<(...args: never[]) => unknown>) {
+  for (const mock of mocks) {
+    expect(mock).toHaveBeenCalledTimes(count);
+  }
+}
+
+function createRegisteredChannel(plugin: ChannelPlugin) {
+  const source = "gateway-kernel-test";
+  const registry = createTestRegistry([{ pluginId: plugin.id, plugin, source }]);
+  registry.plugins.push(
+    createPluginRecord({
+      id: plugin.id,
+      source,
+      origin: "bundled",
+      enabled: true,
+      configSchema: false,
+    }),
+  );
+  return registry;
+}
+
 describe("createGatewayKernel", () => {
   it.each([false, true])(
     "starts recovered channels only before close (closing=%s)",
@@ -66,32 +98,13 @@ describe("createGatewayKernel", () => {
         }),
         gateway: { startAccount },
       };
-      const registry = createTestRegistry([
-        {
-          pluginId: channelPlugin.id,
-          plugin: channelPlugin,
-          source: "gateway-kernel-test",
-        },
-      ]);
-      registry.plugins.push(
-        createPluginRecord({
-          id: channelPlugin.id,
-          source: "gateway-kernel-test",
-          origin: "bundled",
-          enabled: true,
-          configSchema: false,
-        }),
-      );
+      const registry = createRegisteredChannel(channelPlugin);
       let kernel: Awaited<ReturnType<typeof createGatewayKernel>> | undefined;
       try {
         stageActivePluginRegistry(registry, null, "default");
         const token = "gateway-kernel-breaker-recovery-token";
         await state.writeConfig({
-          gateway: {
-            auth: { mode: "token", token },
-            controlUi: { enabled: false },
-            port,
-          },
+          gateway: gatewayConfig(port, token),
           channels: {
             telegram: {
               accounts: {
@@ -102,14 +115,11 @@ describe("createGatewayKernel", () => {
         });
         state.applyEnv();
         kernel = await createGatewayKernel(port, {
-          auth: { mode: "token", token },
-          bind: "loopback",
+          ...kernelOptions(token),
           channelAutostartSuppression: {
             reason: "crash-loop-breaker",
             message: "safe mode",
           },
-          controlUiEnabled: false,
-          sidecarStartup: "defer",
           tryRecoverChannelAutostartSuppression: async () => undefined,
         });
 
@@ -188,15 +198,12 @@ describe("createGatewayKernel", () => {
       let pendingPublication: Promise<void> | undefined;
       try {
         await state.writeConfig({
-          gateway: { auth: { mode: "token", token }, controlUi: { enabled: false }, port },
+          gateway: gatewayConfig(port, token),
         });
         state.applyEnv();
         const options = {
           bootId,
-          auth: { mode: "token" as const, token },
-          bind: "loopback" as const,
-          controlUiEnabled: false,
-          sidecarStartup: "defer" as const,
+          ...kernelOptions(token),
           hostLifecycle,
         };
         if (entry === "public") {
@@ -332,15 +339,13 @@ describe("createGatewayKernel", () => {
         await nextTurn();
         expect(startMaintenance).not.toHaveBeenCalled();
         expect(reloadStop).toHaveBeenCalledOnce();
-        expect(terminalDispose).not.toHaveBeenCalled();
-        expect(gatewayStop).not.toHaveBeenCalled();
+        expectCalls(0, terminalDispose, gatewayStop);
         configReloaderStop.resolve();
         await nextTurn();
         expect(reloadSettled).toHaveBeenCalledOnce();
         if (server) {
           // Finishing reload alone must not bypass the other admitted producer.
-          expect(terminalDispose).not.toHaveBeenCalled();
-          expect(gatewayStop).not.toHaveBeenCalled();
+          expectCalls(0, terminalDispose, gatewayStop);
         }
         recoveryStop.resolve();
         await nextTurn();
@@ -361,8 +366,7 @@ describe("createGatewayKernel", () => {
         expect(closeFirstStop).toHaveBeenCalledOnce();
         expect(kernel.runtimeState.discovery).toBeNull();
         if (server) {
-          expect(terminalDispose).toHaveBeenCalledOnce();
-          expect(gatewayStop).toHaveBeenCalledOnce();
+          expectCalls(1, terminalDispose, gatewayStop);
           for (const settled of [reloadSettled, recoverySettled, updateSettled]) {
             expect(settled).toHaveBeenCalledBefore(terminalDispose);
             expect(settled).toHaveBeenCalledBefore(gatewayStop);
@@ -396,21 +400,11 @@ describe("createGatewayKernel", () => {
       },
     });
     const token = "gateway-kernel-deferred-readiness-token";
-    const openKernel = () =>
-      createGatewayKernel(port, {
-        auth: { mode: "token", token },
-        bind: "loopback",
-        controlUiEnabled: false,
-        sidecarStartup: "defer",
-      });
+    const openKernel = () => createGatewayKernel(port, kernelOptions(token));
     let kernel: Awaited<ReturnType<typeof createGatewayKernel>> | undefined;
     try {
       await state.writeConfig({
-        gateway: {
-          auth: { mode: "token", token },
-          controlUi: { enabled: false },
-          port,
-        },
+        gateway: gatewayConfig(port, token),
         agents: {
           ownership: "explicit",
           defaults: { systemAgent: { agentId: "main" } },
@@ -437,10 +431,8 @@ describe("createGatewayKernel", () => {
       };
 
       const getReadiness = kernel.createHttpTransportOptions().getReadiness;
-      expect(getReadiness()).toMatchObject({
-        ready: false,
-        failing: ["startup-sidecars"],
-      });
+      const notReady = { ready: false, failing: ["startup-sidecars"] };
+      expect(getReadiness()).toMatchObject(notReady);
       await expect(
         dispatchGatewayRequestInProcess("chat.send", chatParams, dispatchOptions),
       ).rejects.toThrow("chat.send unavailable during gateway startup");
@@ -453,10 +445,7 @@ describe("createGatewayKernel", () => {
       kernel.kernel.unlockStartupMethods();
       kernel.kernel.markSidecarsReady();
 
-      expect(getReadiness()).toMatchObject({
-        ready: false,
-        failing: ["startup-sidecars"],
-      });
+      expect(getReadiness()).toMatchObject(notReady);
       kernel.kernel.setDispatchReady(true);
       expectCoreAgentDatabaseReadiness(getReadiness, state);
       await expect(
@@ -513,9 +502,7 @@ describe("createGatewayKernel", () => {
       releaseConnectionStop.resolve();
       await vi.waitFor(() => expect(lateConnectionSidecar.stop).toHaveBeenCalledOnce());
       expect(closeTransport).not.toHaveBeenCalled();
-      expect(lifetimeSidecar.stop).not.toHaveBeenCalled();
-      expect(lateGeneralSidecar.stop).not.toHaveBeenCalled();
-      expect(latePostReadySidecar.stop).not.toHaveBeenCalled();
+      expectCalls(0, lifetimeSidecar.stop, lateGeneralSidecar.stop, latePostReadySidecar.stop);
       releaseLateConnectionStop.resolve();
       await vi.waitFor(() => {
         expect(lifetimeSidecar.stop).toHaveBeenCalledOnce();
@@ -539,14 +526,10 @@ describe("createGatewayKernel", () => {
       const lateLifetimeSidecar = { stop: vi.fn(() => lateLifetimeStop) };
       kernel.registerGatewayLifetimeSidecars(lateLifetimeSidecar);
       let closeSettled = false;
-      void closing.then(
-        () => {
-          closeSettled = true;
-        },
-        () => {
-          closeSettled = true;
-        },
-      );
+      const markClosed = () => {
+        closeSettled = true;
+      };
+      void closing.then(markClosed, markClosed);
       releasePostReadyStop();
       await vi.waitFor(() => {
         expect(closePreludeReached).toHaveBeenCalledOnce();
@@ -557,14 +540,17 @@ describe("createGatewayKernel", () => {
       releaseLateLifetimeStop();
       await expect(closing).resolves.toBeUndefined();
       closePreludeReached.mockRestore();
-      expect(lifetimeSidecar.stop).toHaveBeenCalledOnce();
-      expect(trailingSidecar).toHaveBeenCalledOnce();
-      expect(lateGeneralSidecar.stop).toHaveBeenCalledOnce();
-      expect(latePostReadySidecar.stop).toHaveBeenCalledOnce();
-      expect(reentrantSidecar.stop).toHaveBeenCalledOnce();
-      expect(lateSidecar.stop).toHaveBeenCalledOnce();
-      expect(duringSealSidecar.stop).toHaveBeenCalledOnce();
-      expect(postReadySidecar).toHaveBeenCalledOnce();
+      expectCalls(
+        1,
+        lifetimeSidecar.stop,
+        trailingSidecar,
+        lateGeneralSidecar.stop,
+        latePostReadySidecar.stop,
+        reentrantSidecar.stop,
+        lateSidecar.stop,
+        duringSealSidecar.stop,
+        postReadySidecar,
+      );
       expect(kernel.runtimeState.gatewayLifetimeSidecars.snapshot()).toEqual([]);
       expect(kernel.runtimeState.postReadySidecars.snapshot()).toEqual([]);
 
@@ -635,22 +621,7 @@ describe("createGatewayKernel", () => {
       id: "telegram",
       config: { inspectAccount },
     });
-    const ambientRegistry = createTestRegistry([
-      {
-        pluginId: ambientPlugin.id,
-        plugin: ambientPlugin,
-        source: "gateway-kernel-test",
-      },
-    ]);
-    ambientRegistry.plugins.push(
-      createPluginRecord({
-        id: ambientPlugin.id,
-        source: "gateway-kernel-test",
-        origin: "bundled",
-        enabled: true,
-        configSchema: false,
-      }),
-    );
+    const ambientRegistry = createRegisteredChannel(ambientPlugin);
     ambientRegistry.runtimeLifecycles.push({
       pluginId: ambientPlugin.id,
       pluginName: ambientPlugin.meta.label,
@@ -675,21 +646,12 @@ describe("createGatewayKernel", () => {
       state.envVars.OPENCLAW_DIAGNOSTICS_TIMELINE_PATH = timelinePath;
       const token = "gateway-kernel-no-transport-token";
       await state.writeConfig({
-        gateway: {
-          auth: { mode: "token", token },
-          controlUi: { enabled: false },
-          port,
-        },
+        gateway: gatewayConfig(port, token),
       });
       state.applyEnv();
       stageActivePluginRegistry(createEmptyPluginRegistry(), null, "default");
 
-      kernel = await createGatewayKernel(port, {
-        auth: { mode: "token", token },
-        bind: "loopback",
-        controlUiEnabled: false,
-        sidecarStartup: "defer",
-      });
+      kernel = await createGatewayKernel(port, kernelOptions(token));
       expect(loadIdentity).toHaveBeenCalledOnce();
       expect(kernel.transportBridge.current()).toBeUndefined();
       await expect(kernel.transportBridge.ensureSandboxHostPort()).rejects.toThrow(
@@ -834,9 +796,7 @@ describe("createGatewayKernel", () => {
     const token = "gateway-kernel-tls-failure-token";
     await state.writeConfig({
       gateway: {
-        auth: { mode: "token", token },
-        controlUi: { enabled: false },
-        port,
+        ...gatewayConfig(port, token),
         tls: {
           enabled: true,
           autoGenerate: false,
@@ -847,14 +807,9 @@ describe("createGatewayKernel", () => {
     });
     state.applyEnv();
     try {
-      await expect(
-        createGatewayKernel(port, {
-          auth: { mode: "token", token },
-          bind: "loopback",
-          controlUiEnabled: false,
-          sidecarStartup: "defer",
-        }),
-      ).rejects.toThrow("gateway tls: cert/key missing");
+      await expect(createGatewayKernel(port, kernelOptions(token))).rejects.toThrow(
+        "gateway tls: cert/key missing",
+      );
       expect(getActiveSecretsRuntimeConfigSnapshot()).toBeNull();
       expect(getActiveGatewayRootWorkCount()).toBe(0);
     } finally {

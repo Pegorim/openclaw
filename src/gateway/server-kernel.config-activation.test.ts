@@ -17,6 +17,10 @@ import { getFreePort } from "../test-utils/ports.js";
 import { createGatewayKernel } from "./server-kernel.js";
 import { KERNEL_TEST_ENV } from "./test-helpers.env.js";
 
+function expectDeepEqual(actual: unknown, expected: unknown) {
+  expect(isDeepStrictEqual(actual, expected)).toBe(true);
+}
+
 describe("createGatewayKernel", () => {
   it.each(["explicit token", "auth none", "generated token", "tailscale only"] as const)(
     "prepares source activation with captured runtime and %s startup overrides",
@@ -116,28 +120,22 @@ describe("createGatewayKernel", () => {
           sourceConfig,
           previousSourceConfig,
         });
-        expect(candidate.compareConfig.channels).toMatchObject({
-          telegram: { enabled: true, botToken: "source-bot-token" },
+        expect(candidate.compareConfig).toMatchObject({
+          channels: { telegram: { enabled: true, botToken: "source-bot-token" } },
+          logging: { level: "debug", consoleLevel: "silent" },
+          messages: { visibleReplies: "message_tool" },
+          gateway: { port },
         });
-        expect(isDeepStrictEqual(candidate.compareConfig.gateway?.auth, sourceAuth)).toBe(true);
-        expect(candidate.compareConfig.logging).toMatchObject({
-          level: "debug",
-          consoleLevel: "silent",
-        });
-        expect(candidate.compareConfig.messages).toMatchObject({ visibleReplies: "message_tool" });
-        expect(candidate.runtimeConfig.channels).toMatchObject({
-          telegram: { enabled: true, botToken: "materialized-bot-token" },
+        expectDeepEqual(candidate.compareConfig.gateway?.auth, sourceAuth);
+        expect(candidate.runtimeConfig).toMatchObject({
+          channels: { telegram: { enabled: true, botToken: "materialized-bot-token" } },
+          logging: { level: "debug", consoleLevel: "error" },
+          messages: { visibleReplies: "message_tool" },
         });
         if (mode === "explicit token") {
           expect(candidate.runtimeConfig.gateway?.auth?.token === startupToken).toBe(true);
           expect(candidate.runtimeConfig.gateway?.auth?.rateLimit).toEqual({ maxAttempts: 7 });
         }
-        expect(candidate.runtimeConfig.logging).toMatchObject({
-          level: "debug",
-          consoleLevel: "error",
-        });
-        expect(candidate.runtimeConfig.messages).toMatchObject({ visibleReplies: "message_tool" });
-        expect(candidate.compareConfig.gateway?.port).toBe(port);
         expect(sourceConfig.gateway.port).toBe(sourcePort);
         expect(Object.keys(candidate.runtimeConfig.gateway ?? {}).toSorted()).toEqual(
           Object.keys(kernel.cfgAtStart.gateway ?? {}).toSorted(),
@@ -145,25 +143,13 @@ describe("createGatewayKernel", () => {
         expect(Object.keys(candidate.runtimeConfig.gateway?.auth ?? {}).toSorted()).toEqual(
           Object.keys(kernel.cfgAtStart.gateway?.auth ?? {}).toSorted(),
         );
-        expect(isDeepStrictEqual(candidate.runtimeConfig.gateway, kernel.cfgAtStart.gateway)).toBe(
-          true,
-        );
+        expectDeepEqual(candidate.runtimeConfig.gateway, kernel.cfgAtStart.gateway);
         expect(candidate.runtimeEnv.env.OPENCLAW_STATE_DIR).toBe(state.stateDir);
         expect(candidate.runtimeEnv.env.OPENCLAW_CONFIG_PATH).toBe(state.configPath);
         expect(setConfigOverride("messages.visibleReplies", "automatic").ok).toBe(true);
-        expect(
-          isDeepStrictEqual(
-            candidate.reapplyRuntimeOverlays(runtimeConfig),
-            candidate.runtimeConfig,
-          ),
-        ).toBe(true);
-        expect(
-          isDeepStrictEqual(
-            candidate.reapplyCompareOverlays(sourceConfig),
-            candidate.compareConfig,
-          ),
-        ).toBe(true);
-        expect(isDeepStrictEqual(sourceConfig, originalSource)).toBe(true);
+        expectDeepEqual(candidate.reapplyRuntimeOverlays(runtimeConfig), candidate.runtimeConfig);
+        expectDeepEqual(candidate.reapplyCompareOverlays(sourceConfig), candidate.compareConfig);
+        expectDeepEqual(sourceConfig, originalSource);
         expect((await fs.readFile(state.configPath, "utf8")) === persistedBefore).toBe(true);
         if (mode === "generated token") {
           const explicitSourceConfig = {

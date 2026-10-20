@@ -32,16 +32,9 @@ describe("in-process Gateway original execution ownership", () => {
                 throw new Error("local Gateway context was not created");
               }
               const client = createSyntheticPluginRuntimeClient({ scopes: ["operator.admin"] });
+              const options = { client, context, timeoutMs: 1_000 };
               return surface === "raw"
-                ? dispatchGatewayRequestInProcessRaw(
-                    "agent.identity.get",
-                    {},
-                    {
-                      client,
-                      context,
-                      timeoutMs: 1_000,
-                    },
-                  )
+                ? dispatchGatewayRequestInProcessRaw("agent.identity.get", {}, options)
                 : createInternalAgentTurnFacade({ client, getContext: () => context }).dispatchRaw(
                     { message: "refuse closed local work", idempotencyKey: "closed-local-work" },
                     { timeoutMs: 1_000 },
@@ -83,6 +76,7 @@ describe("in-process Gateway original execution ownership", () => {
       const originalCompletion = release.promise.then(() => {
         order.push("execution settled");
       });
+      const accepted = { status: "accepted", runId: "in-process-tail" };
       const unblock = () => release.resolve();
       signal.addEventListener("abort", unblock, { once: true });
       let kernel: Awaited<ReturnType<typeof createGatewayKernel>> | undefined;
@@ -107,7 +101,7 @@ describe("in-process Gateway original execution ownership", () => {
             owner: { kind: "aux", area: "gateway-lifetime-proof" },
             scope: "operator.admin",
             handler: async ({ respond }: Parameters<GatewayRequestHandler>[0]) => {
-              respond(true, { status: "accepted", runId: "in-process-tail" });
+              respond(true, accepted);
               await originalCompletion;
             },
           },
@@ -118,11 +112,7 @@ describe("in-process Gateway original execution ownership", () => {
           vi.spyOn(serviceModule, "createAgentTurnService").mockImplementationOnce((...args) => {
             const service = createService(...args);
             vi.spyOn(service, "startTurn").mockImplementationOnce(async ({ io }) => {
-              io.emitAcceptance([
-                true,
-                { status: "accepted", runId: "in-process-tail" },
-                undefined,
-              ]);
+              io.emitAcceptance([true, accepted, undefined]);
               await originalCompletion;
             });
             return service;

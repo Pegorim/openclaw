@@ -60,7 +60,7 @@ function staticValueSpecifiers(sourceFile: ts.SourceFile): string[] {
 // Each case reads the same checkout; retain import facts, not native syntax trees.
 const importsByFile = new Map<string, string[]>();
 
-function collectStaticValueImportGraph(entryRelativePath: string): Map<string, string[]> {
+function collectStaticValueImports(entryRelativePath: string): string[] {
   const entryPath = path.join(repoRoot, entryRelativePath);
   const graph = new Map<string, string[]>();
   const pending = new Set([entryPath]);
@@ -90,30 +90,25 @@ function collectStaticValueImportGraph(entryRelativePath: string): Map<string, s
       }
     }
   }
-  return graph;
+  return [...graph.keys()].map((filePath) => path.relative(repoRoot, filePath));
 }
 
 describe("gateway startup import boundaries", () => {
   it("keeps static method policy independent of session storage", () => {
-    const graph = collectStaticValueImportGraph("src/gateway/method-scopes.ts");
-    const sessionStorageImports = [...graph.keys()]
-      .map((filePath) => path.relative(repoRoot, filePath))
-      .filter((filePath) => filePath.startsWith(path.join("src", "config", "sessions") + path.sep));
-
-    expect(sessionStorageImports).toEqual([]);
+    const modules = collectStaticValueImports("src/gateway/method-scopes.ts");
+    expect(
+      modules.filter((file) => file.startsWith(path.join("src", "config", "sessions") + path.sep)),
+    ).toEqual([]);
   });
 
   it("keeps ordinary session lifecycle code out of the prepared shutdown graph", () => {
-    const graph = collectStaticValueImportGraph("src/gateway/server-close.runtime.ts");
-
-    expect([...graph.keys()].map((filePath) => path.relative(repoRoot, filePath))).not.toContain(
+    expect(collectStaticValueImports("src/gateway/server-close.runtime.ts")).not.toContain(
       "src/gateway/session-reset-service.ts",
     );
   });
 
   it("keeps agent execution out of the session creation import graph", () => {
-    const graph = collectStaticValueImportGraph("src/gateway/server-methods/sessions-create.ts");
-    const modules = [...graph.keys()].map((filePath) => path.relative(repoRoot, filePath));
+    const modules = collectStaticValueImports("src/gateway/server-methods/sessions-create.ts");
 
     expect(modules).not.toContain("src/gateway/server-methods/chat-send-external-entry.ts");
     expect(modules).not.toContain("src/gateway/server-methods/chat-send-handler.ts");

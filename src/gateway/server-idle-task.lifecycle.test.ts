@@ -27,6 +27,20 @@ afterEach(async () => {
   resetGatewayWorkAdmission();
 });
 
+function scheduleIdle(run: () => Promise<void>, log = { warn: vi.fn() }, retryDelayMs = 1) {
+  return scheduleGatewayIdleTask({
+    id: "test:idle",
+    scheduler,
+    delayMs: 0,
+    retryDelayMs,
+    isClosing: () => false,
+    isBusy: () => false,
+    run,
+    log,
+    errorMessage: "idle task failed",
+  });
+}
+
 it.each(["idle", "handler"] as const)(
   "joins started %s work before the Gateway sidecar owner closes",
   async (kind) => {
@@ -43,17 +57,7 @@ it.each(["idle", "handler"] as const)(
     const later = vi.fn(async () => {});
     const handle =
       kind === "idle"
-        ? scheduleGatewayIdleTask({
-            id: "test:idle",
-            scheduler,
-            delayMs: 0,
-            retryDelayMs: 1,
-            isClosing: () => false,
-            isBusy: () => false,
-            run,
-            log,
-            errorMessage: "idle lifecycle test failed",
-          })
+        ? scheduleIdle(run, log)
         : scheduleGatewayHandlerPrewarm({
             scheduler,
             getConfig: () => ({}),
@@ -97,17 +101,7 @@ it.each(["suspension", "restart signal"] as const)(
     const restart = kind === "restart signal" ? beginGatewayRestartSignalAdmission() : null;
     expect(suspension?.commit() ?? Boolean(restart)).toBe(true);
     const run = vi.fn(async () => {});
-    const handle = scheduleGatewayIdleTask({
-      id: "test:idle",
-      scheduler,
-      delayMs: 0,
-      retryDelayMs: 10,
-      isClosing: () => false,
-      isBusy: () => false,
-      run,
-      log: { warn: vi.fn() },
-      errorMessage: "idle task failed",
-    });
+    const handle = scheduleIdle(run, undefined, 10);
     let stopping: Promise<void> | undefined;
     try {
       await clock.advanceBy(0);
