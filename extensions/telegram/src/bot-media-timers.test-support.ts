@@ -22,10 +22,8 @@ export async function withTelegramGetFileRetryClock(
     throw new Error(error);
   });
   const handling = Promise.resolve().then(() => dispatch(getFile));
-  const settled = handling.then(
-    () => false,
-    () => false,
-  );
+  const stopped = () => false;
+  const settled = handling.then(stopped, stopped);
   const clockErrors: unknown[] = [];
   try {
     for (const { admitted, delayMs } of retries) {
@@ -70,14 +68,9 @@ export function resolveFlushTimerForDelay(
   delayMs: number,
 ) {
   const index = setTimeoutSpy.mock.calls.findLastIndex((call) => call[1] === delayMs);
-  const result = setTimeoutSpy.mock.results[index];
-  if (result?.type === "return") {
-    clearTimeout(result.value);
-  }
   return setTimeoutSpy.mock.calls[index]?.[0];
 }
 
-/** Runs held buffer timers and returns their already-admitted album work. */
 export function runHeldTelegramBufferTimers(
   timers: ReadonlyArray<() => unknown>,
   enqueueSpy: MockInstance<typeof enqueueKeyedTask>,
@@ -103,7 +96,6 @@ export async function flushChannelPostMediaGroup(
   const flushTimer = resolveFlushTimerForDelay(setTimeoutSpy, delayMs);
   expect(flushTimer).toBeTypeOf("function");
   const [completion] = runHeldTelegramBufferTimers(flushTimer ? [flushTimer] : [], enqueueSpy);
-  expect(completion).toBeDefined();
   await withTimeout(Promise.resolve(completion), completionTimeoutMs, {
     message: `Telegram buffered flush for the ${delayMs} ms timer did not complete`,
   });

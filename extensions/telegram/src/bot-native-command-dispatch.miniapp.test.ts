@@ -20,8 +20,6 @@ vi.mock("./miniapp/url.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./miniapp/url.js")>()),
   resolveTelegramMiniAppUrls: async () => ({
     pageUrl: "https://gateway.example/__openclaw_tg_miniapp/",
-    controlUiUrl: "https://gateway.example",
-    gatewayUrl: "wss://gateway.example",
   }),
 }));
 

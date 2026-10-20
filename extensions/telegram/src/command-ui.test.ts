@@ -25,15 +25,10 @@ function registerCommand(name: string, nativeName?: string) {
   ).toEqual({ ok: true });
 }
 
-function commandPages() {
-  const options = { forcePaginatedList: true };
-  const first = buildCommandsMessagePaginated(undefined, undefined, options);
-  return Array.from(
-    { length: first.totalPages },
-    (_, index) =>
-      buildCommandsMessagePaginated(undefined, undefined, { ...options, page: index + 1 }).text,
-  );
-}
+const commandPage = (page = 1) =>
+  buildCommandsMessagePaginated(undefined, undefined, { forcePaginatedList: true, page });
+const commandPages = () =>
+  Array.from({ length: commandPage().totalPages }, (_, index) => commandPage(index + 1).text);
 
 function menuCommands() {
   return buildPluginTelegramMenuCommands({
@@ -80,14 +75,11 @@ it.each([false, true])("encodes delivered command names as code (rich=%s)", (ric
     if (richMessages) {
       const blocks = deliveries.flatMap((delivery) => delivery.richMessage?.blocks ?? []);
       expect(inputRichBlocksToPlainText(blocks)).toContain("/active-memory");
-      expect(blocks).toContainEqual(
-        expect.objectContaining({
-          type: "paragraph",
-          text: expect.arrayContaining([
-            expect.objectContaining({ type: "code", text: "/active-memory" }),
-          ]),
-        }),
-      );
+      expect(
+        blocks.flatMap((block) =>
+          block.type === "paragraph" && Array.isArray(block.text) ? block.text : [],
+        ),
+      ).toContainEqual(expect.objectContaining({ type: "code", text: "/active-memory" }));
     } else {
       expect(deliveries.map((delivery) => delivery.htmlText).join("\n")).toContain(
         "<code>/active-memory</code>",
