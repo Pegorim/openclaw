@@ -111,6 +111,19 @@ export async function connect(peer: Peer, options: ConnectOptions): Promise<Ingr
         nonce,
       })
     : undefined;
+  const device =
+    identity && payload
+      ? {
+          id: identity.deviceId,
+          publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
+          signature: signDevicePayload(
+            identity.privateKeyPem,
+            options.tamperSignature ? `${payload}-tampered` : payload,
+          ),
+          signedAt,
+          nonce,
+        }
+      : undefined;
   const hello = await request(peer, "connect", {
     minProtocol: PROTOCOL_VERSION,
     maxProtocol: PROTOCOL_VERSION,
@@ -118,34 +131,18 @@ export async function connect(peer: Peer, options: ConnectOptions): Promise<Ingr
     role,
     scopes: options.scopes,
     auth: options.auth,
-    ...(identity && payload
-      ? {
-          device: {
-            id: identity.deviceId,
-            publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
-            signature: signDevicePayload(
-              identity.privateKeyPem,
-              options.tamperSignature ? `${payload}-tampered` : payload,
-            ),
-            signedAt,
-            nonce,
-          },
-        }
-      : {}),
+    ...(device ? { device } : {}),
   });
   if (hello.ok && !options.owner) {
-    expect(hello).toMatchObject({
-      payload: {
-        snapshot: {
-          presence: expect.arrayContaining([
-            expect.objectContaining({
-              instanceId: client.instanceId,
-              user: expect.objectContaining({ id: options.profileId ?? "gateway-owner" }),
-            }),
-          ]),
-        },
-      },
-    });
+    expect(hello).toHaveProperty(
+      "payload.snapshot.presence",
+      expect.arrayContaining([
+        expect.objectContaining({
+          instanceId: client.instanceId,
+          user: expect.objectContaining({ id: options.profileId ?? "gateway-owner" }),
+        }),
+      ]),
+    );
   }
   return hello;
 }
@@ -153,10 +150,7 @@ export async function connect(peer: Peer, options: ConnectOptions): Promise<Ingr
 export function expectHello(frame: IngressFrame, method: string, scopes: readonly string[]): void {
   expect(frame).toMatchObject({
     ok: true,
-    payload: {
-      type: "hello-ok",
-      auth: { method, role: "operator", scopes },
-    },
+    payload: { type: "hello-ok", auth: { method, role: "operator", scopes } },
   });
   expect(frame.payload?.auth).not.toHaveProperty("deviceToken");
   expect(frame.payload?.auth).not.toHaveProperty("bootstrapToken");
@@ -171,14 +165,12 @@ export async function usePeer<T>(peer: Peer, run: (peer: Peer) => Promise<T>): P
 }
 
 export async function expectReadWriteWithoutAdmin(peer: Peer, trigger: string) {
-  expect(await request(peer, "voicewake.set", { triggers: [trigger] })).toMatchObject({
-    ok: true,
-    payload: { triggers: [trigger] },
-  });
-  expect(await request(peer, "voicewake.get", {})).toMatchObject({
-    ok: true,
-    payload: { triggers: [trigger] },
-  });
+  const triggers = [trigger];
+  for (const method of ["voicewake.set", "voicewake.get"]) {
+    expect(
+      await request(peer, method, method === "voicewake.set" ? { triggers } : {}),
+    ).toMatchObject({ ok: true, payload: { triggers } });
+  }
   expect(await request(peer, "config.set", { raw: "{}" })).toMatchObject({
     ok: false,
     error: { code: "FORBIDDEN", message: "missing scope: operator.admin" },

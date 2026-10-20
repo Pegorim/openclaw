@@ -1,11 +1,6 @@
 import { expect, it, vi } from "vitest";
-import {
-  GATEWAY_CLIENT_IDS,
-  GATEWAY_CLIENT_MODES,
-} from "../../packages/gateway-protocol/src/client-info.js";
-import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.js";
 import type { AdmittedRunOperatorAuthority } from "../agents/admitted-run-context.js";
-import type { GatewayClient } from "./server-methods/client-types.js";
+import { createOperatorClient } from "./server-plugin-in-process-dispatch.test-support.js";
 
 // Keep both real module instances alive, as source and built runtime graphs can be.
 const issuer = await import("../agents/admitted-run-context.js");
@@ -14,23 +9,11 @@ const consumer = await import("./operator-run-authority.js");
 const reloadedIssuer = await import("../agents/admitted-run-context.js");
 
 function inherit(authority: AdmittedRunOperatorAuthority, scopes: string[]) {
-  const client: GatewayClient = {
-    connect: {
-      minProtocol: PROTOCOL_VERSION,
-      maxProtocol: PROTOCOL_VERSION,
-      role: "operator",
-      scopes,
-      client: {
-        id: GATEWAY_CLIENT_IDS.TEST,
-        version: "1",
-        platform: "test",
-        mode: GATEWAY_CLIENT_MODES.TEST,
-      },
-    },
-    internal: { operatorRunAuthority: authority },
-  };
   return consumer.captureGatewayOperatorRunAuthority({
-    client,
+    client: {
+      connect: createOperatorClient({ profileId: "module-owner", scopes }).connect,
+      internal: { operatorRunAuthority: authority },
+    },
     context: { getRuntimeConfig: () => ({}) },
   });
 }

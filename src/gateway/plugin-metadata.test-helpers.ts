@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
@@ -13,15 +14,17 @@ function ownerEntries(value: ReadonlyMap<string, readonly string[]>) {
 export function assertPluginMetadataSnapshotConsistency(snapshot: PluginMetadataSnapshot): void {
   const plugins = snapshot.manifestRegistry.plugins;
   const pluginIds = plugins.map((plugin) => plugin.id);
-  if (JSON.stringify(snapshot.plugins.map((plugin) => plugin.id)) !== JSON.stringify(pluginIds)) {
-    throw new Error("plugin metadata fixture registry and plugin list diverged");
-  }
-  if (snapshot.metrics.manifestPluginCount !== plugins.length) {
-    throw new Error("plugin metadata fixture manifest count diverged");
-  }
-  if (snapshot.metrics.indexPluginCount !== snapshot.index.plugins.length) {
-    throw new Error("plugin metadata fixture index count diverged");
-  }
+  assert.deepEqual(
+    snapshot.plugins.map((plugin) => plugin.id),
+    pluginIds,
+    "fixture plugin IDs",
+  );
+  assert.equal(snapshot.metrics.manifestPluginCount, plugins.length, "fixture manifest count");
+  assert.equal(
+    snapshot.metrics.indexPluginCount,
+    snapshot.index.plugins.length,
+    "fixture index count",
+  );
 
   const expectedProviderOwners = new Map<string, string[]>();
   const expectedCliBackendOwners = new Map<string, string[]>();
@@ -33,9 +36,7 @@ export function assertPluginMetadataSnapshotConsistency(snapshot: PluginMetadata
   };
 
   for (const plugin of plugins) {
-    if (snapshot.byPluginId.get(plugin.id) !== plugin) {
-      throw new Error(`plugin metadata fixture lookup diverged for ${plugin.id}`);
-    }
+    assert.equal(snapshot.byPluginId.get(plugin.id), plugin, `fixture lookup: ${plugin.id}`);
     const providers = new Set(plugin.providers);
     const cliBackends = new Set([...plugin.cliBackends, ...(plugin.setup?.cliBackends ?? [])]);
     const authRefs = new Set([
@@ -50,40 +51,28 @@ export function assertPluginMetadataSnapshotConsistency(snapshot: PluginMetadata
       if (typeof provider !== "string") {
         continue;
       }
-      if (!providers.has(alias) || !providers.has(provider)) {
-        throw new Error(`plugin metadata fixture alias ${alias} is outside ${plugin.id} providers`);
-      }
+      assert(providers.has(alias) && providers.has(provider), `fixture alias: ${alias}`);
       appendOwner(expectedProviderOwners, alias, plugin.id);
     }
     for (const choice of plugin.providerAuthChoices ?? []) {
-      if (!providers.has(choice.provider)) {
-        throw new Error(
-          `plugin metadata fixture auth choice ${choice.choiceId} has an unknown provider`,
-        );
-      }
+      assert(providers.has(choice.provider), `fixture auth provider: ${choice.choiceId}`);
     }
     for (const backend of cliBackends) {
       appendOwner(expectedCliBackendOwners, normalizeProviderId(backend), plugin.id);
     }
     for (const ref of plugin.syntheticAuthRefs ?? []) {
-      if (!providers.has(ref) && !cliBackends.has(ref) && !authRefs.has(ref)) {
-        throw new Error(`plugin metadata fixture synthetic auth ref ${ref} has no owner`);
-      }
+      assert(
+        providers.has(ref) || cliBackends.has(ref) || authRefs.has(ref),
+        `fixture auth ref: ${ref}`,
+      );
     }
   }
 
-  if (
-    JSON.stringify(ownerEntries(snapshot.owners.providers)) !==
-    JSON.stringify(ownerEntries(expectedProviderOwners))
-  ) {
-    throw new Error("plugin metadata fixture provider owners diverged");
-  }
-  if (
-    JSON.stringify(ownerEntries(snapshot.owners.cliBackends)) !==
-    JSON.stringify(ownerEntries(expectedCliBackendOwners))
-  ) {
-    throw new Error("plugin metadata fixture CLI backend owners diverged");
-  }
+  assert.deepEqual(ownerEntries(snapshot.owners.providers), ownerEntries(expectedProviderOwners));
+  assert.deepEqual(
+    ownerEntries(snapshot.owners.cliBackends),
+    ownerEntries(expectedCliBackendOwners),
+  );
 }
 
 export function createGatewayPluginMetadataSnapshot(

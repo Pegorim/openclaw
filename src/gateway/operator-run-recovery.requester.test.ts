@@ -1,6 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it } from "vitest";
 import { acceptCompactionSuccessor } from "../agents/embedded-agent-runner/compaction-successor.js";
+import type { RequesterOrigin } from "../agents/requester-origin.js";
 import { createRestartRecoveryRequesterSource } from "../agents/requester-run-recovery-source.js";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
@@ -17,6 +18,18 @@ function expectRestrictedModel(
   operator: NonNullable<Awaited<ReturnType<typeof restoreGatewayRunRecovery>>["operator"]>,
 ) {
   expect(operator.authority.modelPolicy?.models).toEqual([{ provider: "fixture", model: "b" }]);
+}
+
+type RecoveryFixture = Awaited<ReturnType<typeof createOperatorRecoveryFixture>>;
+function captureRequester(fixture: RecoveryFixture, requesterOrigin: RequesterOrigin) {
+  return expectDefined(
+    createRestartRecoveryRequesterSource({
+      ...fixture.target,
+      entry: fixture.entry,
+      requesterOrigin,
+    }),
+    "host-captured requester source",
+  );
 }
 
 describe("restart recovery requester custody", () => {
@@ -50,15 +63,10 @@ describe("restart recovery requester custody", () => {
         messageProvider: "telegram",
         senderId: "bob",
       };
-      const source = expectDefined(
-        createRestartRecoveryRequesterSource({
-          ...fixture.target,
-          entry: fixture.entry,
-          requesterOrigin: origin,
-        }),
-        "host-captured requester source",
-      );
+      const source = captureRequester(fixture, origin);
       const bound = { ...fixture.entry, restartRecoveryRequesterSource: source };
+      const saveSource = (restartRecoveryRequesterSource: typeof source) =>
+        replaceSessionEntry(fixture.target, { ...bound, restartRecoveryRequesterSource });
       await replaceSessionEntry(fixture.target, bound);
       origin.senderId = "alice";
       origin.sessionKey = "agent:research:telegram:group:replacement";
@@ -71,10 +79,7 @@ describe("restart recovery requester custody", () => {
         senderIsOwner: true,
         conversationToolPolicy: { allow: ["*"] },
       });
-      await replaceSessionEntry(fixture.target, {
-        ...bound,
-        restartRecoveryRequesterSource: historical,
-      });
+      await saveSource(historical);
       const restoredFacts = await restore();
       expect(restoredFacts).not.toHaveProperty("senderIsOwner");
       expect(restoredFacts).not.toHaveProperty("conversationToolPolicy");
@@ -84,10 +89,7 @@ describe("restart recovery requester custody", () => {
         { ...source, sourceRunId: "copied-run" },
         { ...source, lifecycleRevision: "replacement-lifecycle" },
       ]) {
-        await replaceSessionEntry(fixture.target, {
-          ...bound,
-          restartRecoveryRequesterSource: replacement,
-        });
+        await saveSource(replacement);
         await expect(restore()).resolves.toBeUndefined();
       }
       for (const malformed of [
@@ -98,10 +100,7 @@ describe("restart recovery requester custody", () => {
       ]) {
         const invalid = structuredClone(source);
         Reflect.set(invalid, "requesterOrigin", malformed);
-        await replaceSessionEntry(fixture.target, {
-          ...bound,
-          restartRecoveryRequesterSource: invalid,
-        });
+        await saveSource(invalid);
         await expect(restore()).resolves.toBeUndefined();
       }
       await replaceSessionEntry(fixture.target, {
@@ -120,22 +119,19 @@ describe("restart recovery requester custody", () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const profile = ensureProfileForEmail("model@example.test");
       setUserProfileRole(profile.id, "operator");
+      const operator = {
+        sessions: { others: "none" },
+        agents: ["main"],
+        scopes: ["operator.admin"],
+        sandbox: "required",
+        accessPolicyPlugin: undefined,
+        modelPolicy: { allow: ["fixture/a", "fixture/b"] },
+      } satisfies NonNullable<
+        NonNullable<OpenClawConfig["gateway"]>["roles"]
+      >["definitions"][string];
       const cfg: OpenClawConfig = {
         agents: { defaults: { model: "fixture/a" } },
-        gateway: {
-          roles: {
-            definitions: {
-              operator: {
-                sessions: { others: "none" },
-                agents: ["main"],
-                scopes: ["operator.admin"],
-                sandbox: "required",
-                accessPolicyPlugin: undefined,
-                modelPolicy: { allow: ["fixture/a", "fixture/b"] },
-              },
-            },
-          },
-        },
+        gateway: { roles: { definitions: { operator } } },
       };
       const fixture = await createOperatorRecoveryFixture({
         stateDir: state.stateDir,
@@ -151,14 +147,7 @@ describe("restart recovery requester custody", () => {
       };
       await replaceSessionEntry(fixture.target, {
         ...fixture.entry,
-        restartRecoveryRequesterSource: expectDefined(
-          createRestartRecoveryRequesterSource({
-            ...fixture.target,
-            entry: fixture.entry,
-            requesterOrigin,
-          }),
-          "original authenticated requester",
-        ),
+        restartRecoveryRequesterSource: captureRequester(fixture, requesterOrigin),
       });
       const current = structuredClone(cfg);
       expectDefined(current.gateway?.roles?.definitions.operator, "operator role").modelPolicy = {

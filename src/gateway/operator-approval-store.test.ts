@@ -1,4 +1,3 @@
-// Persistent operator approval store tests cover terminal CAS, expiry, replay, and recovery.
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -19,27 +18,20 @@ import {
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
 import { requireNativeSqliteDatabase } from "../test-utils/native-sqlite.js";
-import {
-  consumeOperatorApprovalAllowOnce,
-  forceDenyOperatorApproval,
-  getOperatorApprovalDetailed,
-  insertOperatorApproval,
-  listPendingOperatorApprovals,
-  listTerminalOperatorApprovals,
-  OPERATOR_APPROVAL_MAX_AUDIENCE_SESSION_KEYS,
-  OperatorApprovalHistoryCursorError,
-  prepareOperatorApprovalReplay,
-  recoverOperatorApprovalsOnStartup,
-  resolveOperatorApproval,
-} from "./operator-approval-store.js";
+import * as approvals from "./operator-approval-store.js";
 import { operatorApprovalOperations } from "./operator-approval-store.worker.js";
 
 type OperatorApprovalDatabase = Pick<OpenClawStateKyselyDatabase, "operator_approvals">;
-type NewOperatorApproval = Parameters<typeof insertOperatorApproval>[0]["approval"];
+type NewOperatorApproval = Parameters<typeof approvals.insertOperatorApproval>[0]["approval"];
+type Resolution = Parameters<typeof approvals.resolveOperatorApproval>[0];
+type Denial = Parameters<typeof approvals.forceDenyOperatorApproval>[0];
+type Consumption = Parameters<typeof approvals.consumeOperatorApprovalAllowOnce>[0];
 const OPERATOR_APPROVAL_TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
-async function getOperatorApproval(params: Parameters<typeof getOperatorApprovalDetailed>[0]) {
-  const result = await getOperatorApprovalDetailed(params);
+async function getOperatorApproval(
+  params: Parameters<typeof approvals.getOperatorApprovalDetailed>[0],
+) {
+  const result = await approvals.getOperatorApprovalDetailed(params);
   return result.outcome === "found" ? result.record : null;
 }
 
@@ -55,10 +47,6 @@ let suiteDatabaseOptions: OpenClawStateDatabaseOptions | undefined;
 function createDatabaseOptions(): OpenClawStateDatabaseOptions {
   const stateDir = tempDirs.make("openclaw-operator-approval-");
   return { env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } };
-}
-
-function getSuiteDatabaseOptions(): OpenClawStateDatabaseOptions {
-  return (suiteDatabaseOptions ??= createDatabaseOptions());
 }
 
 function approval(id: string, overrides: Partial<NewOperatorApproval> = {}): NewOperatorApproval {
@@ -121,38 +109,40 @@ function rawApprovalRow(options: OpenClawStateDatabaseOptions, id: string) {
   );
 }
 
-function createStore(databaseOptions = getSuiteDatabaseOptions()) {
+function createStore(databaseOptions = (suiteDatabaseOptions ??= createDatabaseOptions())) {
+  const resolution = { databaseOptions, resolver: { kind: "device" as const, id: "reviewer" } };
+  const denial = { databaseOptions, resolver: { kind: "system" as const, id: null } };
+  const consumption = { databaseOptions, consumerId: "run-1:tool-call-1" };
+  const bind =
+    <Input extends { databaseOptions?: OpenClawStateDatabaseOptions }, Result>(
+      operation: (params: Input) => Result,
+    ) =>
+    (params: Input) =>
+      operation({ ...params, databaseOptions });
   return {
     databaseOptions,
     insert: (id: string, overrides: Partial<NewOperatorApproval> = {}) =>
-      insertOperatorApproval({ approval: approval(id, overrides), databaseOptions }),
+      approvals.insertOperatorApproval({ approval: approval(id, overrides), databaseOptions }),
     resolve: (
       id: string,
-      decision: Parameters<typeof resolveOperatorApproval>[0]["decision"],
-      params: Omit<Parameters<typeof resolveOperatorApproval>[0], "id" | "decision">,
-    ) => resolveOperatorApproval({ ...params, id, decision, databaseOptions }),
+      decision: Resolution["decision"],
+      nowMs: number | undefined,
+      params: Partial<Omit<Resolution, "id" | "decision" | "nowMs">> = {},
+    ) => approvals.resolveOperatorApproval({ ...resolution, ...params, id, decision, nowMs }),
     deny: (
       id: string,
-      reason: Parameters<typeof forceDenyOperatorApproval>[0]["reason"],
-      params: Omit<Parameters<typeof forceDenyOperatorApproval>[0], "id" | "reason">,
-    ) => forceDenyOperatorApproval({ ...params, id, reason, databaseOptions }),
-    consume: (
-      id: string,
-      consumerId: string,
-      params: Omit<Parameters<typeof consumeOperatorApprovalAllowOnce>[0], "id" | "consumerId">,
-    ) => consumeOperatorApprovalAllowOnce({ ...params, id, consumerId, databaseOptions }),
-    getDetailed: (params: Parameters<typeof getOperatorApprovalDetailed>[0]) =>
-      getOperatorApprovalDetailed({ ...params, databaseOptions }),
-    get: (params: Parameters<typeof getOperatorApproval>[0]) =>
-      getOperatorApproval({ ...params, databaseOptions }),
-    pending: (params: Parameters<typeof listPendingOperatorApprovals>[0]) =>
-      listPendingOperatorApprovals({ ...params, databaseOptions }),
-    history: (params: Parameters<typeof listTerminalOperatorApprovals>[0]) =>
-      listTerminalOperatorApprovals({ ...params, databaseOptions }),
-    replay: (params: Parameters<typeof prepareOperatorApprovalReplay>[0]) =>
-      prepareOperatorApprovalReplay({ ...params, databaseOptions }),
-    recover: (params: Parameters<typeof recoverOperatorApprovalsOnStartup>[0]) =>
-      recoverOperatorApprovalsOnStartup({ ...params, databaseOptions }),
+      reason: Denial["reason"],
+      nowMs: number,
+      params: Partial<Omit<Denial, "id" | "reason" | "nowMs">> = {},
+    ) => approvals.forceDenyOperatorApproval({ ...denial, ...params, id, reason, nowMs }),
+    consume: (id: string, nowMs: number, params: Partial<Omit<Consumption, "id" | "nowMs">> = {}) =>
+      approvals.consumeOperatorApprovalAllowOnce({ ...consumption, ...params, id, nowMs }),
+    getDetailed: bind(approvals.getOperatorApprovalDetailed),
+    get: bind(getOperatorApproval),
+    pending: bind(approvals.listPendingOperatorApprovals),
+    history: bind(approvals.listTerminalOperatorApprovals),
+    replay: bind(approvals.prepareOperatorApprovalReplay),
+    recover: bind(approvals.recoverOperatorApprovalsOnStartup),
     raw: (id: string) => rawApprovalRow(databaseOptions, id),
     corrupt: (
       id: string,
@@ -171,7 +161,7 @@ function createStore(databaseOptions = getSuiteDatabaseOptions()) {
 async function expectFilteredReplay(
   unrelated: Partial<NewOperatorApproval>,
   target: Partial<NewOperatorApproval>,
-  selection: Parameters<typeof listPendingOperatorApprovals>[0],
+  selection: Parameters<typeof approvals.listPendingOperatorApprovals>[0],
 ) {
   const store = createStore();
   for (let index = 0; index < 256; index += 1) {
@@ -183,10 +173,7 @@ async function expectFilteredReplay(
     ).resolves.toMatchObject({ outcome: "inserted" });
   }
   await expect(
-    store.insert("target-after-first-page", {
-      ...target,
-      createdAtMs: 2_000,
-    }),
+    store.insert("target-after-first-page", { ...target, createdAtMs: 2_000 }),
   ).resolves.toMatchObject({ outcome: "inserted" });
   await expect(store.pending({ ...selection, limit: 1, nowMs: 3_000 })).resolves.toMatchObject([
     { id: "target-after-first-page" },
@@ -235,9 +222,8 @@ describe("operator approval store", () => {
       ["plugin-new", 3_000],
     ] as const) {
       await expect(
-        store.resolve(id, "deny", {
+        store.resolve(id, "deny", nowMs, {
           resolver: { kind: "device", id: "reviewer-device" },
-          nowMs,
         }),
       ).resolves.toMatchObject({ outcome: "resolved" });
     }
@@ -262,7 +248,7 @@ describe("operator approval store", () => {
       nonEmittedCursor,
     ]) {
       await expect(store.history({ cursor, nowMs: 3_000 })).rejects.toThrow(
-        OperatorApprovalHistoryCursorError,
+        approvals.OperatorApprovalHistoryCursorError,
       );
     }
 
@@ -307,7 +293,7 @@ describe("operator approval store", () => {
       const list =
         operation === "pending"
           ? store.pending
-          : async (params: Parameters<typeof listPendingOperatorApprovals>[0]) => {
+          : async (params: Parameters<typeof approvals.listPendingOperatorApprovals>[0]) => {
               const prepared = await store.replay(params);
               expect(prepared.outcome).toBe("pending");
               return prepared.records;
@@ -317,16 +303,9 @@ describe("operator approval store", () => {
       }
       store.corrupt("a-corrupt", { presentation_json: "{not-json" });
 
-      const listing = list({
-        audienceSessionKey,
-        limit: 1,
-        nowMs: 2_000,
-      });
+      const listing = list({ audienceSessionKey, limit: 1, nowMs: 2_000 });
       // A later decision must not overtake the list's corrupt-row repair.
-      const denying = store.deny("b-match", "no-route", {
-        resolver: { kind: "system", id: null },
-        nowMs: 2_000,
-      });
+      const denying = store.deny("b-match", "no-route", 2_000);
       const records = await listing;
       await denying;
       expect(records.map((record) => record.id)).toEqual(audienceSessionKey ? ["b-match"] : []);
@@ -335,13 +314,7 @@ describe("operator approval store", () => {
         terminal_reason: "storage-corrupt",
       });
       expect(
-        (
-          await list({
-            audienceSessionKey,
-            limit: 1,
-            nowMs: 2_000,
-          })
-        ).map((record) => record.id),
+        (await list({ audienceSessionKey, limit: 1, nowMs: 2_000 })).map((record) => record.id),
       ).toEqual(["c-match"]);
     },
   );
@@ -417,9 +390,7 @@ describe("operator approval store", () => {
       await expect(store.insert(id)).rejects.toThrow(/approval id/);
       await expect(store.get({ id })).rejects.toThrow(/approval id/);
       await expect(
-        store.resolve(id, "deny", {
-          resolver: { kind: "system", id: null },
-        }),
+        store.resolve(id, "deny", undefined, { resolver: { kind: "system", id: null } }),
       ).rejects.toThrow(/approval id/);
     }
   });
@@ -460,22 +431,18 @@ describe("operator approval store", () => {
       expect(result).toMatchObject({ record: { id: "first-wins", status: "pending" } });
     }
 
-    const winnerPending = store.resolve("first-wins", "allow-once", {
+    const winnerPending = store.resolve("first-wins", "allow-once", 2_000, {
       resolver: { kind: "device", id: "winner-device" },
-      nowMs: 2_000,
     });
-    const sameRetryPending = store.resolve("first-wins", "allow-once", {
+    const sameRetryPending = store.resolve("first-wins", "allow-once", 2_001, {
       resolver: { kind: "channel", id: "telegram:loser" },
-      nowMs: 2_001,
     });
-    const conflictingRetryPending = store.resolve("first-wins", "deny", {
+    const conflictingRetryPending = store.resolve("first-wins", "deny", 2_002, {
       resolver: { kind: "channel", id: "telegram:loser" },
-      nowMs: 2_002,
     });
 
-    const denialPending = store.deny("first-wins", "run-aborted", {
+    const denialPending = store.deny("first-wins", "run-aborted", 2_003, {
       resolver: { kind: "system", id: "late-denial" },
-      nowMs: 2_003,
     });
     const [winner, sameRetry, conflictingRetry, denial] = await Promise.all([
       winnerPending,
@@ -484,42 +451,38 @@ describe("operator approval store", () => {
       denialPending,
     ]);
 
-    expect(winner).toMatchObject({
-      outcome: "resolved",
-      record: {
-        status: "allowed",
-        decision: "allow-once",
-        resolver: { kind: "device", id: "winner-device" },
+    expect([winner, sameRetry, conflictingRetry, denial]).toMatchObject([
+      {
+        outcome: "resolved",
+        record: {
+          status: "allowed",
+          decision: "allow-once",
+          resolver: { kind: "device", id: "winner-device" },
+        },
       },
-    });
-    expect(sameRetry).toMatchObject({
-      outcome: "already-resolved",
-      retry: "same",
-      record: { resolver: { kind: "device", id: "winner-device" } },
-    });
-    expect(conflictingRetry).toMatchObject({
-      outcome: "already-resolved",
-      retry: "conflict",
-      record: { decision: "allow-once" },
-    });
-    expect(denial).toMatchObject({
-      outcome: "already-terminal",
-      record: { decision: "allow-once", resolver: { id: "winner-device" } },
-    });
+      {
+        outcome: "already-resolved",
+        retry: "same",
+        record: { resolver: { kind: "device", id: "winner-device" } },
+      },
+      {
+        outcome: "already-resolved",
+        retry: "conflict",
+        record: { decision: "allow-once" },
+      },
+      {
+        outcome: "already-terminal",
+        record: { decision: "allow-once", resolver: { id: "winner-device" } },
+      },
+    ]);
   });
 
   it("expires at the exact deadline and never accepts a late allow", async () => {
     const store = createStore();
     await store.insert("deadline", { expiresAtMs: 2_000 });
 
-    const deadlineResult = await store.resolve("deadline", "allow-always", {
-      resolver: { kind: "device", id: "reviewer" },
-      nowMs: 2_000,
-    });
-    const lateResult = await store.resolve("deadline", "allow-always", {
-      resolver: { kind: "device", id: "reviewer" },
-      nowMs: 2_001,
-    });
+    const deadlineResult = await store.resolve("deadline", "allow-always", 2_000);
+    const lateResult = await store.resolve("deadline", "allow-always", 2_001);
 
     expect(deadlineResult).toMatchObject({
       outcome: "expired",
@@ -537,50 +500,40 @@ describe("operator approval store", () => {
     await store.insert("guarded");
 
     await expect(
-      store.resolve("guarded", "allow-once", {
+      store.resolve("guarded", "allow-once", 2_000, {
         resolver: { kind: "runtime", id: "runtime" },
         expectedKind: "plugin",
         runtimeEpoch: "runtime-a",
-        nowMs: 2_000,
       }),
     ).resolves.toEqual({ outcome: "not-found" });
     await expect(
-      store.deny("guarded", "run-aborted", {
+      store.deny("guarded", "run-aborted", 2_000, {
         resolver: { kind: "runtime", id: "runtime" },
         expectedKind: "exec",
         runtimeEpoch: "runtime-b",
-        nowMs: 2_000,
       }),
     ).resolves.toEqual({ outcome: "not-found" });
     await expect(store.get({ id: "guarded", nowMs: 2_000 })).resolves.toMatchObject({
       status: "pending",
     });
 
-    await store.resolve("guarded", "allow-once", {
+    await store.resolve("guarded", "allow-once", 2_000, {
       resolver: { kind: "runtime", id: "runtime" },
       expectedKind: "exec",
       runtimeEpoch: "runtime-a",
-      nowMs: 2_000,
     });
+    for (const [expectedKind, runtimeEpoch] of [
+      ["plugin", "runtime-a"],
+      ["exec", "runtime-b"],
+    ] as const) {
+      await expect(
+        store.consume("guarded", 2_001, { expectedKind, runtimeEpoch }),
+      ).resolves.toEqual({ outcome: "not-found" });
+    }
     await expect(
-      store.consume("guarded", "run-1:tool-call-1", {
-        expectedKind: "plugin",
-        runtimeEpoch: "runtime-a",
-        nowMs: 2_001,
-      }),
-    ).resolves.toEqual({ outcome: "not-found" });
-    await expect(
-      store.consume("guarded", "run-1:tool-call-1", {
-        expectedKind: "exec",
-        runtimeEpoch: "runtime-b",
-        nowMs: 2_001,
-      }),
-    ).resolves.toEqual({ outcome: "not-found" });
-    await expect(
-      store.consume("guarded", "run-1:tool-call-1", {
+      store.consume("guarded", 2_001, {
         expectedKind: "exec",
         runtimeEpoch: "runtime-a",
-        nowMs: 2_001,
       }),
     ).resolves.toMatchObject({ outcome: "consumed" });
   });
@@ -588,22 +541,19 @@ describe("operator approval store", () => {
   it("consumes allow-once exactly once without erasing the terminal decision", async () => {
     const store = createStore();
     await store.insert("consume", { createdAtMs: 5_000 });
-    const resolved = await store.resolve("consume", "allow-once", {
+    const resolved = await store.resolve("consume", "allow-once", 2_000, {
       resolver: { kind: "runtime", id: "approval-runtime" },
-      nowMs: 2_000,
     });
     expect(resolved).toMatchObject({
       outcome: "resolved",
       record: { resolvedAtMs: 5_000, updatedAtMs: 5_000 },
     });
 
-    const firstPending = store.consume("consume", "run-1:tool-call-1", {
+    const firstPending = store.consume("consume", 3_000, { redemptionWindowMs: 15_000 });
+    const replayPending = store.consume("consume", 3_001, {
+      consumerId: "run-2:tool-call-2",
+
       redemptionWindowMs: 15_000,
-      nowMs: 3_000,
-    });
-    const replayPending = store.consume("consume", "run-2:tool-call-2", {
-      redemptionWindowMs: 15_000,
-      nowMs: 3_001,
     });
 
     const [first, replay] = await Promise.all([firstPending, replayPending]);
@@ -626,16 +576,12 @@ describe("operator approval store", () => {
   it("rejects allow-once redemption at the exact grace boundary", async () => {
     const store = createStore();
     await store.insert("stale-redemption");
-    await store.resolve("stale-redemption", "allow-once", {
+    await store.resolve("stale-redemption", "allow-once", 2_000, {
       resolver: { kind: "runtime", id: "approval-runtime" },
-      nowMs: 2_000,
     });
 
     await expect(
-      store.consume("stale-redemption", "run-1:tool-call-1", {
-        redemptionWindowMs: 1_000,
-        nowMs: 3_000,
-      }),
+      store.consume("stale-redemption", 3_000, { redemptionWindowMs: 1_000 }),
     ).resolves.toMatchObject({
       outcome: "redemption-expired",
       record: { resolvedAtMs: 2_000, consumedAtMs: null },
@@ -676,55 +622,39 @@ describe("operator approval store", () => {
       "current",
     ]);
     await expect(
-      store.consume("orphan", "restarted-consumer", { nowMs: 2_000 }),
+      store.consume("orphan", 2_000, { consumerId: "restarted-consumer" }),
     ).resolves.toMatchObject({ outcome: "not-allow-once" });
   });
 
-  it("terminalizes a corrupt pending row and never returns it as approvable", async () => {
-    const store = createStore();
-    await store.insert("corrupt", { createdAtMs: 5_000 });
-    store.corrupt("corrupt", { presentation_json: "{not-json" });
-
-    await expect(store.getDetailed({ id: "corrupt", nowMs: 2_000 })).resolves.toEqual({
-      outcome: "corrupt",
-    });
-    await expect(store.get({ id: "corrupt", nowMs: 2_000 })).resolves.toBeNull();
-    expect(store.raw("corrupt")).toMatchObject({
-      status: "denied",
-      decision: "deny",
-      terminal_reason: "storage-corrupt",
-      resolver_kind: "system",
-      resolved_at_ms: 5_000,
-      updated_at_ms: 5_000,
-    });
-  });
-
-  it("fails closed for forged terminal status tuples", async () => {
+  it.each([
+    ["corrupt", null, { presentation_json: "{not-json" }],
+    ["forged-allowed", "allow-once", { terminal_reason: "storage-corrupt" }],
+    ["forged-denied", "deny", { decision: "allow-once" }],
+  ] as const)("fails closed for %s storage corruption", async (id, decision, fields) => {
     const store = createStore(createDatabaseOptions());
-    await store.insert("forged-allowed");
-    await store.insert("forged-denied");
-    await store.resolve("forged-allowed", "allow-once", {
-      resolver: { kind: "device", id: "reviewer" },
-      nowMs: 2_000,
-    });
-    await store.resolve("forged-denied", "deny", {
-      resolver: { kind: "device", id: "reviewer" },
-      nowMs: 2_000,
-    });
+    await store.insert(id, { createdAtMs: decision ? 1_000 : 5_000 });
+    if (decision) {
+      await store.resolve(id, decision, 2_000);
+    }
     const database = openOpenClawStateDatabase(store.databaseOptions);
-    // Simulate external corruption that bypassed SQLite CHECK constraints; the
-    // decoder must independently reject these approval-granting tuples.
+    // External corruption bypasses CHECK constraints; decoding must independently fail closed.
     database.db.exec("PRAGMA ignore_check_constraints = ON");
-    store.corrupt("forged-allowed", { terminal_reason: "storage-corrupt" });
-    store.corrupt("forged-denied", { decision: "allow-once" });
+    store.corrupt(id, fields);
     database.db.exec("PRAGMA ignore_check_constraints = OFF");
-
-    await expect(store.getDetailed({ id: "forged-allowed", nowMs: 2_001 })).resolves.toEqual({
+    await expect(store.getDetailed({ id, nowMs: decision ? 2_001 : 2_000 })).resolves.toEqual({
       outcome: "corrupt",
     });
-    await expect(store.getDetailed({ id: "forged-denied", nowMs: 2_001 })).resolves.toEqual({
-      outcome: "corrupt",
-    });
+    if (!decision) {
+      await expect(store.get({ id, nowMs: 2_000 })).resolves.toBeNull();
+      expect(store.raw(id)).toMatchObject({
+        status: "denied",
+        decision: "deny",
+        terminal_reason: "storage-corrupt",
+        resolver_kind: "system",
+        resolved_at_ms: 5_000,
+        updated_at_ms: 5_000,
+      });
+    }
   });
 
   it("prunes only terminal rows outside the 30-day retention window", async () => {
@@ -733,31 +663,16 @@ describe("operator approval store", () => {
     await store.insert("old-terminal", { createdAtMs: 5_000 });
     await store.insert("recent-terminal");
     await store.insert("still-pending");
-    await store.deny({
-      id: "old-terminal",
-      status: "cancelled",
-      reason: "run-aborted",
-      resolver: { kind: "system", id: null },
-      nowMs: 4_000,
-    });
+    await store.deny("old-terminal", "run-aborted", 4_000, { status: "cancelled" });
     expect(store.raw("old-terminal")).toMatchObject({
       resolved_at_ms: 5_000,
       updated_at_ms: 5_000,
     });
-    await store.deny({
-      id: "recent-terminal",
-      status: "cancelled",
-      reason: "run-aborted",
-      resolver: { kind: "system", id: null },
-      nowMs: nowMs - 100,
-    });
+    await store.deny("recent-terminal", "run-aborted", nowMs - 100, { status: "cancelled" });
 
-    await expect(
-      store.recover({
-        runtimeEpoch: "runtime-a",
-        nowMs,
-      }),
-    ).resolves.toMatchObject({ pruned: 1 });
+    await expect(store.recover({ runtimeEpoch: "runtime-a", nowMs })).resolves.toMatchObject({
+      pruned: 1,
+    });
     expect(store.raw("old-terminal")).toBeUndefined();
     expect(store.raw("recent-terminal")).toBeDefined();
     expect(store.raw("still-pending")).toBeDefined();
@@ -766,7 +681,7 @@ describe("operator approval store", () => {
   it("rejects an unbounded ancestor audience", async () => {
     const store = createStore();
     const audienceSessionKeys = Array.from(
-      { length: OPERATOR_APPROVAL_MAX_AUDIENCE_SESSION_KEYS + 1 },
+      { length: approvals.OPERATOR_APPROVAL_MAX_AUDIENCE_SESSION_KEYS + 1 },
       (_, index) => `agent:main:${index}`,
     );
 

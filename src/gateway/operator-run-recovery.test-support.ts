@@ -68,14 +68,15 @@ export async function createOperatorRecoveryFixture(params: {
     client.sharedGatewaySessionGeneration = params.sharedGeneration;
   }
   if (params.device) {
+    const device = params.device;
     persistDevicePairingStoreState(
-      { pendingById: {}, pairedByDeviceId: { [params.device.deviceId]: params.device } },
+      { pendingById: {}, pairedByDeviceId: { [device.deviceId]: device } },
       params.stateDir,
       "both",
     );
     client.connect.device = {
-      id: params.device.deviceId,
-      publicKey: params.device.publicKey,
+      id: device.deviceId,
+      publicKey: device.publicKey,
       signature: "fixture-signature",
       signedAt: 1,
       nonce: "fixture-nonce",
@@ -84,11 +85,11 @@ export async function createOperatorRecoveryFixture(params: {
       ? null
       : expectDefined(
           resolveAuthenticatedDeviceTokenIdentity(
-            await loadPairedDevicePairingStoreRecordReadOnly(params.device.deviceId),
+            await loadPairedDevicePairingStoreRecordReadOnly(device.deviceId),
             {
               role: "operator",
-              publicKey: params.device.publicKey,
-              token: expectDefined(params.device.tokens?.operator, "accepted operator token").token,
+              publicKey: device.publicKey,
+              token: expectDefined(device.tokens?.operator, "accepted operator token").token,
               scopes: client.connect.scopes ?? [],
             },
           ),
@@ -128,11 +129,9 @@ export async function createOperatorRecoveryFixture(params: {
   };
   entry.restartRecoveryOperatorSource = expectDefined(
     createRestartRecoveryOperatorSource({
+      ...target,
       authority: captured.authority,
       entry,
-      agentId: target.agentId,
-      sessionKey: target.sessionKey,
-      sourceRunId: target.sourceRunId,
       inputProvenance: params.inputProvenance,
       requesterOrigin: params.requesterOrigin,
     }),
@@ -140,7 +139,6 @@ export async function createOperatorRecoveryFixture(params: {
   );
   entry.restartRecoverySourceIngress = entry.restartRecoveryOperatorSource.snapshot.sourceIngress;
   await replaceSessionEntry(target, entry);
-  const sourceAuthority = captured.authority;
   captured.release();
   let current = true;
   const assertCurrent = () => {
@@ -153,22 +151,20 @@ export async function createOperatorRecoveryFixture(params: {
     context,
     target,
     entry,
-    sourceAuthority,
+    sourceAuthority: captured.authority,
     setConfig: (next: OpenClawConfig) => {
       config = next;
     },
     retire: () => {
       current = false;
     },
-    restore: async () =>
-      (
-        await restoreGatewayRunRecovery({
-          target,
-          context,
-          assertCurrent,
-          restoreOperator: true,
-          restoreRequester: false,
-        })
-      ).operator,
+    restore: () =>
+      restoreGatewayRunRecovery({
+        target,
+        context,
+        assertCurrent,
+        restoreOperator: true,
+        restoreRequester: false,
+      }).then(({ operator }) => operator),
   };
 }
