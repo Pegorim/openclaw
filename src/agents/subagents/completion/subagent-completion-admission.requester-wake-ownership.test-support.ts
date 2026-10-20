@@ -12,27 +12,12 @@ import {
 } from "./subagent-completion-admission.test-helpers.js";
 import { mutateSubagentCompletionInDatabase } from "./subagent-completion-mutation.kernel.js";
 
-export function registerRequesterWakeOwnershipTests({
-  database: getDatabase,
-  persistOwner,
-}: {
+export function registerRequesterWakeOwnershipTests(options: {
   database: () => OpenClawStateDatabase;
   persistOwner: (input: ReturnType<typeof records>) => unknown;
 }) {
   const stored = (input: ReturnType<typeof records>) =>
     loadSubagentRegistryFromSqlite().get(input.subagent.runId);
-  const reconcile = (input: ReturnType<typeof records>) => {
-    const database = getDatabase();
-    return runOpenClawStateWriteTransaction(
-      () =>
-        mutateSubagentCompletionInDatabase(database, {
-          kind: "reconcileCancelled",
-          expected: input.subagent,
-          now: Date.now(),
-        }),
-      { database },
-    );
-  };
   it.each(["owner", "incarnation"] as const)(
     "reconciles aged cancellation only with known child ownership (missing: %s)",
     (missing) => {
@@ -49,18 +34,23 @@ export function registerRequesterWakeOwnershipTests({
       } else {
         input.subagent.childSessionIdentity = undefined;
       }
-      persistOwner(input);
+      options.persistOwner(input);
       const before = stored(input);
-      const result = reconcile(input);
+      const database = options.database();
+      const mutation = {
+        kind: "reconcileCancelled" as const,
+        expected: input.subagent,
+        now: Date.now(),
+      };
+      const result = runOpenClawStateWriteTransaction(
+        () => mutateSubagentCompletionInDatabase(database, mutation),
+        { database },
+      );
       const after = stored(input);
-      if (missing === "owner") {
-        expect(result.records).toEqual([]);
-        expect(after).toEqual(before);
-      } else {
-        expect(result.records).toHaveLength(1);
-        expect(after).toEqual({ ...before, killReconciliation: undefined });
-        expect(after?.childSessionIdentity).toBeUndefined();
-      }
+      expect(result.records).toHaveLength(missing === "owner" ? 0 : 1);
+      expect(after).toEqual(
+        missing === "owner" ? before : { ...before, killReconciliation: undefined },
+      );
     },
   );
 
@@ -68,15 +58,16 @@ export function registerRequesterWakeOwnershipTests({
     "settles an explicitly owned raw-child wake with requester-turn retirement (%s)",
     async (requesterTurnRunId) => {
       const input = armRequesterWake(records());
-      Object.assign(input.subagent, {
+      const owner = {
         childSessionKey: "global",
         childAgentId: "main",
         cleanupCompletedAt: undefined,
         requesterTurnRunId,
         retireAfterRequesterTurn: true,
-      });
+      };
+      Object.assign(input.subagent, owner);
       input.subagent.requesterSettleWake!.retireAfterSettle = true;
-      persistOwner(input);
+      options.persistOwner(input);
 
       await expect(
         settleRequesterCompletionBatch({ entries: [input.subagent] }),
@@ -85,20 +76,15 @@ export function registerRequesterWakeOwnershipTests({
         publication: "published",
       });
 
-      const retained = stored(input);
-      if (requesterTurnRunId) {
-        expect(retained).toMatchObject({
-          childSessionKey: "global",
-          childAgentId: "main",
-          requesterTurnRunId,
-          retireAfterRequesterTurn: true,
-          requesterSettleWake: undefined,
-          browserCleanupDispatchedAt: undefined,
-          cleanupCompletedAt: undefined,
-        });
-      } else {
-        expect(retained).toBeUndefined();
-      }
+      expect(stored(input)).toEqual(
+        requesterTurnRunId
+          ? expect.objectContaining({
+              ...owner,
+              requesterSettleWake: undefined,
+              browserCleanupDispatchedAt: undefined,
+            })
+          : undefined,
+      );
     },
   );
 }

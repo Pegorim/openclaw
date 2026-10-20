@@ -14,7 +14,6 @@ import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state
 import { reserveRestoredSubagentControllerSources } from "../announce/subagent-announce-controller-source.js";
 import * as requesterLookup from "../announce/subagent-announce-delivery.runtime.js";
 import { subagentRuns } from "../registry/subagent-registry-memory.js";
-import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { blockSubagentCompletionDelivery } from "./subagent-completion-admission.store.js";
 import {
   records,
@@ -22,15 +21,20 @@ import {
   withSubagentCompletionWorkerState,
 } from "./subagent-completion-admission.test-helpers.js";
 
-function reservationState(
-  database: OpenClawStateDatabase,
-  wake: SubagentRunRecord["requesterSettleWake"],
-) {
+function reservationState(database: OpenClawStateDatabase, withWake = false) {
   const entry = records().subagent;
   entry.generation = 4;
   entry.requesterStorePath = "/private/tmp/completion-mailbox/main/sessions.json";
   entry.delivery = { status: "pending", generation: 1 };
-  entry.requesterSettleWake = wake;
+  if (withWake) {
+    entry.requesterSettleWake = {
+      status: "pending",
+      attemptCount: 0,
+      rearmGeneration: 2,
+      requesterYieldBatch: true,
+      batchRunIds: [entry.runId],
+    };
+  }
   seedSubagentCompletionOwner({ subagent: entry, databaseOptions: { database } });
   const target = captureSessionTarget({
     storeScope: entry.requesterStorePath,
@@ -62,12 +66,12 @@ function reservationState(
   };
 }
 
-async function withReservationState(
-  wake: SubagentRunRecord["requesterSettleWake"],
+async function withMailbox(
   run: (fixture: ReturnType<typeof reservationState>) => Promise<void>,
+  withWake = false,
 ) {
   await withSubagentCompletionWorkerState(async (database) => {
-    const fixture = reservationState(database, wake);
+    const fixture = reservationState(database, withWake);
     const { inputs } = fixture;
     try {
       await run(fixture);
@@ -87,7 +91,7 @@ async function withReservationState(
 it.each(["expiry", "permanent_failure"] as const)(
   "admits the failure notice only after %s suspension commits",
   (reason) =>
-    withReservationState(undefined, async ({ reserve, block, database }) => {
+    withMailbox(async ({ reserve, block, database }) => {
       const completion = reserve("subagent-completion:completion-run:4");
       const context = captureOpenClawStateWorkerContext();
       database.db.exec(
@@ -119,33 +123,24 @@ it.each(["expiry", "permanent_failure"] as const)(
 it.each([false, true])(
   "keeps the requester cohort and claimed producer custody (claimed: %s)",
   (claimed) =>
-    withReservationState(
-      {
-        status: "pending",
-        attemptCount: 0,
-        rearmGeneration: 2,
-        requesterYieldBatch: true,
-        batchRunIds: ["completion-run"],
-      },
-      async ({ reserve, block }) => {
-        const completion = reserve("subagent-completion:completion-run:4");
-        if (claimed) {
-          expect(tryClaimSessionControllerTask(completion)).toBeDefined();
-        }
-        const cohort = reserve("requester-settle:main:agent:main:main:completion-run:yield-2");
-        await expect(block("expiry")).resolves.toBe(true);
-        expect(cohort.abortSignal.aborted).toBe(false);
-        expect(completion.abortSignal.aborted).toBe(!claimed);
-        expect(subagentRuns.get("completion-run")?.requesterSettleWake).toBeDefined();
-        if (!claimed) {
-          expect(tryClaimSessionControllerTask(cohort)).toBeDefined();
-        }
-      },
-    ),
+    withMailbox(async ({ reserve, block }) => {
+      const completion = reserve("subagent-completion:completion-run:4");
+      if (claimed) {
+        expect(tryClaimSessionControllerTask(completion)).toBeDefined();
+      }
+      const cohort = reserve("requester-settle:main:agent:main:main:completion-run:yield-2");
+      await expect(block("expiry")).resolves.toBe(true);
+      expect(cohort.abortSignal.aborted).toBe(false);
+      expect(completion.abortSignal.aborted).toBe(!claimed);
+      expect(subagentRuns.get("completion-run")?.requesterSettleWake).toBeDefined();
+      if (!claimed) {
+        expect(tryClaimSessionControllerTask(cohort)).toBeDefined();
+      }
+    }, true),
 );
 
 it("does not resurrect a suspended reservation after the requester lookup finishes", () =>
-  withReservationState(undefined, async ({ entry, inputs, block }) => {
+  withMailbox(async ({ entry, inputs, block }) => {
     const entered = createDeferredCore();
     const lookup =
       createDeferredCore<Awaited<ReturnType<typeof requesterLookup.loadRequesterSessionEntry>>>();

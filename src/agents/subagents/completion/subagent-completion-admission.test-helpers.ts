@@ -140,6 +140,7 @@ export function requesterWakeDriver(inputs: ReturnType<typeof records>[]) {
     controller,
     wake,
     warn,
+    [Symbol.dispose]: () => controller.clearRuntimeState(),
     async sweep() {
       const sweeper = createSubagentRegistrySweeper({
         runs: subagentRuns,
