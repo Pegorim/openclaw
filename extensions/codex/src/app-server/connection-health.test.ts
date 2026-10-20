@@ -82,40 +82,25 @@ describe("Codex remote WebSocket connection health", () => {
     expect(next.request).not.toHaveBeenCalled();
   });
 
-  it("does not retry an HTTP 403 authentication failure", async () => {
-    const statusCode = 403;
-    sharedClientMocks.getLeasedSharedCodexAppServerClient.mockRejectedValueOnce(
-      new Error(`Unexpected server response: ${statusCode}`),
+  it.each([
+    { reason: "HTTP 403", error: "Unexpected server response: 403", calls: 1 },
+    { reason: "invalid configuration", error: undefined, calls: 0 },
+  ])("does not retry $reason", async ({ error, calls }) => {
+    if (error) {
+      sharedClientMocks.getLeasedSharedCodexAppServerClient.mockRejectedValueOnce(new Error(error));
+    }
+    const { ctx, service } = createService(
+      error ? undefined : { appServer: { transport: "websocket" } },
     );
-    const { ctx, service } = createService();
-
     await startService(service, ctx);
-
     await vi.waitFor(() => {
       expect(ctx.logger.error).toHaveBeenCalledWith(
-        expect.stringContaining(`Unexpected server response: ${statusCode}`),
+        expect.stringContaining(error ?? "configuration is invalid"),
       );
     });
-    expect(sharedClientMocks.getLeasedSharedCodexAppServerClient).toHaveBeenCalledOnce();
-
+    expect(sharedClientMocks.getLeasedSharedCodexAppServerClient).toHaveBeenCalledTimes(calls);
     await service.stop?.(ctx);
-
     expect(sharedClientMocks.releaseLeasedSharedCodexAppServerClient).not.toHaveBeenCalled();
-  });
-
-  it("does not retry an invalid remote app-server configuration", async () => {
-    const { ctx, service } = createService({ appServer: { transport: "websocket" } });
-
-    await startService(service, ctx);
-
-    await vi.waitFor(() => {
-      expect(ctx.logger.error).toHaveBeenCalledWith(
-        expect.stringContaining("configuration is invalid"),
-      );
-    });
-    expect(sharedClientMocks.getLeasedSharedCodexAppServerClient).not.toHaveBeenCalled();
-
-    await service.stop?.(ctx);
   });
 });
 

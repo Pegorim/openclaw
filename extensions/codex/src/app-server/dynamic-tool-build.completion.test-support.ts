@@ -42,6 +42,24 @@ import { buildCodexRuntimeThreadConfig } from "./thread-requests.js";
 
 type ToolOptions = Parameters<typeof createOpenClawCodingTools>[0];
 
+async function withRuntimeConfig(
+  config: Parameters<typeof setRuntimeConfigSnapshot>[0],
+  run: () => Promise<void>,
+) {
+  const previous = getRuntimeConfigSnapshot();
+  const source = getRuntimeConfigSourceSnapshot();
+  setRuntimeConfigSnapshot(config);
+  try {
+    await run();
+  } finally {
+    if (previous) {
+      setRuntimeConfigSnapshot(previous, source ?? undefined);
+    } else {
+      clearRuntimeConfigSnapshot();
+    }
+  }
+}
+
 export function registerCodexCompletionCommandTest() {
   it.each(["default", "sandbox-deny", "custom-allow", "global-deny"] as const)(
     "constructs and completes sandbox Goal controls through the production host (%s)",
@@ -62,6 +80,9 @@ export function registerCodexCompletionCommandTest() {
                   ? { deny: ["update_goal"] }
                   : undefined,
         };
+        const sessionKey = expectDefined(params.sessionKey, "Goal session key");
+        const readGoal = async () =>
+          (await getSessionEntryAsync({ sessionKey, agentId: "main" }))?.goal;
         const configuredPolicy = structuredClone(params.config.tools);
         const existingGoal =
           policy === "default"
@@ -82,123 +103,92 @@ export function registerCodexCompletionCommandTest() {
                 lastStatusNote: "Keep the existing progress",
               };
         const closers: Array<() => void> = [];
-        const previousConfig = getRuntimeConfigSnapshot();
-        const previousSource = getRuntimeConfigSourceSnapshot();
-        setRuntimeConfigSnapshot(params.config);
-        try {
-          await upsertSessionEntry({
-            agentId: "main",
-            sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-            entry: { sessionId: params.sessionId, updatedAt: Date.now(), goal: existingGoal },
-          });
-          const sandboxPolicy = await resolveSandboxRuntimeStatusAsync({
-            cfg: params.config,
-            agentId: "main",
-            sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-            preparedSessionEntry: null,
-          });
-          const sandbox = {
-            ...createSandboxTestContext({
-              overrides: {
-                backendId: "node",
-                sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-                workspaceDir: state.workspaceDir,
-                agentWorkspaceDir: state.workspaceDir,
-                containerWorkdir: state.workspaceDir,
-                tools: sandboxPolicy.toolPolicy,
-              },
-            }),
-            placementExecutionMode: "remote-exec" as const,
-            placementNodeId: "synthetic-node",
-            placementEnvironmentId: "synthetic-environment",
-            placementSessionId: params.sessionId,
-            placementOwnerEpoch: 1,
-          };
-          params.sandbox = sandbox;
-          await bindProductionCodexHostCapabilities(params, closers);
-          const tools = await buildDynamicToolsForTest(params, state.workspaceDir, { sandbox });
-          const bridge = createCodexDynamicToolBridge({
-            tools,
-            signal: new AbortController().signal,
-          });
-          expect(buildCodexRuntimeThreadConfig(undefined)["features.goals"]).toBe(false);
-          const registeredNames = flattenCodexDynamicToolFunctions(bridge.specs).map(
-            (tool) => tool.name,
-          );
-          for (const name of ["get_goal", "create_goal"]) {
-            expect(bridge.specs).toContainEqual(
-              expect.objectContaining({ type: "function", name }),
-            );
-          }
-          const call = (tool: string, args: JsonObject) =>
-            bridge.handleToolCall({
-              threadId: "core-goal-thread",
-              turnId: "core-goal-turn",
-              callId: tool,
-              tool,
-              arguments: args,
+        await withRuntimeConfig(params.config, async () => {
+          try {
+            await upsertSessionEntry({
+              agentId: "main",
+              sessionKey,
+              entry: { sessionId: params.sessionId, updatedAt: Date.now(), goal: existingGoal },
             });
-          if (policy !== "default") {
-            expect(registeredNames).not.toContain("update_goal");
-            expect(await call("update_goal", { status: "complete" })).toMatchObject({
-              success: false,
+            const sandboxPolicy = await resolveSandboxRuntimeStatusAsync({
+              cfg: params.config,
+              agentId: "main",
+              sessionKey,
+              preparedSessionEntry: null,
+            });
+            const sandbox = {
+              ...createSandboxTestContext({
+                overrides: {
+                  backendId: "node",
+                  sessionKey,
+                  workspaceDir: state.workspaceDir,
+                  agentWorkspaceDir: state.workspaceDir,
+                  containerWorkdir: state.workspaceDir,
+                  tools: sandboxPolicy.toolPolicy,
+                },
+              }),
+              placementExecutionMode: "remote-exec" as const,
+              placementNodeId: "synthetic-node",
+              placementEnvironmentId: "synthetic-environment",
+              placementSessionId: params.sessionId,
+              placementOwnerEpoch: 1,
+            };
+            params.sandbox = sandbox;
+            await bindProductionCodexHostCapabilities(params, closers);
+            const tools = await buildDynamicToolsForTest(params, state.workspaceDir, { sandbox });
+            const bridge = createCodexDynamicToolBridge({
+              tools,
+              signal: new AbortController().signal,
+            });
+            expect(buildCodexRuntimeThreadConfig(undefined)["features.goals"]).toBe(false);
+            const registeredNames = flattenCodexDynamicToolFunctions(bridge.specs).map(
+              (tool) => tool.name,
+            );
+            for (const name of ["get_goal", "create_goal"]) {
+              expect(bridge.specs).toContainEqual(
+                expect.objectContaining({ type: "function", name }),
+              );
+            }
+            const call = (tool: string, args: JsonObject) =>
+              bridge.handleToolCall({
+                threadId: "core-goal-thread",
+                turnId: "core-goal-turn",
+                callId: tool,
+                tool,
+                arguments: args,
+              });
+            if (policy !== "default") {
+              expect(registeredNames).not.toContain("update_goal");
+              expect(await call("update_goal", { status: "complete" })).toMatchObject({
+                success: false,
+              });
+              expect(await call("get_goal", {})).toMatchObject({ success: true });
+              expect(await readGoal()).toEqual(existingGoal);
+              expect(params.config.tools).toEqual(configuredPolicy);
+              return;
+            }
+            expect(bridge.specs).toContainEqual(
+              expect.objectContaining({ type: "function", name: "update_goal" }),
+            );
+            expect(
+              await call("create_goal", { objective: "Verify the synthetic fixture" }),
+            ).toMatchObject({ success: true });
+            const active = await readGoal();
+            expect(active).toMatchObject({
+              status: "active",
+              objective: "Verify the synthetic fixture",
             });
             expect(await call("get_goal", {})).toMatchObject({ success: true });
-            expect(
-              (
-                await getSessionEntryAsync({
-                  sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-                  agentId: "main",
-                })
-              )?.goal,
-            ).toEqual(existingGoal);
-            expect(params.config.tools).toEqual(configuredPolicy);
-            return;
+            expect(await call("update_goal", { status: "complete" })).toMatchObject({
+              success: true,
+            });
+            expect(await readGoal()).toMatchObject({ id: active?.id, status: "complete" });
+          } finally {
+            for (const close of closers) {
+              close();
+            }
           }
-          expect(bridge.specs).toContainEqual(
-            expect.objectContaining({
-              type: "function",
-              name: "update_goal",
-            }),
-          );
-          expect(
-            await call("create_goal", { objective: "Verify the synthetic fixture" }),
-          ).toMatchObject({ success: true });
-          const active = (
-            await getSessionEntryAsync({
-              sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-              agentId: "main",
-            })
-          )?.goal;
-          expect(active).toMatchObject({
-            status: "active",
-            objective: "Verify the synthetic fixture",
-          });
-          expect(await call("get_goal", {})).toMatchObject({ success: true });
-          expect(await call("update_goal", { status: "complete" })).toMatchObject({
-            success: true,
-          });
-          expect(
-            (
-              await getSessionEntryAsync({
-                sessionKey: expectDefined(params.sessionKey, "Goal session key"),
-                agentId: "main",
-              })
-            )?.goal,
-          ).toMatchObject({
-            id: active?.id,
-            status: "complete",
-          });
-        } finally {
-          for (const close of closers) {
-            close();
-          }
-          if (previousConfig) {
-            setRuntimeConfigSnapshot(previousConfig, previousSource ?? undefined);
-          } else {
-            clearRuntimeConfigSnapshot();
-          }
-        }
+        });
       });
     },
   );
@@ -242,8 +232,6 @@ export function registerCodexCompletionCommandTest() {
         await bindProductionCodexHostCapabilities(params, localHostClosers);
         try {
           await runInHarnessToolAuthorityForTest(params, "codex", async (prepared) => {
-            const previousRuntimeConfig = getRuntimeConfigSnapshot();
-            const previousSourceConfig = getRuntimeConfigSourceSnapshot();
             const activeRun: Parameters<typeof setActiveEmbeddedRun>[1] = {
               runId: params.runId,
               toolAuthorityFingerprint: prepared.toolAuthorityFingerprint,
@@ -255,88 +243,84 @@ export function registerCodexCompletionCommandTest() {
                 clearActiveEmbeddedRun(params.sessionId, activeRun, sessionKey, params.sessionFile);
               },
             };
-            setRuntimeConfigSnapshot(config);
-            try {
-              await upsertSessionEntry({
-                agentId: "main",
-                sessionKey,
-                entry: {
-                  sessionId: params.sessionId,
-                  updatedAt: Date.now(),
-                  permissionMode: "full",
-                  chatType: "group",
-                  delivery: normalizeSessionDeliveryState({ context: route }),
-                },
-              });
-              setActiveEmbeddedRun(
-                params.sessionId,
-                activeRun,
-                sessionKey,
-                params.sessionFile,
-                "main",
-              );
-              const tools = await buildDynamicToolsForTest(params, state.workspaceDir, {
-                nativeToolSurfaceEnabled: false,
-                runAbortController: controller,
-              });
-              const tool = (name: string) =>
-                expectDefined(
-                  tools.find((candidate) => candidate.name === name),
-                  `OpenClaw ${name}`,
+            await withRuntimeConfig(config, async () => {
+              try {
+                await upsertSessionEntry({
+                  agentId: "main",
+                  sessionKey,
+                  entry: {
+                    sessionId: params.sessionId,
+                    updatedAt: Date.now(),
+                    permissionMode: "full",
+                    chatType: "group",
+                    delivery: normalizeSessionDeliveryState({ context: route }),
+                  },
+                });
+                setActiveEmbeddedRun(
+                  params.sessionId,
+                  activeRun,
+                  sessionKey,
+                  params.sessionFile,
+                  "main",
                 );
-              expect(factory.mock.calls[0]?.[0]).toMatchObject({
-                sessionKey,
-                trigger: "event",
-                continuesConversation: true,
-              });
-              const launched = await tool("exec").execute("continuation-exec", {
-                command: "echo codex-chain-ok",
-                background: true,
-              });
-              if (!isRecord(launched.details) || typeof launched.details.sessionId !== "string") {
-                throw new Error(
-                  `Expected a background process: ${JSON.stringify(launched.details)}`,
+                const tools = await buildDynamicToolsForTest(params, state.workspaceDir, {
+                  nativeToolSurfaceEnabled: false,
+                  runAbortController: controller,
+                });
+                const tool = (name: string) =>
+                  expectDefined(
+                    tools.find((candidate) => candidate.name === name),
+                    `OpenClaw ${name}`,
+                  );
+                expect(factory.mock.calls[0]?.[0]).toMatchObject({
+                  sessionKey,
+                  trigger: "event",
+                  continuesConversation: true,
+                });
+                const launched = await tool("exec").execute("continuation-exec", {
+                  command: "echo codex-chain-ok",
+                  background: true,
+                });
+                if (!isRecord(launched.details) || typeof launched.details.sessionId !== "string") {
+                  throw new Error(
+                    `Expected a background process: ${JSON.stringify(launched.details)}`,
+                  );
+                }
+                const processId = launched.details.sessionId;
+                await vi.waitFor(
+                  () =>
+                    expect(peekSystemEventEntries(sessionKey)).toEqual([
+                      expect.objectContaining({
+                        text: expect.stringContaining("codex-chain-ok"),
+                        deliveryContext: route,
+                      }),
+                    ]),
+                  { timeout: 10_000 },
                 );
+                const result = await tool("process").execute("continuation-poll", {
+                  action: "poll",
+                  sessionId: processId,
+                });
+                expect(result.details).toMatchObject({ status: "completed", exitCode: 0 });
+                expect(result.content).toContainEqual(
+                  expect.objectContaining({
+                    type: "text",
+                    text: expect.stringContaining("codex-chain-ok"),
+                  }),
+                );
+                acknowledgeInternalToolResult(result);
+                expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+                await tool("process").execute("continuation-clear", {
+                  action: "clear",
+                  sessionId: processId,
+                });
+                expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+              } finally {
+                controller.abort();
+                drainSystemEventEntries(sessionKey);
+                clearActiveEmbeddedRun(params.sessionId, activeRun, sessionKey, params.sessionFile);
               }
-              const processId = launched.details.sessionId;
-              await vi.waitFor(
-                () =>
-                  expect(peekSystemEventEntries(sessionKey)).toEqual([
-                    expect.objectContaining({
-                      text: expect.stringContaining("codex-chain-ok"),
-                      deliveryContext: route,
-                    }),
-                  ]),
-                { timeout: 10_000 },
-              );
-              const result = await tool("process").execute("continuation-poll", {
-                action: "poll",
-                sessionId: processId,
-              });
-              expect(result.details).toMatchObject({ status: "completed", exitCode: 0 });
-              expect(result.content).toContainEqual(
-                expect.objectContaining({
-                  type: "text",
-                  text: expect.stringContaining("codex-chain-ok"),
-                }),
-              );
-              acknowledgeInternalToolResult(result);
-              expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-              await tool("process").execute("continuation-clear", {
-                action: "clear",
-                sessionId: processId,
-              });
-              expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-            } finally {
-              controller.abort();
-              drainSystemEventEntries(sessionKey);
-              clearActiveEmbeddedRun(params.sessionId, activeRun, sessionKey, params.sessionFile);
-              if (previousRuntimeConfig) {
-                setRuntimeConfigSnapshot(previousRuntimeConfig, previousSourceConfig ?? undefined);
-              } else {
-                clearRuntimeConfigSnapshot();
-              }
-            }
+            });
           });
         } finally {
           try {
