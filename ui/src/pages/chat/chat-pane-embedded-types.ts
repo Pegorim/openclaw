@@ -20,9 +20,9 @@ import type { ChatPageHost } from "./chat-state-host.ts";
 import type { ChatProps } from "./chat-view-frame.ts";
 import type { SessionWorkspaceState } from "./components/chat-session-workspace-types.ts";
 import type {
-  SessionWorkspaceProps,
-  SessionDiffProps,
   ChatDetailPanelProps,
+  SessionDiffProps,
+  SessionWorkspaceProps,
   SidebarSelection,
 } from "./components/chat-sidebar-content-types.ts";
 import type { SessionDiscussionPanelConfig } from "./components/session-discussion-panel.tsx";

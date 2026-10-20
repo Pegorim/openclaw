@@ -19,6 +19,9 @@ import type {
 } from "./chat-message-media.ts";
 import type { createSessionWorkspaceProps } from "./chat-session-workspace.ts";
 
+/** Destination selected by the content owner; void keeps an existing reader in place. */
+export type SidebarOpenResult = "detail" | "workspace" | void;
+
 type SessionWorkspaceView = ReturnType<typeof createSessionWorkspaceProps>;
 type SessionWorkspaceOptionalKey =
   | "transcriptAttachments"
@@ -41,9 +44,6 @@ type SessionWorkspaceOptionalKey =
   | "onOpenDiff";
 export type SessionWorkspaceProps = Omit<SessionWorkspaceView, SessionWorkspaceOptionalKey> &
   Partial<Pick<SessionWorkspaceView, SessionWorkspaceOptionalKey>>;
-
-/** Destination selected by the content owner; void keeps an existing reader in place. */
-export type SidebarOpenResult = "detail" | "workspace" | void;
 
 export type SessionWorkspaceFilter = "all" | "changed" | "read" | "artifacts";
 
