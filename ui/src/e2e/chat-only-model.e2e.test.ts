@@ -1,10 +1,8 @@
-import path from "node:path";
-import type { Locator, Page } from "playwright";
 import { expect, it } from "vitest";
-import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
 import { createChatFlowE2eSuite, installMockGateway } from "./chat-flow.test-support.ts";
 import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-support.ts";
+import { pollText, pollCount, pollAttribute } from "./new-session-page.test-support.ts";
 
 const suite = createChatFlowE2eSuite();
 const sessionKey = "agent:main:main";
@@ -26,51 +24,8 @@ const models = [
   },
 ];
 
-function sessionsList(model: string, modelProvider: string) {
-  return {
-    count: 1,
-    defaults: {
-      contextTokens: 32_768,
-      model: "qwen3-8b",
-      modelProvider: "lmstudio",
-      thinkingDefault: "off",
-      thinkingLevels: [{ id: "off", label: "off" }],
-    },
-    path: "",
-    sessions: [
-      {
-        contextTokens: 32_768,
-        displayName: "Local chat",
-        hasActiveRun: false,
-        key: sessionKey,
-        kind: "direct",
-        label: "Local chat",
-        model,
-        modelProvider,
-        status: "done",
-        totalTokens: 0,
-        updatedAt: Date.now(),
-      },
-    ],
-    ts: Date.now(),
-  };
-}
-
 suite.define(() => {
   it("explains chat-only models and keeps model switching as the recovery path", async () => {
-    const proofDir =
-      process.env.OPENCLAW_CAPTURE_UI_PROOF === "1"
-        ? createControlUiE2eArtifactDir("chat-only-model")
-        : null;
-    const screenshot = async (target: Locator | Page, name: string) => {
-      if (proofDir) {
-        await target.screenshot({
-          animations: "disabled",
-          path: path.join(proofDir, name),
-          ...(target === page ? { fullPage: true } : {}),
-        });
-      }
-    };
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
     const gateway = await installMockGateway(page, {
@@ -79,7 +34,33 @@ suite.define(() => {
       models,
       sessionKey,
       methodResponses: {
-        "sessions.list": sessionsList("qwen3-8b", "lmstudio"),
+        "sessions.list": {
+          count: 1,
+          defaults: {
+            contextTokens: 32_768,
+            model: "qwen3-8b",
+            modelProvider: "lmstudio",
+            thinkingDefault: "off",
+            thinkingLevels: [{ id: "off", label: "off" }],
+          },
+          path: "",
+          sessions: [
+            {
+              contextTokens: 32_768,
+              displayName: "Local chat",
+              hasActiveRun: false,
+              key: sessionKey,
+              kind: "direct",
+              label: "Local chat",
+              model: "qwen3-8b",
+              modelProvider: "lmstudio",
+              status: "done",
+              totalTokens: 0,
+              updatedAt: Date.now(),
+            },
+          ],
+          ts: Date.now(),
+        },
       },
     });
 
@@ -92,48 +73,40 @@ suite.define(() => {
       const picker = composer.locator('[data-chat-model-select="true"]');
       const badge = picker.locator(".chat-controls__model-capability-badge");
 
-      await expect.poll(() => picker.getAttribute("data-chat-model-tools")).toBe("unavailable");
+      await pollAttribute(picker, "data-chat-model-tools").toBe("unavailable");
       await expect.poll(async () => (await badge.textContent())?.trim()).toBe("Chat only");
-      await expect.poll(() => picker.getAttribute("aria-label")).toContain("Chat only");
-
-      await screenshot(composer, "01-desktop-chat-only-composer.png");
+      await pollAttribute(picker, "aria-label").toContain("Chat only");
 
       await picker.click();
       const localOption = composer.locator('[data-chat-model-option="lmstudio/qwen3-8b"]');
       const openAiOption = composer.locator('[data-chat-model-option="openai/gpt-5.5"]');
-      await expect
-        .poll(() => localOption.locator(".chat-controls__model-option-meta").textContent())
-        .toBe("32.8k");
-      await expect.poll(() => localOption.getAttribute("aria-label")).toContain("cannot use tools");
+      await pollText(localOption.locator(".chat-controls__model-option-meta")).toBe("32.8k");
+      await pollAttribute(localOption, "aria-label").toContain("cannot use tools");
       await revealChatModelOption(localOption);
       const infoIcon = localOption.locator(".chat-controls__model-chat-only-info");
-      await expect.poll(() => infoIcon.locator("svg").count()).toBe(1);
+      await pollCount(infoIcon.locator("svg")).toBe(1);
       await expect.poll(async () => (await infoIcon.boundingBox())?.width).toBe(16);
       await expect
         .poll(async () => (await openAiOption.textContent())?.includes("Chat only"))
         .toBe(false);
 
-      await screenshot(page, "02-desktop-model-picker.png");
-
       await selectChatModelOption(openAiOption);
       const patch = await gateway.waitForRequest("sessions.patch");
       expect(patch.params).toMatchObject({ key: sessionKey, model: "openai/gpt-5.5" });
-      await expect.poll(() => picker.getAttribute("data-chat-model-tools")).toBe("available");
-      await expect.poll(() => badge.count()).toBe(0);
+      await pollAttribute(picker, "data-chat-model-tools").toBe("available");
+      await pollCount(badge).toBe(0);
 
       const pickerDetails = composer.locator("details.chat-controls__model-picker");
       if (!(await pickerDetails.evaluate((element: HTMLDetailsElement) => element.open))) {
         await picker.click();
       }
       await selectChatModelOption(localOption);
-      await expect.poll(() => picker.getAttribute("data-chat-model-tools")).toBe("unavailable");
+      await pollAttribute(picker, "data-chat-model-tools").toBe("unavailable");
       if (await pickerDetails.evaluate((element: HTMLDetailsElement) => element.open)) {
         await picker.click();
       }
       await page.setViewportSize({ height: 844, width: 390 });
       await expect.poll(() => picker.isVisible()).toBe(true);
-
-      await screenshot(page, "03-mobile-chat-only-model.png");
 
       if (!(await pickerDetails.evaluate((element: HTMLDetailsElement) => element.open))) {
         await picker.click();
@@ -145,8 +118,6 @@ suite.define(() => {
           return box !== null && box.x >= 0 && box.x + box.width <= 390;
         })
         .toBe(true);
-
-      await screenshot(page, "04-mobile-model-picker.png");
     } finally {
       await suite.closeBrowserContext(context);
     }

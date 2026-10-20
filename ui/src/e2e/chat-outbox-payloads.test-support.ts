@@ -31,24 +31,18 @@ export async function readOutboxQueue(page: Page): Promise<ChatQueueItem[]> {
 
 export async function countOutboxPayloads(page: Page): Promise<number> {
   return page.evaluate(async () => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("openclaw-control-ui");
-      request.onsuccess = () => resolve(request.result);
-      request.addEventListener("error", () =>
-        reject(request.error ?? new Error("IndexedDB request failed")),
-      );
-    });
-    try {
-      return await new Promise<number>((resolve, reject) => {
-        const request = database
-          .transaction("outboxPayloads")
-          .objectStore("outboxPayloads")
-          .count();
+    const result = <T>(request: IDBRequest<T>) =>
+      new Promise<T>((resolve, reject) => {
         request.onsuccess = () => resolve(request.result);
         request.addEventListener("error", () =>
           reject(request.error ?? new Error("IndexedDB request failed")),
         );
       });
+    const database = await result(indexedDB.open("openclaw-control-ui"));
+    try {
+      return await result(
+        database.transaction("outboxPayloads").objectStore("outboxPayloads").count(),
+      );
     } finally {
       database.close();
     }

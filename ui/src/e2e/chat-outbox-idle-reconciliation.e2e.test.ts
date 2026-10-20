@@ -12,6 +12,7 @@ import {
 import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-support.ts";
 const suite = createChatFlowE2eSuite();
 const rosterMatch = { includeGlobal: true };
+type OutboxHost = Parameters<typeof outboxStorageScope>[0];
 suite.define(() => {
   it("releases a retained queued send after the canonical session list records idle", async () => {
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
@@ -70,19 +71,11 @@ suite.define(() => {
       ).slice(initialListCount);
       expect(emptyOutboxListRequests).toHaveLength(0);
       expect(await gateway.getRequests("chat.metadata")).toHaveLength(initialMetadataCount);
-      const emptyOutboxListCount = initialListCount + emptyOutboxListRequests.length;
 
       const owner = await page
         .locator('openclaw-chat-pane[aria-hidden="false"]')
         .evaluate((pane) => {
-          const state = (
-            pane as HTMLElement & {
-              state: {
-                settings?: { gatewayUrl?: string };
-                client?: { recoveryScope?: string; recoveryScopeReady?: boolean };
-              };
-            }
-          ).state;
+          const state = (pane as HTMLElement & { state: OutboxHost }).state;
           const gatewayUrl = state.settings?.gatewayUrl;
           const client = state.client;
           if (!gatewayUrl || !client?.recoveryScopeReady || !client.recoveryScope) {
@@ -99,48 +92,40 @@ suite.define(() => {
       if (!storageScope) {
         throw new Error("Expected an owned queue stamp");
       }
-      await page.evaluate(
-        ({ key, gatewayOwner, scopeKey, storageScope: admittedScope, targetKey }) => {
-          sessionStorage.setItem(
-            key,
-            JSON.stringify({
-              version: 4,
-              gatewayOwner,
-              recovery: {},
-              sessions: {
-                [scopeKey]: {
-                  updatedAt: Date.now(),
-                  queue: [
-                    {
-                      id: "queued-before-switch",
-                      text: "flush after idle reconciliation",
-                      createdAt: Date.now(),
-                      sendState: "waiting-idle",
-                      sendAttempts: 0,
-                      sessionKey: targetKey,
-                      agentId: "main",
-                      storageScope: admittedScope,
-                    },
-                  ],
-                },
+      const store = {
+        version: 4,
+        gatewayOwner: target.gatewayOwner,
+        recovery: {},
+        sessions: {
+          [storedChatOutboxScopeKey({ sessionKey: firstKey, agentId: "main" })]: {
+            updatedAt: Date.now(),
+            queue: [
+              {
+                id: "queued-before-switch",
+                text: "flush after idle reconciliation",
+                createdAt: Date.now(),
+                sendState: "waiting-idle",
+                sendAttempts: 0,
+                sessionKey: firstKey,
+                agentId: "main",
+                storageScope,
               },
-            }),
-          );
+            ],
+          },
+        },
+      };
+      await page.evaluate(
+        ({ key, store: snapshot }) => {
+          sessionStorage.setItem(key, JSON.stringify(snapshot));
           window.dispatchEvent(new StorageEvent("storage", { key, storageArea: sessionStorage }));
         },
-        {
-          key: target.key,
-          gatewayOwner: target.gatewayOwner,
-          scopeKey: storedChatOutboxScopeKey({ sessionKey: firstKey, agentId: "main" }),
-          storageScope,
-          targetKey: firstKey,
-        },
+        { key: target.key, store },
       );
       await switchTo(firstKey);
       await title("Instant A").waitFor();
       await expect
         .poll(async () => (await gateway.getRequests("sessions.list", rosterMatch)).length)
-        .toBe(emptyOutboxListCount + 1);
+        .toBe(initialListCount + 1);
       const queued = page.locator(".chat-queue").getByText("flush after idle reconciliation");
       await queued.waitFor();
       expect(await gateway.getRequests("chat.send")).toHaveLength(0);
