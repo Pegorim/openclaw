@@ -35,19 +35,20 @@ export type SystemdManagerSnapshotFixture = {
   loadState?: string;
 };
 
+const properties = (...entries: Array<[string, unknown]>) =>
+  entries.map(([type, data]) => JSON.stringify({ type, data })).join("\n");
+
 export function buildSystemdManagerPropertyOutput(snapshot: SystemdManagerSnapshotFixture): string {
-  return [
-    {
-      type: "a(sasbttttuii)",
-      data: [[snapshot.programArguments[0], snapshot.programArguments, false, 0, 0, 0, 0, 0, 0, 0]],
-    },
-    { type: "s", data: snapshot.workingDirectory ?? "" },
-    { type: "as", data: snapshot.environment ?? [] },
-    { type: "a(sb)", data: snapshot.environmentFiles ?? [] },
-    { type: "as", data: snapshot.unsetEnvironment ?? [] },
-  ]
-    .map((property) => JSON.stringify(property))
-    .join("\n");
+  return properties(
+    [
+      "a(sasbttttuii)",
+      [[snapshot.programArguments[0], snapshot.programArguments, false, 0, 0, 0, 0, 0, 0, 0]],
+    ],
+    ["s", snapshot.workingDirectory ?? ""],
+    ["as", snapshot.environment ?? []],
+    ["a(sb)", snapshot.environmentFiles ?? []],
+    ["as", snapshot.unsetEnvironment ?? []],
+  );
 }
 
 export function buildSystemdUnitPropertyOutput(
@@ -55,16 +56,16 @@ export function buildSystemdUnitPropertyOutput(
     fragmentPath: string;
   },
 ): string {
-  return [
-    JSON.stringify({ type: "s", data: params.fragmentPath }),
-    JSON.stringify({ type: "as", data: params.dropInPaths ?? [] }),
-    JSON.stringify({ type: "b", data: params.needDaemonReload ?? false }),
-    JSON.stringify({ type: "s", data: params.loadState ?? "loaded" }),
-    JSON.stringify({ type: "s", data: "enabled" }),
-    JSON.stringify({ type: "s", data: "active" }),
-    JSON.stringify({ type: "b", data: true }),
-    JSON.stringify({ type: "b", data: false }),
-  ].join("\n");
+  return properties(
+    ["s", params.fragmentPath],
+    ["as", params.dropInPaths ?? []],
+    ["b", params.needDaemonReload ?? false],
+    ["s", params.loadState ?? "loaded"],
+    ["s", "enabled"],
+    ["s", "active"],
+    ["b", true],
+    ["b", false],
+  );
 }
 
 export function createMockGatewayService(overrides: Partial<GatewayService> = {}): GatewayService {
@@ -95,25 +96,19 @@ export const managerlessPreflightCases = [
       portSource: "env" as const,
     })),
   ),
-  ...[
-    "installed",
-    "node absent",
-    "node installed",
-    "global definition",
-    "unreadable",
-    "manager",
-  ].map((condition) => ({ updateInstallKind: "package" as const, shouldRestart: true, condition })),
   ...(
     [
-      ["busy port", "busy", "env"],
-      ["configured busy port", "busy", "config"],
-      ["unknown port", "unknown", "env"],
+      { condition: "installed" },
+      { condition: "node absent" },
+      { condition: "node installed" },
+      { condition: "global definition" },
+      { condition: "unreadable" },
+      { condition: "manager" },
+      { condition: "busy port", portUsage: "busy", portSource: "env" },
+      { condition: "configured busy port", portUsage: "busy", portSource: "config" },
+      { condition: "unknown port", portUsage: "unknown", portSource: "env" },
     ] as const
-  ).map(([condition, portUsage, portSource]) => ({
-    updateInstallKind: "package" as const,
-    shouldRestart: true,
-    condition,
-    portUsage,
-    portSource,
-  })),
+  ).map((entry) =>
+    Object.assign({ updateInstallKind: "package" as const, shouldRestart: true }, entry),
+  ),
 ];

@@ -216,9 +216,7 @@ it.each([
     const { env, sourcePath, plist } = launchdFixture();
     const command = {
       programArguments: [
-        "/usr/bin/node",
-        "/opt/openclaw/index.js",
-        "gateway",
+        ...programArguments,
         ...(customized === "ProgramArguments" ? ["--verbose"] : []),
       ],
       environment: { PATH: "/usr/bin:/bin", ...(stale ? staleServiceEnvironment : {}) },
@@ -340,37 +338,27 @@ it("reports failed native task inspection independently from legacy issues", asy
   expect(JSON.stringify(result)).not.toContain("operator-secret");
 });
 
-const discardedSettings: Array<{
-  key: string;
-  native: string[];
-  cwd?: string;
-  environment: Record<string, string>;
-}> = [
-  {
-    key: "ProgramArguments",
-    native: ["--inspect=operator-private"],
-    environment: {},
-  },
-  { key: "WorkingDirectory", native: [], cwd: "/operator-private", environment: {} },
-  {
-    key: "Environment.PATH",
-    native: [],
-    environment: { PATH: "/usr/bin:/operator-private" },
-  },
-  {
-    key: "Environment.NODE_OPTIONS",
-    native: [],
-    environment: { NODE_OPTIONS: "--max-old-space-size=4096 --require=/operator-private" },
-  },
+const discardedSettings: Array<[string, string[]?, string?, Record<string, string>?]> = [
+  ["ProgramArguments", ["--inspect=operator-private"]],
+  ["WorkingDirectory", [], "/operator-private"],
+  ["Environment.PATH", [], undefined, { PATH: "/usr/bin:/operator-private" }],
+  [
+    "Environment.NODE_OPTIONS",
+    [],
+    undefined,
+    {
+      NODE_OPTIONS: "--max-old-space-size=4096 --require=/operator-private",
+    },
+  ],
 ];
 
 it.each(discardedSettings)(
-  "blocks a rewrite plan that discards $key with a safe environment diff",
-  async ({ key, native: nativeArguments, cwd, environment }) => {
+  "blocks a rewrite plan that discards %s with a safe environment diff",
+  async (key, nativeArguments, cwd, environment = {}) => {
     const fixture = await systemdFixture();
     const command = {
       ...fixture.command,
-      programArguments: ["/usr/bin/node", ...nativeArguments, "/old/index.js", "gateway"],
+      programArguments: ["/usr/bin/node", ...(nativeArguments ?? []), "/old/index.js", "gateway"],
       workingDirectory: cwd,
       environment: { ...fixture.command.environment, ...environment },
     };

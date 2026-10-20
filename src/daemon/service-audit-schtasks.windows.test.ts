@@ -6,6 +6,12 @@ import { auditGatewayServiceConfig } from "./service-audit.js";
 import { fixture, native } from "./service-definition-backup.test-support.js";
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+function expectOnlyDrift(
+  result: Awaited<ReturnType<typeof auditGatewayServiceConfig>>,
+  entry?: { kind?: string; key: string },
+) {
+  expect(result.definitionDrift ?? []).toMatchObject(entry ? [entry] : []);
+}
 function taskXml(f: Fixture, options: Partial<Parameters<typeof buildScheduledTaskXml>[0]> = {}) {
   return buildScheduledTaskXml({
     taskDescription: "OpenClaw Gateway",
@@ -65,15 +71,8 @@ it.each(["omitted", "disabled-task", "disabled-trigger", "native-defaults", "mis
       installed,
       kind === "missing-trigger" ? { ...f.env, USERNAME: undefined } : f.env,
     );
-    expect(result.definitionDrift ?? []).toEqual(
-      kind === "omitted" || kind === "native-defaults"
-        ? []
-        : [
-            expect.objectContaining({
-              key: kind === "disabled-task" ? "Settings.Enabled" : "Triggers.LogonTrigger.Enabled",
-            }),
-          ],
-    );
+    const key = kind === "disabled-task" ? "Settings.Enabled" : "Triggers.LogonTrigger.Enabled";
+    expectOnlyDrift(result, kind === "omitted" || kind === "native-defaults" ? undefined : { key });
   },
 );
 
@@ -123,15 +122,14 @@ it.each([
     stderr: sid ? "" : `Cannot resolve ${account}`,
   });
   const result = await auditXml(f, xml, { ...f.env, USERDOMAIN: "WORKGROUP" });
-  expect(result.definitionDrift ?? []).toEqual(
+  expectOnlyDrift(
+    result,
     kind === "same SID"
-      ? []
-      : [
-          expect.objectContaining({
-            kind: "unknown-edit",
-            key: "Triggers.LogonTrigger.UserId",
-          }),
-        ],
+      ? undefined
+      : {
+          kind: "unknown-edit",
+          key: "Triggers.LogonTrigger.UserId",
+        },
   );
   expect(JSON.stringify(result)).not.toContain(account);
 });
