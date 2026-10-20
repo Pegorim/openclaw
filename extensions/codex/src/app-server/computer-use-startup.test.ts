@@ -17,8 +17,6 @@ import { CODEX_APP_SERVER_VERSION } from "./version.js";
 const ensureService = service.ensureCodexComputerUseServiceApp;
 const resolveServiceSource = service.resolveCodexComputerUseServiceAppSourcePath;
 type InspectService = NonNullable<Parameters<typeof ensureService>[0]["inspectServiceApp"]>;
-const CLIENT_PATH =
-  "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 
 describe.each(["service", "cache"])("createIsolatedCodexAppServerClient %s refresh", (artifact) => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -133,9 +131,7 @@ async function writeJson(file: string, value: unknown) {
 }
 
 async function writeServiceFixture(appPath: string, identity: string): Promise<void> {
-  const clientPath = path.join(appPath, CLIENT_PATH);
-  await fs.mkdir(path.dirname(clientPath), { recursive: true });
-  await fs.writeFile(clientPath, "client", { mode: 0o755 });
+  await fs.mkdir(path.join(appPath, "Contents"), { recursive: true });
   await fs.writeFile(path.join(appPath, "Contents", "Info.plist"), identity);
 }
 
