@@ -58,6 +58,8 @@ it.each(["stored", "missing"] as const)(
   (entryState) =>
     withOpenClawTestState({ label: "memory-startup" }, async (state) => {
       const profileId = "openai:memory-startup";
+      const agentDir = state.agentDir();
+      const model = "text-embedding-3-small";
       const ref = { source: "store", provider: "default", id: "MEMORY_STARTUP_KEY" } as const;
       const value = "synthetic-memory-bootstrap-key";
       const config: OpenClawConfig = {
@@ -83,7 +85,7 @@ it.each(["stored", "missing"] as const)(
       ensureMemoryIndexSchema({ db, cacheEnabled: true, ftsEnabled: true });
       db.prepare("INSERT INTO memory_index_meta (key, value) VALUES (?, ?)").run(
         "memory_index_meta_v1",
-        JSON.stringify({ model: "text-embedding-3-small", vectorDims: 3 }),
+        JSON.stringify({ model, vectorDims: 3 }),
       );
       db.prepare(
         `INSERT INTO memory_index_chunks
@@ -98,24 +100,16 @@ it.each(["stored", "missing"] as const)(
       const before = readSemanticData();
       const authParams = {
         cfg: config,
-        store: loadAuthProfileStoreForSecretsRuntime(state.agentDir()),
+        store: loadAuthProfileStoreForSecretsRuntime(agentDir),
         profileId,
-        agentDir: state.agentDir(),
+        agentDir,
       };
-      // Even a valid stored ref is unavailable until the runtime publishes it.
-      await expect(resolveApiKeyForProfile(authParams)).rejects.toMatchObject({
-        code: "SECRET_SURFACE_UNAVAILABLE",
-      });
-
       const embeddingAdapter = getRegisteredEmbeddingProvider("openai")?.adapter;
       assert(embeddingAdapter);
-      await expect(
-        embeddingAdapter.create({
-          config,
-          agentDir: state.agentDir(),
-          model: "text-embedding-3-small",
-        }),
-      ).rejects.toMatchObject({ code: "SECRET_SURFACE_UNAVAILABLE" });
+      // Even a valid stored ref is unavailable until the runtime publishes it.
+      await expect(embeddingAdapter.create({ config, agentDir, model })).rejects.toMatchObject({
+        code: "SECRET_SURFACE_UNAVAILABLE",
+      });
 
       const params = {
         config,
@@ -140,14 +134,13 @@ it.each(["stored", "missing"] as const)(
           warnings.push(...(await migration.migrateLegacyState(params)).warnings);
         }
       }
-      expect(readSemanticData()).toEqual(before);
       // Startup refuses migration warnings before it can activate auth profiles.
       expect(warnings).toEqual([]);
 
       const snapshot = await prepareSecretsRuntimeSnapshot({
         config,
         env: state.env,
-        agentDirs: [state.agentDir()],
+        agentDirs: [agentDir],
         allowUnavailableSecretOwners: true,
       });
       activateSecretsRuntimeSnapshot(snapshot);

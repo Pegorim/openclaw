@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import type { ModelProviderConfig } from "../config/types.models.js";
 import type { DoctorMemoryEmbeddingRuntimePayload } from "../gateway/server-methods/doctor.js";
 import type { ManifestOwnerBasePolicyBlockReason } from "../plugins/manifest-owner-policy.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
@@ -115,6 +116,7 @@ import {
 
 const firstNoteMessage = () => String(note.mock.calls[0]?.[0] ?? "");
 function expectFirstNoteContains(...values: string[]) {
+  expect(note).toHaveBeenCalledTimes(1);
   for (const value of values) {
     expect(firstNoteMessage()).toContain(value);
   }
@@ -140,6 +142,15 @@ const skippedAuthProfileOptions = {
   skipAuthProfileResolution: true,
 } satisfies NonNullable<Parameters<typeof noteMemorySearchHealth>[1]>;
 const compatibleRemote = { baseUrl: "http://127.0.0.1:1234/v1" };
+function providerConfig(provider: string, overrides: Partial<ModelProviderConfig>): OpenClawConfig {
+  return {
+    models: {
+      providers: {
+        [provider]: { baseUrl: "https://embeddings.example.test/v1", models: [], ...overrides },
+      },
+    },
+  };
+}
 function localRuntimeFacts(failed = false): DoctorMemoryEmbeddingRuntimePayload {
   const endpoint = failed ? "unavailable" : "ready";
   return {
@@ -173,17 +184,11 @@ async function runMemorySearchHealth(
   await noteMemorySearchHealth(config, options);
 }
 
+const recallAgent = (rememberAcrossConversations: boolean) => ({
+  memory: { search: { rememberAcrossConversations } },
+});
 function conversationRecallConfig(plugins?: OpenClawConfig["plugins"]): OpenClawConfig {
-  return {
-    agents: {
-      entries: {
-        personal: {
-          memory: { search: { rememberAcrossConversations: true } },
-        },
-      },
-    },
-    ...(plugins ? { plugins } : {}),
-  } as OpenClawConfig;
+  return { agents: { entries: { personal: recallAgent(true) } }, plugins };
 }
 
 async function runConversationRecallHealth(plugins?: OpenClawConfig["plugins"]) {
@@ -280,16 +285,9 @@ it("collects a native provider acquisition failure as an unavailable warning", a
 });
 
 it("preserves disabled-memory lint filtering with multiple agents", async () => {
-  const config = {
-    agents: {
-      entries: Object.fromEntries(
-        ["personal", "secondary"].map((id) => [
-          id,
-          { memory: { search: { rememberAcrossConversations: false } } },
-        ]),
-      ),
-    },
-  } as OpenClawConfig;
+  const config: OpenClawConfig = {
+    agents: { entries: { personal: recallAgent(false), secondary: recallAgent(false) } },
+  };
   resolveMemorySearchConfig.mockReturnValue(undefined);
 
   const findings = await collectFindings(config);
@@ -328,7 +326,6 @@ it("uses the memory-core recovery message when the local provider plugin is miss
   listProviderPolicyOwners.mockReturnValueOnce([]);
   await runMemorySearchHealth("local", {});
 
-  expect(note).toHaveBeenCalledTimes(1);
   expectFirstNoteContains(
     "Unknown memory embedding provider: local",
     "openclaw plugins install @openclaw/llama-cpp-provider",
@@ -428,17 +425,6 @@ it("uses the policy owner selected after an earlier disabled owner", async () =>
   expectFirstNoteExcludes("openclaw plugins enable a-disabled");
 });
 
-it("still reports a missing memory backend in intentional FTS-only mode", async () => {
-  resolveActiveMemoryBackendConfig.mockReturnValue(null);
-  await runMemorySearchHealth("none", {}, { fallback: "none" });
-
-  expect(note).toHaveBeenCalledWith(
-    "No active memory plugin is registered for the current config.",
-    "Memory search",
-  );
-  expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
-});
-
 it.each([true, false])("reports llama.cpp runtime facts (ready=%s)", async (ready) => {
   await runMemorySearchHealth("local", {
     gatewayMemoryProbe: {
@@ -459,7 +445,6 @@ it.each([true, false])("reports llama.cpp runtime facts (ready=%s)", async (read
       "Memory search",
     );
   } else {
-    expect(note).toHaveBeenCalledTimes(1);
     expectFirstNoteContains(
       "llama.cpp server: cpu, b10357 (689e227db) (failed)",
       "Model: embedding-model",
@@ -505,7 +490,6 @@ it.each([
   if (warning === null) {
     expect(note).not.toHaveBeenCalled();
   } else {
-    expect(note).toHaveBeenCalledTimes(1);
     expectFirstNoteContains(warning);
   }
 });
@@ -514,18 +498,22 @@ it.each([
   ["enabled", { enabled: true, config: { dbPath: ".openclaw/memory" } }, true],
   ["disabled", { enabled: false }, false],
   ["placeholder", {}, false],
+  ["default slot", undefined, false],
 ] as const)("checks an %s alternate memory slot entry", async (_name, entry, isActive) => {
   resolveActiveMemoryBackendConfig.mockReturnValue(null);
-  const config: OpenClawConfig = {
-    plugins: { slots: { memory: "memory-lancedb" }, entries: { "memory-lancedb": entry } },
-  };
-  await runMemorySearchHealth("auto", undefined, undefined, config);
+  const config: OpenClawConfig = entry
+    ? { plugins: { slots: { memory: "memory-lancedb" }, entries: { "memory-lancedb": entry } } }
+    : cfg;
+  await runMemorySearchHealth("none", undefined, { fallback: "none" }, config);
   expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
   if (isActive) {
     expect(note).not.toHaveBeenCalled();
   } else {
-    expect(note).toHaveBeenCalledTimes(1);
-    expectFirstNoteContains("No active memory plugin is registered");
+    expect(note).toHaveBeenCalledOnce();
+    expect(note).toHaveBeenCalledWith(
+      "No active memory plugin is registered for the current config.",
+      "Memory search",
+    );
   }
 });
 
@@ -567,20 +555,10 @@ it.each([
   "checks a $keyKind key for $provider",
   async ({ provider, authProvider, secretId, keyKind }) => {
     hasAnyAuthProfileStoreSource.mockReturnValue(false);
-    const config: OpenClawConfig = {
-      models: {
-        providers: {
-          [authProvider]: {
-            baseUrl: "https://embeddings.example.test/v1",
-            models: [],
-            apiKey:
-              keyKind === "store"
-                ? { source: "store", provider: "default", id: secretId }
-                : secretId,
-          },
-        },
-      },
-    };
+    const config = providerConfig(authProvider, {
+      apiKey:
+        keyKind === "store" ? { source: "store", provider: "default", id: secretId } : secretId,
+    });
     await runMemorySearchHealth(provider, undefined, undefined, config);
     if (keyKind === "store") {
       expect(note).not.toHaveBeenCalled();
@@ -595,7 +573,6 @@ it.each(["none", "ollama"])(
   "explains stopped indexing and recovery with fallback %s",
   async (fallback) => {
     await runMemorySearchHealth("openai", undefined, { fallback });
-    expect(note).toHaveBeenCalledTimes(1);
     expectFirstNoteContains(
       "Without working primary or fallback embeddings, memory sync stops for explicitly configured providers or existing vector indexes",
       "new and changed memory files are not indexed",
@@ -626,7 +603,6 @@ it("does not warn for ollama when gateway probe is ready without CLI API key", a
 
 it("warns when lmstudio gateway probe reports embeddings are not ready", async () => {
   await runMemorySearchHealth("lmstudio", failedGatewayOptions("LM API token missing"));
-  expect(note).toHaveBeenCalledTimes(1);
   expectFirstNoteContains('provider "lmstudio" is configured', "embeddings are not ready");
 });
 
@@ -637,7 +613,6 @@ it.each([
   "requires an OpenAI-compatible %s even when probing is skipped",
   async (_name, overrides, path) => {
     await runMemorySearchHealth("openai-compatible", skippedGatewayOptions, overrides);
-    expect(note).toHaveBeenCalledTimes(1);
     expectFirstNoteContains('provider is set to "openai-compatible"', path, "openclaw config set");
     expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
   },
@@ -648,16 +623,7 @@ it("does not warn for baseUrl-only OpenAI-compatible custom providers when probe
     "localEmbeddings",
     skippedGatewayOptions,
     { model: "text-embedding-bge-m3" },
-    {
-      models: {
-        providers: {
-          localEmbeddings: {
-            baseUrl: "http://127.0.0.1:1234/v1",
-            models: [],
-          },
-        },
-      },
-    },
+    providerConfig("localEmbeddings", compatibleRemote),
   );
   expect(note).not.toHaveBeenCalled();
   expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();
@@ -684,16 +650,7 @@ it.each([false, true])("warns for empty auth sources (explicit order=%s)", async
 });
 
 it("does not warn for Bedrock aws-sdk provider auth when lint skips profile resolution", async () => {
-  const bedrockCfg = {
-    ...cfg,
-    models: {
-      providers: {
-        "amazon-bedrock": { auth: "aws-sdk", models: [] },
-      },
-    },
-  } as unknown as OpenClawConfig;
-
-  await runAuthLintHealth("bedrock", bedrockCfg);
+  await runAuthLintHealth("bedrock", providerConfig("amazon-bedrock", { auth: "aws-sdk" }));
 
   expect(note).not.toHaveBeenCalled();
   expect(hasAuthProfileStoreSourceForProvider).not.toHaveBeenCalled();

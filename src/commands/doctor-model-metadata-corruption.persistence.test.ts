@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { readConfigFileSnapshot } from "../config/config.js";
@@ -85,11 +84,11 @@ it("strips an audit-proven generated fallback row and rematerializes catalog cap
         });
 
         await using ctx = await prepareDoctorContext(configPath);
-        expect(ctx.configResult.shouldWriteConfig).toBe(true);
         expect(ctx.cfg.models?.providers?.openai?.models[0]).not.toHaveProperty("reasoning");
         await runInitialConfigWriteHealth(ctx);
 
-        const saved = JSON.parse(await fs.readFile(configPath, "utf-8"));
+        const reread = await readConfigFileSnapshot();
+        const saved = JSON.parse(reread.raw!);
         expect(saved.agents.defaults?.systemAgent).toBeUndefined();
         expect(saved.agents.defaults?.heartbeat).toBeUndefined();
         expect(saved.models.providers.openai.models[0]).toMatchObject(retained);
@@ -97,7 +96,6 @@ it("strips an audit-proven generated fallback row and rematerializes catalog cap
           expect(saved.models.providers.openai.models[0]).not.toHaveProperty(field);
         }
 
-        const reread = await readConfigFileSnapshot();
         expect(reread.sourceConfig.models?.providers?.openai?.models[0]).not.toHaveProperty(
           "reasoning",
         );

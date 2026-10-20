@@ -131,8 +131,8 @@ it("excludes only the agent media repair completion row from retained metadata",
   }
 });
 
-it("binds semantic preservation to original backups across a partial migration and retry", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+it("binds semantic preservation to original backups across a partial migration and retry", () =>
+  withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     withDaemonRuntimePinStore(state.env, true, (db) => {
       db.exec(
         "INSERT INTO daemon_runtime_pins VALUES ('daemon-runtime-pin:fixture', 'malformed intent', 1)",
@@ -325,5 +325,4 @@ it("binds semantic preservation to original backups across a partial migration a
     } finally {
       await maintenance?.release();
     }
-  });
-});
+  }));

@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 const { callGateway, open } = vi.hoisted(() => ({ callGateway: vi.fn(), open: vi.fn() }));
@@ -13,10 +13,6 @@ vi.mock("../gateway/call.js", () => ({ callGateway }));
 vi.mock("../plugins/plugin-metadata-snapshot.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../plugins/plugin-metadata-snapshot.js")>()),
   resolvePluginMetadataSnapshot: () => ({ plugins: [manifest] }),
-}));
-vi.mock("../plugins/plugin-registry.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../plugins/plugin-registry.js")>()),
-  loadPluginManifestRegistryForPluginRegistry: () => ({ plugins: [manifest], diagnostics: [] }),
 }));
 vi.mock("../config/io.plugin-metadata.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../config/io.plugin-metadata.js")>()),
@@ -33,26 +29,16 @@ vi.mock("../plugins/memory-runtime.js", async (importOriginal) => ({
 
 import { collectMemorySearchHealthFindings } from "./doctor-memory-search.js";
 
-beforeEach(() => {
-  callGateway.mockReset();
+it.each([true, false])("resolves Doctor credentials (available=%s)", async (available) => {
   open.mockReset().mockResolvedValue({
     provider: { health: async () => ({ status: "ready" }), close: async () => {} },
   });
-});
-
-it.each([true, false])("resolves Doctor credentials (available=%s)", async (available) => {
+  const credential = { source: "exec", provider: "fixture", id: "token" } as const;
   const cfg: OpenClawConfig = {
     memory: { search: { provider: "none" } },
     plugins: {
       slots: { memory: "knowledge" },
-      entries: {
-        knowledge: {
-          enabled: true,
-          config: {
-            credential: { source: "exec", provider: "fixture", id: "token" },
-          },
-        },
-      },
+      entries: { knowledge: { enabled: true, config: { credential } } },
     },
   };
   callGateway.mockResolvedValue({
