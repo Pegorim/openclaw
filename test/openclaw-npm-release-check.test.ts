@@ -79,46 +79,31 @@ it("bounds commands that ignore termination", () => {
 });
 
 it("rejects private QA and local build artifacts while allowing runtime files", () => {
+  const forbidden = [
+    ["generated docs artifact", "docs/.generated/config-baseline.json"],
+    ["generated docs artifact", "docs/.generated/config-baseline.plugin.json"],
+    ["local application build output", "dist/OpenClaw.app/Contents/MacOS/OpenClaw"],
+    ["local runtime build output", "dist-runtime/extensions/example/runtime.js"],
+    ["private QA channel artifact", "dist/extensions/qa-channel/package.json"],
+    ["private QA channel artifact", "dist/extensions/qa-channel/runtime-api.js"],
+    ["private QA channel docs", "docs/channels/qa-channel.md"],
+    ["private QA channel SDK artifact", "dist/plugin-sdk/qa-channel-protocol.d.ts"],
+    ["private QA channel SDK artifact", "dist/plugin-sdk/qa-channel.js"],
+    ["private QA channel type artifact", "dist/plugin-sdk/extensions/qa-channel/api.d.ts"],
+    ["private QA lab artifact", "dist/extensions/qa-lab/runtime-api.js"],
+    ["private QA lab artifact", "dist/extensions/qa-lab/src/cli.js"],
+    ["private QA lab SDK artifact", "dist/plugin-sdk/qa-lab.js"],
+    ["private QA lab type artifact", "dist/plugin-sdk/extensions/qa-lab/cli.d.ts"],
+    ["private QA runtime chunk", "dist/qa-runtime-B9LDtssJ.js"],
+    ["private QA runtime SDK artifact", "dist/plugin-sdk/qa-runtime.d.ts"],
+    ["private QA suite artifact", "qa/scenarios/index.yaml"],
+  ];
   expect(
     collectForbiddenPackedPathErrors([
       "dist/index.js",
-      "dist-runtime/extensions/example/runtime.js",
-      "docs/.generated/config-baseline.json",
-      "docs/.generated/config-baseline.plugin.json",
-      "dist/OpenClaw.app/Contents/MacOS/OpenClaw",
-      "dist/extensions/qa-channel/runtime-api.js",
-      "dist/extensions/qa-channel/package.json",
-      "dist/extensions/qa-lab/runtime-api.js",
-      "dist/extensions/qa-lab/src/cli.js",
-      "dist/plugin-sdk/extensions/qa-channel/api.d.ts",
-      "dist/plugin-sdk/extensions/qa-lab/cli.d.ts",
-      "dist/plugin-sdk/qa-channel.js",
-      "dist/plugin-sdk/qa-channel-protocol.d.ts",
-      "dist/plugin-sdk/qa-lab.js",
-      "dist/plugin-sdk/qa-runtime.d.ts",
-      "dist/qa-runtime-B9LDtssJ.js",
-      "docs/channels/qa-channel.md",
-      "qa/scenarios/index.yaml",
+      ...forbidden.toReversed().map(([, file]) => file),
     ]),
-  ).toEqual([
-    'npm package must not include generated docs artifact "docs/.generated/config-baseline.json".',
-    'npm package must not include generated docs artifact "docs/.generated/config-baseline.plugin.json".',
-    'npm package must not include local application build output "dist/OpenClaw.app/Contents/MacOS/OpenClaw".',
-    'npm package must not include local runtime build output "dist-runtime/extensions/example/runtime.js".',
-    'npm package must not include private QA channel artifact "dist/extensions/qa-channel/package.json".',
-    'npm package must not include private QA channel artifact "dist/extensions/qa-channel/runtime-api.js".',
-    'npm package must not include private QA channel docs "docs/channels/qa-channel.md".',
-    'npm package must not include private QA channel SDK artifact "dist/plugin-sdk/qa-channel-protocol.d.ts".',
-    'npm package must not include private QA channel SDK artifact "dist/plugin-sdk/qa-channel.js".',
-    'npm package must not include private QA channel type artifact "dist/plugin-sdk/extensions/qa-channel/api.d.ts".',
-    'npm package must not include private QA lab artifact "dist/extensions/qa-lab/runtime-api.js".',
-    'npm package must not include private QA lab artifact "dist/extensions/qa-lab/src/cli.js".',
-    'npm package must not include private QA lab SDK artifact "dist/plugin-sdk/qa-lab.js".',
-    'npm package must not include private QA lab type artifact "dist/plugin-sdk/extensions/qa-lab/cli.d.ts".',
-    'npm package must not include private QA runtime chunk "dist/qa-runtime-B9LDtssJ.js".',
-    'npm package must not include private QA runtime SDK artifact "dist/plugin-sdk/qa-runtime.d.ts".',
-    'npm package must not include private QA suite artifact "qa/scenarios/index.yaml".',
-  ]);
+  ).toEqual(forbidden.map(([kind, file]) => `npm package must not include ${kind} "${file}".`));
 });
 
 it.each([

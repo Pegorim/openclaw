@@ -8,13 +8,11 @@ import { pnpmLockfileDocuments } from "../scripts/lib/pnpm-lockfile-documents.mj
 type PnpmBuildConfig = {
   allowBuilds?: Record<string, boolean>;
   blockExoticSubdeps?: boolean;
-  ignoredBuiltDependencies?: string[];
   onlyBuiltDependencies?: string[];
 };
 
 type RootPackageJson = {
   dependencies: { tar: string };
-  files?: string[];
   pnpm?: PnpmBuildConfig;
 };
 
@@ -86,11 +84,13 @@ describe("package manager build policy", () => {
     const workspace = parse(fs.readFileSync("pnpm-workspace.yaml", "utf8")) as WorkspaceConfig;
 
     expect(packageJson.pnpm).toBeUndefined();
-    expect(workspace.allowBuilds?.["@discordjs/opus"]).toBe(false);
-    expect(workspace.blockExoticSubdeps).toBe(true);
-    expect(workspace.minimumReleaseAge).toBe(7 * 24 * 60);
-    expect(workspace.minimumReleaseAgeStrict).toBe(true);
-    expect(workspace.verifyDepsBeforeRun).toBe(false);
+    expect(workspace).toMatchObject({
+      allowBuilds: { "@discordjs/opus": false },
+      blockExoticSubdeps: true,
+      minimumReleaseAge: 7 * 24 * 60,
+      minimumReleaseAgeStrict: true,
+      verifyDepsBeforeRun: false,
+    });
     expect(workspace.onlyBuiltDependencies).toBeUndefined();
   });
 
@@ -130,14 +130,10 @@ describe("package manager build policy", () => {
     },
   );
 
-  it("preserves npm alias pins when merging nested lock-derived pins", () => {
-    expect(
-      mergeOverrides(
-        { "node-domexception": "npm:@nolyfill/domexception@1.0.28" },
-        { "node-domexception": { ".": "1.0.28", child: "2.0.0" } },
-        {},
-      ),
-    ).toEqual({
+  it.each([false, true])("preserves npm alias pins (nested first: %s)", (nestedFirst) => {
+    const alias = { "node-domexception": "npm:@nolyfill/domexception@1.0.28" };
+    const nested = { "node-domexception": { ".": "1.0.28", child: "2.0.0" } };
+    expect(mergeOverrides(nestedFirst ? nested : alias, nestedFirst ? alias : nested, {})).toEqual({
       "node-domexception": {
         ".": "npm:@nolyfill/domexception@1.0.28",
         child: "2.0.0",
@@ -145,53 +141,21 @@ describe("package manager build policy", () => {
     });
   });
 
-  it("preserves later npm alias pins when nested pins are already merged", () => {
-    expect(
-      mergeOverrides(
-        { "node-domexception": { ".": "1.0.28", child: "2.0.0" } },
-        { "node-domexception": "npm:@nolyfill/domexception@1.0.28" },
-        {},
-      ),
-    ).toEqual({
-      "node-domexception": {
-        ".": "npm:@nolyfill/domexception@1.0.28",
-        child: "2.0.0",
-      },
-    });
-  });
-
-  it.each([["^1.0.0", "~1.0.0"]])(
-    "rejects conflicting root pins %s and %s when merging nested pins",
-    (left, right) => {
-      expect(() =>
-        mergeOverrides(
-          { "floating-package": left },
-          { "floating-package": { ".": right, child: "2.0.0" } },
-          {},
-        ),
-      ).toThrow(/conflicts with pnpm lock policy/u);
-      expect(() =>
-        mergeOverrides(
-          { "floating-package": { ".": left, child: "2.0.0" } },
-          { "floating-package": right },
-          {},
-        ),
-      ).toThrow(/conflicts with pnpm lock policy/u);
-    },
-  );
-
-  it("rejects distinct npm alias targets with matching versions", () => {
+  it.each([
+    ["^1.0.0", "~1.0.0"],
+    ["npm:@safe/foo@1.0.0", "npm:@other/foo@1.0.0"],
+  ])("rejects conflicting root pins %s and %s when merging nested pins", (left, right) => {
     expect(() =>
       mergeOverrides(
-        { "aliased-package": "npm:@safe/foo@1.0.0" },
-        { "aliased-package": { ".": "npm:@other/foo@1.0.0", child: "2.0.0" } },
+        { "floating-package": left },
+        { "floating-package": { ".": right, child: "2.0.0" } },
         {},
       ),
     ).toThrow(/conflicts with pnpm lock policy/u);
     expect(() =>
       mergeOverrides(
-        { "aliased-package": { ".": "npm:@safe/foo@1.0.0", child: "2.0.0" } },
-        { "aliased-package": "npm:@other/foo@1.0.0" },
+        { "floating-package": { ".": left, child: "2.0.0" } },
+        { "floating-package": right },
         {},
       ),
     ).toThrow(/conflicts with pnpm lock policy/u);

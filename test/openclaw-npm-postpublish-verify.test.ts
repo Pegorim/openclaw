@@ -675,46 +675,38 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     ]);
   });
 
-  it.each([
+  it.each<[string, string, string[]?]>([
     [
       "assigned destructured binding",
       'import { createRequire } from "node:module"; let { load } = loaders; load = createRequire(import.meta.url); load("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "factory with alternative root alias",
       'import { createRequire } from "node:module"; const root = createRequire(import.meta.url); let make = createRequire; const load = make(import.meta.url); make = root; load("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "conditional roots",
       'import { createRequire } from "node:module"; const require = usePlugin ? createRequire(pluginPath) : createRequire(import.meta.url); require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "comma factory",
       'import { createRequire } from "node:module"; const require = (0, createRequire)(import.meta.url); require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "quoted namespace",
       'import * as module from "node:module"; const require = module["createRequire"](import.meta["url"]); require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "quoted factory binding",
       'const { "createRequire": make } = require("node:module"); const load = make(__filename); load("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "awaited builtin",
       'const { createRequire: make } = await import("node:module"); const require = make(import.meta.url); require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "process namespace accessor",
       'const processNamespace = require("node:process"); const load = processNamespace.getBuiltinModule("node:module").createRequire(__filename); load("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "caller-derived package anchor",
@@ -724,37 +716,30 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     [
       "unknown dynamic caller property",
       'import { createRequire } from "node:module"; function build(opts, key, choose) { const selection = choose ? opts : opaqueOptions(); const require = createRequire(selection[key]); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "array destructuring loader write",
       'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); [require] = [createRequire(import.meta.url)]; require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "iteration loader write",
       'import { createRequire } from "node:module"; function build(anchor) { let require = createRequire(anchor); for (require of [createRequire(import.meta.url)]) { require("root-runtime"); } }',
-      ["root-runtime"],
     ],
     [
       "function wrapper remains unknown",
       'import { createRequire as make } from "node:module"; const load = make(import.meta.url); function require(name) { return load(name); } require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "unknown supplied loader with caller default",
       'import { createRequire } from "node:module"; function build(root, loaders) { const [require = createRequire(root)] = loaders; require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "initialized CommonJS require before assignment",
       'require("root-runtime"); var require = process.getBuiltinModule("module").createRequire(process.cwd() + "/package.json");',
-      ["root-runtime"],
     ],
     [
       "opaque projected input default",
       'import { createRequire } from "node:module"; function build(options) { let alias; ({ alias = options } = {}); normalize(alias); const require = createRequire(options.filename); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "raw caller after loop remains conservative",
@@ -764,34 +749,28 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
     [
       "nested parameter default remains unknown",
       'import { createRequire } from "node:module"; function build({ nested: { filename } = { filename: import.meta.url } }) { const require = createRequire(filename); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "locally changed cwd",
       'import { createRequire } from "node:module"; import path from "node:path"; import { fileURLToPath } from "node:url"; process.chdir(path.dirname(fileURLToPath(import.meta.url))); const require = createRequire(path.resolve("bridge.cjs")); require("root-runtime");',
-      ["root-runtime"],
     ],
     [
       "template coercion before snapshot",
       'import { createRequire } from "node:module"; function build(options) { const unused = `${options}`; const require = createRequire(options.filename); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "effectful parameter default before snapshot",
       'import { createRequire } from "node:module"; import path from "node:path"; function build(options, ignored = Object.assign(options, { filename: import.meta.url })) { const root = path.resolve(options.filename); const require = createRequire(root); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "ignored factory argument effect",
       'import { createRequire } from "node:module"; function build(location) { const require = createRequire(location, location.href = import.meta.url); require("root-runtime"); }',
-      ["root-runtime"],
     ],
     [
       "pending normalization is not a string snapshot",
       'import { createRequire } from "node:module"; import fs from "node:fs/promises"; function build(options) { const pending = fs.realpath(options.filename); normalize(pending); return (async () => { const root = await pending; const require = createRequire(root); require("root-runtime"); })(); }',
-      ["root-runtime"],
     ],
-  ])("follows lexical require ownership: %s", (_name, source, dependencies) => {
+  ])("follows lexical require ownership: %s", (_name, source, dependencies = ["root-runtime"]) => {
     const packageRoot = makeInstalledPackageRoot();
     writePackageFile(packageRoot, "package.json", { dependencies: {} });
     writeInstalledFile(packageRoot, "dist/runtime.js", source);

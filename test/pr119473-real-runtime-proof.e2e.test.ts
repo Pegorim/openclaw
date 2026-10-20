@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearConfigCache, clearRuntimeConfigSnapshot } from "../src/config/config.js";
@@ -11,43 +10,22 @@ import {
 } from "../src/gateway/test-helpers.e2e.js";
 import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
 import { captureEnv, setTestEnvValue } from "../src/test-utils/env.js";
-
-const envKeys = [
-  "HOME",
-  "OPENCLAW_STATE_DIR",
-  "OPENCLAW_CONFIG_PATH",
-  "OPENCLAW_GATEWAY_TOKEN",
-  "OPENCLAW_SKIP_CHANNELS",
-  "OPENCLAW_SKIP_GMAIL_WATCHER",
-  "OPENCLAW_SKIP_CRON",
-  "OPENCLAW_SKIP_CANVAS_HOST",
-  "OPENCLAW_SKIP_BROWSER_CONTROL_SERVER",
-  "OPENCLAW_SKIP_PROVIDERS",
-  "OPENCLAW_BUNDLED_PLUGINS_DIR",
-  "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
-] as const;
+import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 describe("PR #119473 real gateway proof", () => {
-  let tempHome: string | undefined;
-
-  afterEach(async () => {
-    if (tempHome) {
-      await fs.rm(tempHome, { recursive: true, force: true });
-      tempHome = undefined;
-    }
-  });
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   it(
     "persists the first turn of a fresh SQLite-backed session across gateway restart",
     { timeout: 90_000 },
     async () => {
-      const envSnapshot = captureEnv([...envKeys]);
+      let envSnapshot: ReturnType<typeof captureEnv> | undefined;
       let providerServer: ReturnType<typeof createServer> | undefined;
       let first: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
       let second: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
 
       try {
-        tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-pr119473-proof-"));
+        const tempHome = tempDirs.make("openclaw-pr119473-proof-");
         const stateDir = path.join(tempHome, ".openclaw");
         const workspaceDir = path.join(tempHome, "workspace");
         const configPath = path.join(stateDir, "openclaw.json");
@@ -57,7 +35,7 @@ describe("PR #119473 real gateway proof", () => {
           fs.mkdir(bundledPluginsDir, { recursive: true }),
           fs.mkdir(path.dirname(configPath), { recursive: true }),
         ]);
-        for (const [key, value] of Object.entries({
+        const env = {
           HOME: tempHome,
           OPENCLAW_STATE_DIR: stateDir,
           OPENCLAW_CONFIG_PATH: configPath,
@@ -70,7 +48,9 @@ describe("PR #119473 real gateway proof", () => {
           OPENCLAW_SKIP_PROVIDERS: "1",
           OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir,
           OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
-        })) {
+        };
+        envSnapshot = captureEnv(Object.keys(env));
+        for (const [key, value] of Object.entries(env)) {
           setTestEnvValue(key, value);
         }
 
@@ -132,12 +112,14 @@ describe("PR #119473 real gateway proof", () => {
         };
         const sessionKey = "agent:main:pr119473-fresh-runtime";
         const marker = "PR119473_FIRST_USER_MESSAGE";
-        first = await startGatewayWithClient({
-          cfg,
-          configPath,
-          token: "pr119473-proof-token",
-          clientDisplayName: "pr119473-proof-first-start",
-        });
+        const start = (clientDisplayName: string) =>
+          startGatewayWithClient({
+            cfg,
+            configPath,
+            token: "pr119473-proof-token",
+            clientDisplayName,
+          });
+        first = await start("pr119473-proof-first-start");
         const started = await first.client.request<{ runId?: string; status?: string }>(
           "chat.send",
           {
@@ -162,32 +144,25 @@ describe("PR #119473 real gateway proof", () => {
 
         clearRuntimeConfigSnapshot();
         clearConfigCache();
-        second = await startGatewayWithClient({
-          cfg,
-          configPath,
-          token: "pr119473-proof-token",
-          clientDisplayName: "pr119473-proof-after-restart",
-        });
+        second = await start("pr119473-proof-after-restart");
         const history = await second.client.request<{ messages?: unknown[] }>("chat.history", {
           sessionKey,
           limit: 20,
         });
         expect(JSON.stringify(history.messages ?? [])).toContain(marker);
       } finally {
-        if (first) {
-          await disconnectGatewayClient(first.client).catch(() => undefined);
-          await first.server.close().catch(() => undefined);
-        }
-        if (second) {
-          await disconnectGatewayClient(second.client).catch(() => undefined);
-          await second.server.close().catch(() => undefined);
+        for (const gateway of [first, second]) {
+          if (gateway) {
+            await disconnectGatewayClient(gateway.client).catch(() => undefined);
+            await gateway.server.close().catch(() => undefined);
+          }
         }
         if (providerServer?.listening) {
           await new Promise<void>((resolve) => {
             providerServer?.close(() => resolve());
           });
         }
-        envSnapshot.restore();
+        envSnapshot?.restore();
         clearRuntimeConfigSnapshot();
         clearConfigCache();
         clearSessionStoreCacheForTest();

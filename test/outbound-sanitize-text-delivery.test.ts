@@ -30,26 +30,35 @@ const fixtures = [
   },
 ];
 const payloads = fixtures.map(({ text }) => ({ text }));
+const angleLink = [{ text: "<https://example.com/a.pdf|Manual>" }];
 
-const sharedPlainTextSiblings: ReadonlyArray<
-  readonly [
-    label: string,
-    channel: "googlechat" | "irc" | "whatsapp",
-    source: Pick<ChannelOutboundAdapter, "sanitizeText" | "normalizePayload">,
-  ]
-> = [
-  [
-    "Google Chat",
-    "googlechat",
-    expectDefined(googlechatPlugin.outbound, "googlechatPlugin.outbound"),
-  ],
-  ["IRC", "irc", expectDefined(ircPlugin.outbound, "ircPlugin.outbound")],
-  ["WhatsApp", "whatsapp", expectDefined(whatsappPlugin.outbound, "whatsappPlugin.outbound")],
+async function deliver(params: Parameters<typeof prepareOutboundPayloadBatch>[0]) {
+  const preparedBatch = await prepareOutboundPayloadBatch(params);
+  return deliverOutboundPayloadsCore({ ...params, preparedBatch });
+}
+
+type Sanitizer = Pick<ChannelOutboundAdapter, "sanitizeText" | "normalizePayload">;
+const sharedPlainTextSiblings: Array<[string, Sanitizer]> = [
+  ["googlechat", expectDefined(googlechatPlugin.outbound, "googlechatPlugin.outbound")],
+  ["irc", expectDefined(ircPlugin.outbound, "ircPlugin.outbound")],
+  ["whatsapp", expectDefined(whatsappPlugin.outbound, "whatsappPlugin.outbound")],
 ];
 
 afterEach(() => {
   setActivePluginRegistry(createEmptyPluginRegistry());
 });
+
+function register(channel: string, outbound: ChannelOutboundAdapter) {
+  setActivePluginRegistry(
+    createTestRegistry([
+      {
+        pluginId: channel,
+        source: "test",
+        plugin: createOutboundTestPlugin({ id: channel, outbound }),
+      },
+    ]),
+  );
+}
 
 function createTextDelivery(mode: "default Telegram" | "rich Telegram" | "direct text/media") {
   const send = vi.fn(async (_to: string, _text: string) => ({
@@ -69,15 +78,7 @@ function createTextDelivery(mode: "default Telegram" | "rich Telegram" | "direct
           buildTextOptions: () => ({}),
           buildMediaOptions: () => ({}),
         });
-  setActivePluginRegistry(
-    createTestRegistry([
-      {
-        pluginId: channel,
-        source: "test",
-        plugin: createOutboundTestPlugin({ id: channel, outbound }),
-      },
-    ]),
-  );
+  register(channel, outbound);
   return { send, params: { cfg, channel, to: "12345", deps: { telegram: send } } };
 }
 
@@ -86,11 +87,7 @@ describe("HTML sanitization through outbound delivery", () => {
     "preserves the %s transport contract",
     async (mode) => {
       const { send, params: base } = createTextDelivery(mode);
-      const params = { ...base, payloads };
-      const preparedBatch = await prepareOutboundPayloadBatch(params);
-      const results = await deliverOutboundPayloadsCore({ ...params, preparedBatch });
-
-      expect(results).toHaveLength(payloads.length);
+      expect(await deliver({ ...base, payloads })).toHaveLength(payloads.length);
       expect(send.mock.calls.map(([to, text]) => ({ to, text }))).toEqual(
         fixtures.map(({ text, plainText }) => ({
           to: "12345",
@@ -104,11 +101,7 @@ describe("HTML sanitization through outbound delivery", () => {
     "keeps the unspaced angle-link label on the %s delivery boundary",
     async (mode) => {
       const { send, params: base } = createTextDelivery(mode);
-      const params = { ...base, payloads: [{ text: "<https://example.com/a.pdf|Manual>" }] };
-      const preparedBatch = await prepareOutboundPayloadBatch(params);
-      const results = await deliverOutboundPayloadsCore({ ...params, preparedBatch });
-
-      expect(results).toHaveLength(1);
+      expect(await deliver({ ...base, payloads: angleLink })).toHaveLength(1);
       expect(send.mock.calls.map(([to, text]) => ({ to, text }))).toEqual([
         { to: "12345", text: "Manual" },
       ]);
@@ -117,7 +110,7 @@ describe("HTML sanitization through outbound delivery", () => {
 
   it.each(sharedPlainTextSiblings)(
     "keeps the unspaced angle-link label on the %s outbound delivery boundary",
-    async (_label, channel, source) => {
+    async (channel, source) => {
       const send = vi.fn(
         async (params: Parameters<NonNullable<ChannelOutboundAdapter["sendText"]>>[0]) => ({
           channel,
@@ -132,25 +125,15 @@ describe("HTML sanitization through outbound delivery", () => {
         ...(source.normalizePayload ? { normalizePayload: source.normalizePayload } : {}),
         sendText: send,
       };
-      setActivePluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: channel,
-            source: "test",
-            plugin: createOutboundTestPlugin({ id: channel, outbound }),
-          },
-        ]),
-      );
-      const params = {
-        cfg: {} satisfies OpenClawConfig,
-        channel,
-        to: "12345",
-        payloads: [{ text: "<https://example.com/a.pdf|Manual>" }],
-      };
-      const preparedBatch = await prepareOutboundPayloadBatch(params);
-      const results = await deliverOutboundPayloadsCore({ ...params, preparedBatch });
-
-      expect(results).toHaveLength(1);
+      register(channel, outbound);
+      expect(
+        await deliver({
+          cfg: {} satisfies OpenClawConfig,
+          channel,
+          to: "12345",
+          payloads: angleLink,
+        }),
+      ).toHaveLength(1);
       expect(send.mock.calls.map(([call]) => ({ to: call.to, text: call.text }))).toEqual([
         { to: "12345", text: "Manual" },
       ]);

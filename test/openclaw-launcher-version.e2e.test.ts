@@ -20,6 +20,7 @@ async function makeLauncherVersionFixture(
   options: LauncherVersionFixtureOptions = {},
 ): Promise<string> {
   const fixtureRoot = makeTempDir(fixtureRoots, "openclaw-launcher-version-");
+  const write = (name: string, value: string) => fs.writeFile(path.join(fixtureRoot, name), value);
   for (const filename of [
     "openclaw.mjs",
     "cli-invocation.mjs",
@@ -38,40 +39,31 @@ async function makeLauncherVersionFixture(
     await fs.copyFile(path.resolve(filename), path.join(fixtureRoot, filename));
   }
   await fs.mkdir(path.join(fixtureRoot, "dist"), { recursive: true });
-  await fs.writeFile(
-    path.join(fixtureRoot, "package.json"),
-    JSON.stringify({
-      name: "openclaw",
-      version: packageVersion,
-    }),
-  );
-  await fs.writeFile(
-    path.join(fixtureRoot, "dist", "entry.js"),
+  await write("package.json", JSON.stringify({ name: "openclaw", version: packageVersion }));
+  await write(
+    "dist/entry.js",
     "throw new Error('version fast path must not load the runtime entry');\n",
   );
   if (options.pendingLifecycle) {
-    await fs.writeFile(path.join(fixtureRoot, ".openclaw-lifecycle-pending"), "pending\n");
+    await write(".openclaw-lifecycle-pending", "pending\n");
     await fs.mkdir(path.join(fixtureRoot, "dist", "infra"), { recursive: true });
-    await fs.writeFile(
-      path.join(fixtureRoot, "dist", "infra", "package-lifecycle.js"),
+    await write(
+      "dist/infra/package-lifecycle.js",
       options.pendingLifecycle === "fail"
         ? 'export async function completePendingPackageLifecycle() { throw new Error("fixture postinstall failed"); }\n'
         : 'import fs from "node:fs/promises"; export async function completePendingPackageLifecycle({ packageRoot }) { await fs.rm(new URL(".openclaw-lifecycle-pending", `file://${packageRoot}/`)); }\n',
     );
   }
 
-  await fs.writeFile(
-    path.join(fixtureRoot, "dist", "build-info.json"),
-    JSON.stringify({
-      version: options.buildVersion ?? packageVersion,
-      commit: buildCommit,
-    }),
+  await write(
+    "dist/build-info.json",
+    JSON.stringify({ version: options.buildVersion ?? packageVersion, commit: buildCommit }),
   );
   if (options.checkout) {
     const gitDirectory = path.join(fixtureRoot, "worktree-git");
     await fs.mkdir(gitDirectory, { recursive: true });
     await fs.writeFile(path.join(gitDirectory, "HEAD"), `${checkoutCommit}\n`);
-    await fs.writeFile(path.join(fixtureRoot, ".git"), "gitdir: worktree-git\n");
+    await write(".git", "gitdir: worktree-git\n");
   }
 
   return fixtureRoot;
@@ -93,35 +85,22 @@ function runLauncherVersion(fixtureRoot: string) {
 describe("openclaw launcher version provenance", () => {
   const fixtureRoots: string[] = [];
 
-  afterEach(() => {
-    cleanupTempDirs(fixtureRoots);
-  });
+  afterEach(() => cleanupTempDirs(fixtureRoots));
 
-  it("reports the packaged build rather than the current linked checkout", async () => {
-    const fixtureRoot = await makeLauncherVersionFixture(fixtureRoots, {
-      checkout: true,
-    });
-
-    const result = runLauncherVersion(fixtureRoot);
-
-    expect(result.status).toBe(0);
-    expect(result.stdout).toBe(`OpenClaw ${packageVersion} (${buildCommit.slice(0, 7)})\n`);
-    expect(result.stderr).toBe("");
-  });
-
-  it("reports the built version when the source package version moved ahead", async () => {
-    const fixtureRoot = await makeLauncherVersionFixture(fixtureRoots, {
-      buildVersion: "2026.8.1",
-    });
-
-    // The launcher answers bare --version before the runtime entry loads, so a
-    // checkout that pulled without rebuilding must not report the unbuilt version.
-    const result = runLauncherVersion(fixtureRoot);
-
-    expect(result.status).toBe(0);
-    expect(result.stdout).toBe(`OpenClaw 2026.8.1 (${buildCommit.slice(0, 7)})\n`);
-    expect(result.stderr).toBe("");
-  });
+  it.each([
+    { checkout: true, buildVersion: packageVersion },
+    { checkout: false, buildVersion: "2026.8.1" },
+  ])(
+    "reports built $buildVersion with checkout=$checkout without loading runtime",
+    async (options) => {
+      const result = runLauncherVersion(await makeLauncherVersionFixture(fixtureRoots, options));
+      expect(result).toMatchObject({
+        status: 0,
+        stdout: `OpenClaw ${options.buildVersion} (${buildCommit.slice(0, 7)})\n`,
+        stderr: "",
+      });
+    },
+  );
 
   it("completes a pending package lifecycle before the version fast path", async () => {
     const fixtureRoot = await makeLauncherVersionFixture(fixtureRoots, {
