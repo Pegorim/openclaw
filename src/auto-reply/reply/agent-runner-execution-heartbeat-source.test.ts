@@ -5,6 +5,7 @@ import type { RunEmbeddedAgentInternalParams } from "../../agents/embedded-agent
 import { createOpenClawToolsAsync } from "../../agents/openclaw-tools.js";
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.sqlite-entry.js";
 import { withSessionTranscriptWriteAssertion } from "../../config/sessions/transcript-write-context.js";
+import type { GetReplyOptions } from "../types.js";
 import {
   createFollowupRun,
   createMinimalRunAgentTurnParams,
@@ -16,13 +17,18 @@ import {
 } from "./agent-runner-execution.test-support.js";
 
 const state = await setupAgentRunnerExecutionTestState();
+const executeAgentTurn = await getExecuteAgentTurnForTest();
 
-async function heartbeatRuntime(runtime: "cli" | "embedded") {
+async function heartbeatRuntime(
+  runtime: "cli" | "embedded",
+  sessionKey: string,
+  opts: GetReplyOptions = {},
+) {
   const isCli = runtime === "cli";
   const provider = isCli ? "claude-cli" : "anthropic";
   const model = isCli ? "sonnet-4.6" : "claude";
   const followupRun = createFollowupRun();
-  Object.assign(followupRun.run, { provider, model });
+  Object.assign(followupRun.run, { provider, model, sessionKey });
   state.isCliProviderMock.mockReturnValue(isCli);
   await useProductionEmbeddedRunExecutionParamsForTest();
   state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
@@ -31,7 +37,13 @@ async function heartbeatRuntime(runtime: "cli" | "embedded") {
     model,
     attempts: [],
   }));
+  const params = createMinimalRunAgentTurnParams({
+    followupRun,
+    opts: { isHeartbeat: true, ...opts },
+  });
+  params.isHeartbeat = true;
   return {
+    params: { ...params, sessionKey },
     followupRun,
     isCli,
     runAgent: isCli ? state.runCliAgentMock : state.runEmbeddedAgentMock,
@@ -43,8 +55,9 @@ describe.each(["cli", "embedded"] as const)("heartbeat %s source delivery", (run
     "honors the admitted explicit-target policy (%s) at message-tool creation",
     async (requireExplicitMessageTarget) => {
       const sessionKey = "agent:main:dashboard:completion";
-      const { followupRun, runAgent } = await heartbeatRuntime(runtime);
-      followupRun.run.sessionKey = sessionKey;
+      const { followupRun, runAgent, params } = await heartbeatRuntime(runtime, sessionKey, {
+        requireExplicitMessageTarget,
+      });
       followupRun.run.messageProvider = "webchat";
       followupRun.run.sourceReplyDeliveryMode = "message_tool_only";
       followupRun.originatingChannel = "webchat";
@@ -83,23 +96,15 @@ describe.each(["cli", "embedded"] as const)("heartbeat %s source delivery", (run
         }
         return { payloads: [], meta: {} };
       });
-      const opts = { isHeartbeat: true, requireExplicitMessageTarget };
-      const params = createMinimalRunAgentTurnParams({
-        followupRun,
-        opts,
-        sessionCtx: {
-          Provider: "webchat",
-          Surface: "webchat",
-          OriginatingChannel: "webchat",
-          OriginatingTo: sessionKey,
-          To: sessionKey,
-          ChatType: "direct",
-          SessionKey: sessionKey,
-        },
-      });
-      params.isHeartbeat = true;
-      params.sessionKey = sessionKey;
-      const executeAgentTurn = await getExecuteAgentTurnForTest();
+      params.sessionCtx = {
+        Provider: "webchat",
+        Surface: "webchat",
+        OriginatingChannel: "webchat",
+        OriginatingTo: sessionKey,
+        To: sessionKey,
+        ChatType: "direct",
+        SessionKey: sessionKey,
+      };
       const result = await executeAgentTurn(params);
       expect(result.kind).toBe("success");
       expect(runAgent).toHaveBeenCalledOnce();
@@ -120,67 +125,54 @@ describe.each(["cli", "embedded"] as const)("heartbeat %s source delivery", (run
     },
   );
   it("retains revoked source authority at runtime admission", async () => {
-    const { followupRun, isCli, runAgent } = await heartbeatRuntime(runtime);
-    followupRun.run.sessionKey = "agent:main:dashboard:source-authority";
+    const { followupRun, isCli, runAgent, params } = await heartbeatRuntime(
+      runtime,
+      "agent:main:dashboard:source-authority",
+    );
     let current = true;
-    let sourceFailure: unknown;
-    let admissionFailure: unknown;
-    runAgent.mockImplementationOnce(async (params: RunEmbeddedAgentInternalParams) => {
+    const failures: unknown[] = [];
+    runAgent.mockImplementationOnce(async (run: RunEmbeddedAgentInternalParams) => {
       current = false;
-      try {
-        params.preparedRunAdmission!.assertSourceCurrent();
-      } catch (error) {
-        sourceFailure = error;
-      }
-      // CLI is already admitted by its candidate owner; embedded admission is
-      // deferred to the runner. Both must retain the original live authority.
+      const actions = [() => run.preparedRunAdmission!.assertSourceCurrent()];
+      // CLI is already admitted; embedded admission must retain the same live authority.
       if (!isCli) {
+        actions.push(async () => {
+          await run.preparedRunAdmission!.admit(runtime, "source-test-runtime");
+        });
+      }
+      for (const action of actions) {
         try {
-          await params.preparedRunAdmission!.admit(runtime, "source-test-runtime");
+          await action();
         } catch (error) {
-          admissionFailure = error;
+          failures.push(error);
         }
       }
       return { payloads: [], meta: {} };
     });
-    const execute = await getExecuteAgentTurnForTest();
-    const params = createMinimalRunAgentTurnParams({
-      followupRun,
-      opts: { isHeartbeat: true },
-    });
-    params.isHeartbeat = true;
     params.storePath = path.join(followupRun.run.workspaceDir, "sessions.json");
-    params.sessionKey = followupRun.run.sessionKey;
-    const entry = await replaceSessionEntry(
-      {
-        agentId: followupRun.run.agentId,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-      },
-      { sessionId: followupRun.run.sessionId, updatedAt: 1 },
-    );
+    const target = {
+      agentId: followupRun.run.agentId,
+      sessionKey: params.sessionKey,
+      storePath: params.storePath,
+      sessionId: followupRun.run.sessionId,
+    };
+    const entry = await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
     expect(entry).not.toBeNull();
     params.getActiveSessionEntry = () => entry ?? undefined;
     await withSessionTranscriptWriteAssertion(
-      {
-        agentId: followupRun.run.agentId,
-        sessionId: followupRun.run.sessionId,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-      },
+      target,
       () => {
         if (!current) {
           throw new Error("source revoked");
         }
       },
-      () => execute(params),
+      () => executeAgentTurn(params),
     );
     expect(runAgent).toHaveBeenCalledOnce();
-    expect(sourceFailure).toBeInstanceOf(Error);
-    expect(String(sourceFailure)).toContain("source revoked");
-    if (!isCli) {
-      expect(admissionFailure).toBeInstanceOf(Error);
-      expect(String(admissionFailure)).toContain("source revoked");
+    expect(failures).toHaveLength(isCli ? 1 : 2);
+    for (const failure of failures) {
+      expect(failure).toBeInstanceOf(Error);
+      expect(String(failure)).toContain("source revoked");
     }
   });
 });
