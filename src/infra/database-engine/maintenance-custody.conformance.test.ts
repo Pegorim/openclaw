@@ -43,6 +43,13 @@ describe.skipIf(!connection)("PostgreSQL Doctor maintenance custody", () => {
   const client = new Client({ connectionString: connection });
   let env: NodeJS.ProcessEnv;
   let namespace: string;
+  const alterLeases = (clause: string) =>
+    client.query(`ALTER TABLE "${namespace}".state_leases ${clause}`);
+  async function expectRefusal(target: NodeJS.ProcessEnv, message: string) {
+    const refusal: unknown = await maintenanceLock(target).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(Error);
+    expect(formatGatewayLockFailure(refusal)).toContain(message);
+  }
 
   beforeAll(async () => {
     await client.connect();
@@ -176,19 +183,13 @@ describe.skipIf(!connection)("PostgreSQL Doctor maintenance custody", () => {
             `UPDATE "${namespace}".openclaw_schema_meta SET version = version + 1 WHERE store = 'state'`,
           );
           advanced = true;
-          await client.query(
-            `ALTER TABLE "${namespace}".state_leases ADD COLUMN future_payload text`,
-          );
+          await alterLeases("ADD COLUMN future_payload text");
         }
-        const refusal: unknown = await maintenanceLock(otherEnv).catch((error: unknown) => error);
-        expect(refusal).toBeInstanceOf(Error);
-        expect(formatGatewayLockFailure(refusal)).toContain("Gateway owner lease is still active");
+        await expectRefusal(otherEnv, "Gateway owner lease is still active");
       }
     } finally {
       if (advanced) {
-        await client.query(
-          `ALTER TABLE "${namespace}".state_leases DROP COLUMN IF EXISTS future_payload`,
-        );
+        await alterLeases("DROP COLUMN IF EXISTS future_payload");
         await client.query(
           `UPDATE "${namespace}".openclaw_schema_meta SET version = version - 1 WHERE store = 'state'`,
         );
@@ -199,19 +200,11 @@ describe.skipIf(!connection)("PostgreSQL Doctor maintenance custody", () => {
 
   it("refuses maintenance when the stable PostgreSQL lease contract is missing", async () => {
     closeOpenClawStateDatabaseForTest();
-    await client.query(
-      `ALTER TABLE "${namespace}".state_leases RENAME COLUMN payload_json TO future_payload`,
-    );
+    await alterLeases("RENAME COLUMN payload_json TO future_payload");
     try {
-      const refusal: unknown = await maintenanceLock(env).catch((error: unknown) => error);
-      expect(refusal).toBeInstanceOf(Error);
-      expect(formatGatewayLockFailure(refusal)).toContain(
-        "PostgreSQL Gateway owner lease table is missing or incompatible",
-      );
+      await expectRefusal(env, "PostgreSQL Gateway owner lease table is missing or incompatible");
     } finally {
-      await client.query(
-        `ALTER TABLE "${namespace}".state_leases RENAME COLUMN future_payload TO payload_json`,
-      );
+      await alterLeases("RENAME COLUMN future_payload TO payload_json");
     }
     const owner = await maintenanceLock(env);
     expect(owner).not.toBeNull();

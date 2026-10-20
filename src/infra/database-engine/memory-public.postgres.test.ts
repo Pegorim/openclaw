@@ -14,10 +14,7 @@ import {
 } from "../../config/runtime-snapshot.js";
 import { resolveDefaultSessionStorePath } from "../../config/sessions/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type {
-  OpenKeyedStoreOptions,
-  PluginStateKeyedStore,
-} from "../../plugin-sdk/plugin-state-runtime.js";
+import type { OpenKeyedStoreOptions } from "../../plugin-sdk/plugin-state-runtime.js";
 import { createPluginStateKeyedStoreForTests } from "../../plugin-sdk/plugin-state-test-runtime.js";
 import { upsertSessionEntry } from "../../plugin-sdk/session-store-runtime.js";
 import { appendSessionTranscriptMessageByIdentity } from "../../plugin-sdk/session-transcript-runtime.js";
@@ -46,16 +43,16 @@ const capabilityFixtures = [
   [noUnaccentDatabase, ["pg_trgm", "vector"]],
 ] as const;
 const providerId = "postgres-memory-fixture";
+const sapphireHit = [{ path: "memory/sapphire.md" }];
 let root: string;
 const capabilityRoots: string[] = [];
 let workspace: string;
 let client: pg.Client;
 let runtime: MemoryPluginRuntime;
 const stateAnchors: DatabaseSync[] = [];
-type MemoryCliHost = {
-  runInBackgroundContext: <T>(run: () => T) => T;
-  openKeyedStore: <T>(options: OpenKeyedStoreOptions) => PluginStateKeyedStore<T>;
-};
+type MemoryCliHost = Parameters<
+  typeof import("../../../extensions/memory-core/runtime-api.js").createMemoryRuntime
+>[0];
 let host: MemoryCliHost;
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
@@ -220,14 +217,8 @@ describe.skipIf(!connection)("public PostgreSQL memory manager", () => {
     await createStateRoot(root);
     workspace = path.join(root, "workspace");
     await fs.mkdir(path.join(workspace, "memory"), { recursive: true });
-    await fs.writeFile(
-      path.join(workspace, "memory", "sapphire.md"),
-      "Sapphire navigation records the northern harbor coordinates.\n",
-    );
-    await fs.writeFile(
-      path.join(workspace, "memory", "ruby.md"),
-      "Ruby gardening records the southern orchard harvest.\n",
-    );
+    await fs.writeFile(path.join(workspace, "memory/sapphire.md"), "Sapphire northern harbor.\n");
+    await fs.writeFile(path.join(workspace, "memory/ruby.md"), "Ruby orchard.\n");
     selectStateRoot(root);
     selectEngine(connection!);
     vi.stubEnv("OPENCLAW_MEMORY_PUBLIC_POSTGRES", connection!);
@@ -294,17 +285,19 @@ describe.skipIf(!connection)("public PostgreSQL memory manager", () => {
     assert(hybrid.statusAsync);
     await hybrid.sync({ force: true, reason: "test" });
     const lexical = await hybrid.search("sapphire", { lexicalOnly: true, maxResults: 1 });
-    expect(lexical).toMatchObject([{ path: "memory/sapphire.md" }]);
-    expect(lexical[0]?.snippet).toContain("northern harbor");
-    const combined = await hybrid.search("sapphire", { maxResults: 1 });
-    expect(combined).toMatchObject([{ path: "memory/sapphire.md" }]);
-    expect(await hybrid.search("blue-coordinate", { lexicalOnly: true })).toEqual([]);
-    expect(await hybrid.search("blue-coordinate", { maxResults: 1 })).toMatchObject([
-      { path: "memory/sapphire.md" },
+    expect(lexical).toMatchObject([
+      { ...sapphireHit[0], snippet: expect.stringContaining("northern harbor") },
     ]);
+    expect(await hybrid.search("sapphire", { maxResults: 1 })).toMatchObject(sapphireHit);
+    expect(await hybrid.search("blue-coordinate", { lexicalOnly: true })).toEqual([]);
+    expect(await hybrid.search("blue-coordinate", { maxResults: 1 })).toMatchObject(sapphireHit);
     const indexed = await hybrid.statusAsync();
-    expect(indexed).toMatchObject({ files: 3, chunks: 3, fts: { available: true } });
-    expect(indexed.vector?.index?.state).toBe("complete");
+    expect(indexed).toMatchObject({
+      files: 3,
+      chunks: 3,
+      fts: { available: true },
+      vector: { index: { state: "complete" } },
+    });
     await runtime.closeAllMemorySearchManagers?.();
 
     assert(indexed.dbPath);
@@ -363,9 +356,7 @@ describe.skipIf(!connection)("public PostgreSQL memory manager", () => {
     assert(keyword.sync);
     assert(keyword.statusAsync);
     await keyword.sync({ force: true, reason: "test" });
-    expect(await keyword.search("sapphire", { maxResults: 1 })).toMatchObject([
-      { path: "memory/sapphire.md" },
-    ]);
+    expect(await keyword.search("sapphire", { maxResults: 1 })).toMatchObject(sapphireHit);
     expect(await keyword.statusAsync()).toMatchObject({
       provider: "none",
       files: 2,

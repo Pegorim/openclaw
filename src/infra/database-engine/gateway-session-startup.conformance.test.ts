@@ -10,7 +10,7 @@ import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity
 import { closeOpenClawAgentDatabases } from "../../state/openclaw-agent-db-lifecycle.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
-import { withEngineStoreAdmission } from "./admission-scope.js";
+import { withEngineStoreAdmission as admitted } from "./admission-scope.js";
 import {
   mixedAgentConnection,
   mixedAgentPairs,
@@ -31,6 +31,10 @@ describe
         vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
         await captureRuntimeConfigAsyncReader()();
         const env = { ...process.env };
+        const options = { agentId, env };
+        const database = () => openOpenClawAgentDatabase(options);
+        const read = (scope: Parameters<typeof loadSessionEntryReadOnly>[0]) =>
+          admitted(() => loadSessionEntryReadOnly(scope));
         const cfg = {
           agents: {
             ...(agentId === "main" ? { ownership: "explicit" as const } : {}),
@@ -38,7 +42,7 @@ describe
           },
         };
         const close = async () => {
-          withEngineStoreAdmission(() => closeOpenClawAgentDatabases(stateDir));
+          admitted(() => closeOpenClawAgentDatabases(stateDir));
           await cleanupSessionStateForTest({ stateDir });
         };
         const prepare = async () => {
@@ -49,9 +53,7 @@ describe
           databases[0]?.assertCurrent();
           expect(log.warn).not.toHaveBeenCalled();
         };
-        withEngineStoreAdmission(() => {
-          openOpenClawAgentDatabase({ agentId, env });
-        });
+        admitted(database);
         await close();
         await prepare();
         await close();
@@ -66,42 +68,35 @@ describe
           status: "done",
         });
         const legacyJson = JSON.stringify({ ...legacy, status: "running" });
-        withEngineStoreAdmission(() => {
-          const database = openOpenClawAgentDatabase({ agentId, env });
-          database.db
+        admitted(() => {
+          const store = database();
+          store.db
             .prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?")
             .run(`${legacyJson.slice(0, -1)},"opaque":9007199254740993}`, legacyScope.sessionKey);
           // Legacy repair clears its own row; retain normal work for the pooled validator.
-          markCanonicalSessionValidationPending(database, [
-            scope.sessionKey,
-            legacyScope.sessionKey,
-          ]);
+          markCanonicalSessionValidationPending(store, [scope.sessionKey, legacyScope.sessionKey]);
         });
         await close();
 
         for (let boot = 0; boot < 2; boot++) {
           await prepare();
-          expect(withEngineStoreAdmission(() => loadSessionEntryReadOnly(scope))).toMatchObject({
+          expect(read(scope)).toMatchObject({
             sessionId: "retained-startup-session",
           });
-          expect(
-            withEngineStoreAdmission(() => loadSessionEntryReadOnly(legacyScope)),
-          ).toMatchObject({
+          expect(read(legacyScope)).toMatchObject({
             sessionId: "retained-running-session",
             status: "interrupted",
             abortedLastRun: true,
           });
-          withEngineStoreAdmission(() => {
-            const database = openOpenClawAgentDatabase({ agentId, env });
+          admitted(() => {
+            const { db } = database();
             expect(
-              database.db
+              db
                 .prepare("SELECT entry_json FROM session_nodes WHERE session_key = ?")
                 .get(legacyScope.sessionKey)?.entry_json,
             ).toMatch(/"opaque"\s*:\s*9007199254740993/);
             expect(
-              database.db
-                .prepare("SELECT session_key FROM session_canonical_validation_pending")
-                .all(),
+              db.prepare("SELECT session_key FROM session_canonical_validation_pending").all(),
             ).toEqual([]);
           });
           await close();
@@ -110,7 +105,7 @@ describe
     );
 
     it("filters legacy JSON without losing duplicate-key precedence or rejecting scalar rows", () => {
-      withEngineStoreAdmission(() => {
+      admitted(() => {
         const env = { ...process.env, OPENCLAW_STATE_DIR: pair.root };
         const database = openOpenClawAgentDatabase({ agentId: "scan-proof", env });
         const insert = database.db.prepare(

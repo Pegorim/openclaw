@@ -16,43 +16,35 @@ import { mixedAgentConnection, useMixedAgentPair } from "./mixed-agent.conforman
 const QUEUE = "retention-conformance";
 const NOW = 4_000_000_000;
 const ORDINARY_AGE = 30 * 86_400_000;
+const retention = (idPrefix: string, maxAgeMs: number) => ({ idPrefix, maxAgeMs, maxEntries: 10 });
+const entry = (id: string, enqueuedAt = NOW, maxAgeMs?: number) => ({
+  id,
+  enqueuedAt,
+  retryCount: 0,
+  ...(maxAgeMs === undefined
+    ? {}
+    : {
+        recoveryState: "completed_bounded" as const,
+        completionRetention: retention("bounded-", maxAgeMs),
+      }),
+});
 
 function pruneAt(database: OpenClawStateDatabase, time = NOW) {
   vi.mocked(Date.now).mockReturnValue(time);
   prune(database);
 }
 
-const contracts: Array<{
-  name: string;
-  check: (database: OpenClawStateDatabase) => void;
-}> = [
-  {
-    name: "orders mixed receipt deadlines and preserves large bounded ages",
-    check(database) {
+const contracts: Array<[string, (database: OpenClawStateDatabase) => void]> = [
+  [
+    "orders mixed receipt deadlines and preserves large bounded ages",
+    (database) => {
       transaction(database.db, () => {
-        for (const [id, enqueuedAt, maxAgeMs] of [
-          ["ordinary", NOW - ORDINARY_AGE + 10, undefined],
-          ["bounded-sooner", NOW - 100, 105],
-          ["bounded-huge", NOW, Number.MAX_SAFE_INTEGER],
-        ] as const) {
-          upsert(
-            {
-              queueName: QUEUE,
-              status: "completed",
-              entry: {
-                id,
-                enqueuedAt,
-                retryCount: 0,
-                ...(maxAgeMs === undefined
-                  ? {}
-                  : {
-                      recoveryState: "completed_bounded",
-                      completionRetention: { idPrefix: "bounded-", maxAgeMs, maxEntries: 10 },
-                    }),
-              },
-            },
-            database,
-          );
+        for (const receipt of [
+          entry("ordinary", NOW - ORDINARY_AGE + 10),
+          entry("bounded-sooner", NOW - 100, 105),
+          entry("bounded-huge", NOW, Number.MAX_SAFE_INTEGER),
+        ]) {
+          upsert({ queueName: QUEUE, status: "completed", entry: receipt }, database);
         }
       });
       pruneAt(database);
@@ -67,35 +59,36 @@ const contracts: Array<{
       prune(database);
       expect(loadEntry(database, QUEUE, "bounded-huge")).not.toBeNull();
     },
-  },
-  {
-    name: "expires a new terminal receipt after an empty inventory at its exact boundary",
-    check(database) {
+  ],
+  [
+    "expires a new terminal receipt after an empty inventory at its exact boundary",
+    (database) => {
       prune(database);
-      const entry = {
-        id: "terminal-bounded",
-        enqueuedAt: NOW,
-        retryCount: 0,
-        completionRetention: { idPrefix: "terminal-", maxAgeMs: 60_000, maxEntries: 10 },
+      const receipt = {
+        ...entry("terminal-bounded"),
+        completionRetention: retention("terminal-", 60_000),
       };
-      transaction(database.db, () => upsert({ queueName: QUEUE, entry }, database));
+      transaction(database.db, () => upsert({ queueName: QUEUE, entry: receipt }, database));
       expect(
         transaction(database.db, () =>
-          terminalize(database, prepareTerminal({ queueName: QUEUE, id: entry.id, entry })),
+          terminalize(
+            database,
+            prepareTerminal({ queueName: QUEUE, id: receipt.id, entry: receipt }),
+          ),
         ),
       ).toEqual({ status: "terminalized", retained: true });
       pruneAt(database, NOW + 60_000);
-      expect(loadEntry(database, QUEUE, entry.id)).not.toBeNull();
+      expect(loadEntry(database, QUEUE, receipt.id)).not.toBeNull();
       pruneAt(database, NOW + 60_001);
-      expect(loadEntry(database, QUEUE, entry.id)).toBeNull();
+      expect(loadEntry(database, QUEUE, receipt.id)).toBeNull();
     },
-  },
-  {
-    name: "discards an empty expiry published by rolled-back pruning",
-    check(database) {
-      const entry = { id: "rollback", enqueuedAt: NOW - ORDINARY_AGE - 1, retryCount: 0 };
+  ],
+  [
+    "discards an empty expiry published by rolled-back pruning",
+    (database) => {
+      const receipt = entry("rollback", NOW - ORDINARY_AGE - 1);
       transaction(database.db, () =>
-        upsert({ queueName: QUEUE, entry, status: "completed" }, database),
+        upsert({ queueName: QUEUE, entry: receipt, status: "completed" }, database),
       );
       expect(() =>
         transaction(database.db, () => {
@@ -104,16 +97,16 @@ const contracts: Array<{
           throw new Error("rollback retention");
         }),
       ).toThrow("rollback retention");
-      expect(loadEntry(database, QUEUE, entry.id)).not.toBeNull();
+      expect(loadEntry(database, QUEUE, receipt.id)).not.toBeNull();
       prune(database);
-      expect(loadEntry(database, QUEUE, entry.id)).toBeNull();
+      expect(loadEntry(database, QUEUE, receipt.id)).toBeNull();
     },
-  },
+  ],
 ];
 
 describe.skipIf(!mixedAgentConnection).each(contracts)(
-  "PostgreSQL retention: $name",
-  ({ check }) => {
+  "PostgreSQL retention: %s",
+  (_name, check) => {
     useMixedAgentPair("postgres", "sqlite");
 
     it("preserves the delivery queue retention contract", () => {

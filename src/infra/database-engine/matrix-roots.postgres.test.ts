@@ -9,7 +9,7 @@ import "./database-suite-workers.test-support.js";
 import * as terminal from "../../../packages/terminal-core/src/note.js";
 import { createBackupResourcePlan } from "../../commands/backup-resource-inventory.js";
 import { noteDatabaseEngines } from "../../commands/doctor-database-engine.js";
-import { doctorDatabasePort } from "../../commands/doctor-database-port.js";
+import { doctorDatabasePort as port } from "../../commands/doctor-database-port.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolveActivatedPluginBackupInventory } from "../../plugins/manifest-backup-resources.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
@@ -52,15 +52,10 @@ const cryptoValue = JSON.stringify({
 });
 const selectEntries =
   "SELECT namespace, entry_key, value_json FROM plugin_state_entries WHERE plugin_id = 'matrix' ORDER BY namespace, entry_key";
-type MatrixPaths = {
-  resolveMatrixAccountStorageRoot(params: {
-    stateDir: string;
-    homeserver: string;
-    userId: string;
-    accessToken: string;
-    accountId: string;
-  }): { rootDir: string };
-};
+type MatrixPaths = Pick<
+  typeof import("../../../extensions/matrix/runtime-api.js"),
+  "resolveMatrixAccountStorageRoot"
+>;
 
 describe.skipIf(!connection)("Matrix declared account-root database portability", () => {
   const client = new Client({ connectionString: connection });
@@ -97,18 +92,19 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
         database: { engine: "sqlite", postgres: { connection: connection! } },
       };
       await state.writeConfig(config);
-      const files = [
+      const accounts = [
         ["active", "synthetic-current-token"],
         ["active", "synthetic-retained-token"],
         ["disabled", "synthetic-disabled-token"],
-      ].map(([accountId, accessToken]) =>
+      ] as const;
+      const files = accounts.map(([accountId, accessToken]) =>
         path.join(
           matrix.resolveMatrixAccountStorageRoot({
             stateDir: state.stateDir,
             homeserver: "https://matrix.example.org",
             userId: "@synthetic:example.org",
-            accountId: accountId!,
-            accessToken: accessToken!,
+            accountId,
+            accessToken,
           }).rootDir,
           "state",
           "openclaw.sqlite",
@@ -122,12 +118,9 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
           ).run(`chunk-${index}`, cryptoValue);
         }
         await closeOpenClawStateDatabaseAsync();
-        // Current crypto roots without legacy dedupe rows do not require a migration receipt.
-        await expect(
-          doctorDatabasePort({ family: "state", to: "postgres", dryRun: true }),
-        ).resolves.toMatchObject({ phase: "preflight" });
+        const preflight = () => port({ family: "state", to: "postgres", dryRun: true });
+        await expect(preflight()).resolves.toMatchObject({ phase: "preflight" });
         const retainedEntries = files.map(sqliteEntries);
-        // Fresh crypto roots are port-ready; only genuine legacy dedupe rows require repair.
         const legacy = {
           roomId: "!legacy:example.org",
           eventId: "$before-upgrade",
@@ -142,9 +135,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
             "INSERT INTO plugin_state_entries (plugin_id, namespace, entry_key, value_json, created_at) VALUES ('matrix', 'inbound-dedupe', ?, ?, ?)",
           ).run(legacyKey, JSON.stringify(legacy), legacy.ts);
         }
-        await expect(
-          doctorDatabasePort({ family: "state", to: "postgres", dryRun: true }),
-        ).rejects.toThrow(
+        await expect(preflight()).rejects.toThrow(
           "Run openclaw doctor --fix first, then retry port. If a named plugin is disabled, enable it for repair.",
         );
         // Complete Doctor's retained-root scan before porting, then keep testing a disabled plugin.
@@ -227,7 +218,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
   it("ports every retained token/account root with the state family and restores fresh namespaces", async () => {
     await withRoots(async (state, files, config) => {
       const expected = files.map(sqliteEntries);
-      const forward = await doctorDatabasePort({ family: "state", to: "postgres" });
+      const forward = await port({ family: "state", to: "postgres" });
       expect(forward).toMatchObject({ engine: "postgres" });
       const physical = await postgresRoots(files);
       expect(physical.map((root) => root.entries)).toEqual(expected);
@@ -371,7 +362,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
       await client.query(
         `DELETE FROM "${globalAnchor.namespace}".agent_databases WHERE agent_id = 'retained'`,
       );
-      await doctorDatabasePort({ family: "state", to: "sqlite" });
+      await port({ family: "state", to: "sqlite" });
       expect(files.map(readBackupEngine)).toEqual(files.map(() => ({ engine: "sqlite" })));
       expect(files.map(sqliteEntries)).toEqual(expected);
       expect(readBackupEngine(agentPath)).toEqual({ engine: "sqlite" });
@@ -397,7 +388,7 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
             },
           };
         });
-        await expect(doctorDatabasePort({ to: "postgres" })).rejects.toThrow("Database port");
+        await expect(port({ to: "postgres" })).rejects.toThrow("Database port");
         expect(published).toBe(2);
         vi.restoreAllMocks();
         const manifestPath = recovery.databasePortManifestPath(state.stateDir);
@@ -415,11 +406,11 @@ describe.skipIf(!connection)("Matrix declared account-root database portability"
             action,
           }),
         ).toEqual(saved);
-        await doctorDatabasePort({ [action]: manifestPath });
+        await port({ [action]: manifestPath });
         expect(() => recovery.assertDatabasePortStartupAllowed(state.stateDir)).not.toThrow();
         if (action === "resume") {
           expect((await postgresRoots(files)).map((root) => root.entries)).toEqual(expected);
-          await doctorDatabasePort({ to: "sqlite" });
+          await port({ to: "sqlite" });
         }
         expect(files.map(sqliteEntries)).toEqual(expected);
       });

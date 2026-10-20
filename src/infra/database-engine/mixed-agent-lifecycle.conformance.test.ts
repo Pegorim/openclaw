@@ -37,6 +37,9 @@ import {
 } from "./mixed-agent.conformance.test-support.js";
 import { getPostgresPhysicalFacts } from "./physical-facts.js";
 
+const isSharedDeleteCommit = (facts: Record<string, unknown>) =>
+  facts.kind === "native-binding-storage" && facts.phase === "delete" && facts.stage === "commit";
+
 function observeNativeGrants(
   observe: (
     request: admission.SqliteWorkerAdmissionRequest,
@@ -85,20 +88,18 @@ describe.skipIf(!mixedAgentConnection).each(mixedAgentPairs)(
         const shared = openOpenClawStateDatabase(options);
         expect(isPostgresSqlConnection(database.db)).toBe(agentEngine === "postgres");
         expect(isPostgresSqlConnection(shared.db)).toBe(stateEngine === "postgres");
-        expect(readActiveOpenClawAgentDatabaseLeasesReadOnly(options)).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ agent_id: "leased", path: database.path }),
-          ]),
-        );
+        const expectLease = (pathname: string) =>
+          expect(readActiveOpenClawAgentDatabaseLeasesReadOnly(options)).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ agent_id: "leased", path: pathname }),
+            ]),
+          );
+        expectLease(database.path);
         expect(() => assertNoOpenClawAgentDatabaseLeases("leased", options)).toThrow(/still open/);
         expect(closeOpenClawAgentDatabaseByPath(database.path)).toBe(true);
         expect(() => assertNoOpenClawAgentDatabaseLeases("leased", options)).not.toThrow();
         const reopened = openOpenClawAgentDatabase(options);
-        expect(readActiveOpenClawAgentDatabaseLeasesReadOnly(options)).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ agent_id: "leased", path: reopened.path }),
-          ]),
-        );
+        expectLease(reopened.path);
         closeOpenClawAgentDatabaseByPath(reopened.path);
       });
     });
@@ -136,11 +137,7 @@ describe.skipIf(!mixedAgentConnection).each(mixedAgentPairs)(
         let sharedDelete = false;
         let agentCommit = false;
         const interception = observeNativeGrants((request, facts) => {
-          if (
-            facts.kind === "native-binding-storage" &&
-            facts.phase === "delete" &&
-            facts.stage === "commit"
-          ) {
+          if (isSharedDeleteCommit(facts)) {
             sharedDelete = true;
           }
           if (request.stage === "commit" && facts.kind === "session-native-binding") {
@@ -282,9 +279,7 @@ describe.skipIf(!mixedAgentConnection).each(mixedAgentPairs)(
             observeNativeGrants((request, facts) => {
               const atCheckpoint =
                 checkpoint === "shared"
-                  ? facts.kind === "native-binding-storage" &&
-                    facts.phase === "delete" &&
-                    facts.stage === "commit"
+                  ? isSharedDeleteCommit(facts)
                   : request.stage === "commit" && facts.kind === "session-native-binding";
               if (atCheckpoint && !stopped) {
                 assert(

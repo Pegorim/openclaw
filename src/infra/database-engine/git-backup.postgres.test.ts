@@ -88,6 +88,10 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
   };
   const git = (repository: string, args: string[]) =>
     requireGitCommand(repository, args, { env: gitEnv });
+  const backup = (
+    repositoryPath: string,
+    options: Partial<Parameters<typeof createGitBackup>[0]> = {},
+  ) => createGitBackup({ repositoryPath, stateDir, databases, gitEnv, ...options });
   async function commitFixture(repository: string, message: string) {
     await git(repository, ["add", "."]);
     await git(repository, ["commit", "-m", message]);
@@ -127,11 +131,9 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       database: { engine: "postgres", postgres: { connection: fixtureConnection.href } },
       agents: { ownership: "explicit", entries: { main: { agentDir: path.dirname(agent) } } },
       plugins: {
-        entries: {
-          matrix: { enabled: false },
-          workboard: { enabled: false },
-          logbook: { enabled: false },
-        },
+        entries: Object.fromEntries(
+          ["matrix", "workboard", "logbook"].map((id) => [id, { enabled: false }]),
+        ),
       },
     };
     const env = { ...process.env, ...fixtureEnvironment() };
@@ -157,16 +159,11 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
           INSERT INTO session_nodes (session_key,current_session_id,entry_json,updated_at)
             VALUES ('agent:main:main','session','{}',1);`,
       },
-      {
-        file: path.join(stateDir, "matrix/accounts/one/state/openclaw.sqlite"),
+      ...["one", "two"].map((id) => ({
+        file: path.join(stateDir, `matrix/accounts/${id}/state/openclaw.sqlite`),
         descriptor: stateDescriptor,
         seed: stateSeed,
-      },
-      {
-        file: path.join(stateDir, "matrix/accounts/two/state/openclaw.sqlite"),
-        descriptor: stateDescriptor,
-        seed: stateSeed,
-      },
+      })),
       {
         file: workboard,
         descriptor: await workboardPortProvider.loadDescriptor(),
@@ -231,14 +228,7 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
           { path: shared, identity: { role: "global" } as const },
           { path: agent, identity: { role: "agent", agentId: "main" } as const },
         ];
-        result = await createGitBackup({
-          repositoryPath: initialRepositoryPath,
-          stateDir,
-          databases,
-          all: true,
-          excludeSecrets: true,
-          gitEnv,
-        });
+        result = await backup(initialRepositoryPath, { all: true, excludeSecrets: true });
       }),
     120_000,
   );
@@ -319,14 +309,7 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
       `UPDATE "${namespaces.get(shared)}".config_machine_state SET value_json=$1 WHERE state_key='ordinary.fixture'`,
       ['"refreshed"'],
     );
-    const refreshed = await createGitBackup({
-      repositoryPath,
-      stateDir,
-      databases,
-      all: true,
-      excludeSecrets: true,
-      gitEnv,
-    });
+    const refreshed = await backup(repositoryPath, { all: true, excludeSecrets: true });
     expect(refreshed.manifests).toHaveLength(4);
     expect(refreshed.warnings).toEqual([
       expect.stringMatching(/Agent main degraded.*missing namespace/u),
@@ -335,9 +318,9 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     expect(ordinaryRows(path.join(repositoryPath, "global/postgres/database.sqlite"))).toEqual([
       { value_json: '"refreshed"' },
     ]);
-    await expect(
-      createGitBackup({ repositoryPath, stateDir, databases: [databases[1]!], gitEnv }),
-    ).rejects.toThrow("missing namespace");
+    await expect(backup(repositoryPath, { databases: [databases[1]!] })).rejects.toThrow(
+      "missing namespace",
+    );
     const removed = matrix.filter(
       ({ id }) =>
         !refreshed.manifests.some(
@@ -371,9 +354,10 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
   async function checkVerificationAndRestore() {
     const repositoryPath = path.join(root, "verify-repository");
     const identity = { role: "global" } as const;
-    await createGitBackup({
-      repositoryPath,
-      stateDir,
+    const verify = () => verifyGitBackupRef({ repositoryPath, identity });
+    const restore = (targetPath: string) =>
+      restoreGitBackupRef({ repositoryPath, identity, targetPath });
+    await backup(repositoryPath, {
       databases: [
         { path: shared, identity },
         {
@@ -381,10 +365,9 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
           identity: { role: "generic", id: "retained-state" },
         },
       ],
-      gitEnv,
     });
     const before = await namespaceRows();
-    const verified = await verifyGitBackupRef({ repositoryPath, identity });
+    const verified = await verify();
     expect(await namespaceRows()).toEqual(before);
     expect(verified.manifest.identity).toEqual(identity);
 
@@ -393,17 +376,13 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     const legacyManifest: Record<string, unknown> = JSON.parse(originalManifest);
     await fs.writeFile(manifestPath, JSON.stringify({ ...legacyManifest, postgresSource: null }));
     await commitFixture(repositoryPath, "malformed binding fixture");
-    await expect
-      .soft(verifyGitBackupRef({ repositoryPath, identity }))
-      .rejects.toThrow("unsupported fields");
+    await expect.soft(verify()).rejects.toThrow("unsupported fields");
     delete legacyManifest.postgresSource;
     await fs.writeFile(manifestPath, JSON.stringify(legacyManifest));
     await commitFixture(repositoryPath, "legacy fixture");
-    expect((await verifyGitBackupRef({ repositoryPath, identity })).manifest).not.toHaveProperty(
-      "postgresSource",
-    );
+    expect((await verify()).manifest).not.toHaveProperty("postgresSource");
     const legacyTarget = path.join(root, "legacy-restored.sqlite");
-    await restoreGitBackupRef({ repositoryPath, identity, targetPath: legacyTarget });
+    await restore(legacyTarget);
     expect(exportedRows(legacyTarget, "SELECT engine FROM openclaw_engine_anchor")).toEqual([
       { engine: "postgres" },
     ]);
@@ -416,20 +395,14 @@ describe.skipIf(!connection)("PostgreSQL Git backup discovery and verification",
     );
     await commitFixture(repositoryPath, "swapped capsule fixture");
     const beforeInvalid = await namespaceRows();
-    await expect
-      .soft(verifyGitBackupRef({ repositoryPath, identity }))
-      .rejects.toThrow("belongs to a different store");
+    await expect.soft(verify()).rejects.toThrow("belongs to a different store");
     const targetPath = path.join(root, "mismatched-restored.sqlite");
-    await expect
-      .soft(restoreGitBackupRef({ repositoryPath, identity, targetPath }))
-      .rejects.toThrow("belongs to a different store");
+    await expect.soft(restore(targetPath)).rejects.toThrow("belongs to a different store");
     await expect.soft(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
     expect.soft(await namespaceRows()).toEqual(beforeInvalid);
     await fs.appendFile(path.join(repositoryPath, "global/postgres/database.sqlite"), "corrupt");
     await commitFixture(repositoryPath, "corrupt fixture");
-    await expect(verifyGitBackupRef({ repositoryPath, identity })).rejects.toThrow(
-      "artifact verification failed",
-    );
+    await expect(verify()).rejects.toThrow("artifact verification failed");
     expect(await namespaceRows()).toEqual(beforeInvalid);
   }
 });
