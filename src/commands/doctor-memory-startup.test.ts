@@ -1,6 +1,6 @@
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, assert, beforeEach, expect, it } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
 import { resolveApiKeyForProfile } from "../agents/auth-profiles/oauth.js";
 import { loadAuthProfileStoreForSecretsRuntime } from "../agents/auth-profiles/store-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -35,6 +35,7 @@ import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 
 beforeEach(async () => {
   setActivePluginRegistry(createEmptyPluginRegistry());
+  // The shared loader resolves manifest-owned public artifacts from checkout source, never dist.
   const { default: openaiPlugin } = await loadBundledPluginFacade<{
     default: OpenClawPluginDefinition;
   }>({ pluginId: "openai", artifactBasename: "index.js" });
@@ -53,112 +54,139 @@ afterEach(() => {
   setActivePluginRegistry(createEmptyPluginRegistry());
 });
 
-it.each(["stored", "missing"] as const)(
-  "preserves semantic data and reaches auth activation with a %s store SecretRef",
-  (entryState) =>
-    withOpenClawTestState({ label: "memory-startup" }, async (state) => {
-      const profileId = "openai:memory-startup";
-      const agentDir = state.agentDir();
-      const model = "text-embedding-3-small";
-      const ref = { source: "store", provider: "default", id: "MEMORY_STARTUP_KEY" } as const;
-      const value = "synthetic-memory-bootstrap-key";
-      const config: OpenClawConfig = {
-        agents: { entries: { main: { workspace: state.workspaceDir } } },
-        auth: { profiles: { [profileId]: { provider: "openai", mode: "api_key" } } },
-        memory: { search: { provider: "openai", fallback: "none" } },
-      };
-      const databasePath = await state.writeAuthProfiles({
-        version: 1,
-        profiles: { [profileId]: { type: "api_key", provider: "openai", keyRef: ref } },
-      });
-      if (entryState === "stored") {
-        await writeSecretStoreEntry({
-          scope: { kind: "team" },
-          name: ref.id,
-          value,
-          kind: "secret",
-          updatedBy: "test",
-          database: { env: state.env },
+describe("Memory Core cold startup migrations", () => {
+  it.each(["stored", "missing"] as const)(
+    "preserves semantic data and reaches auth activation with a %s store SecretRef",
+    async (entryState) => {
+      await withOpenClawTestState({ label: "memory-startup" }, async (state) => {
+        clearSecretsRuntimeSnapshot();
+        const profileId = "openai:memory-startup";
+        const ref = { source: "store", provider: "default", id: "MEMORY_STARTUP_KEY" } as const;
+        const value = "synthetic-memory-bootstrap-key";
+        const config: OpenClawConfig = {
+          agents: { entries: { main: { workspace: state.workspaceDir } } },
+          auth: { profiles: { [profileId]: { provider: "openai", mode: "api_key" } } },
+          memory: { search: { provider: "openai", fallback: "none" } },
+        };
+        const databasePath = await state.writeAuthProfiles({
+          version: 1,
+          profiles: { [profileId]: { type: "api_key", provider: "openai", keyRef: ref } },
         });
-      }
-      using db = new DatabaseSync(databasePath);
-      ensureMemoryIndexSchema({ db, cacheEnabled: true, ftsEnabled: true });
-      db.prepare("INSERT INTO memory_index_meta (key, value) VALUES (?, ?)").run(
-        "memory_index_meta_v1",
-        JSON.stringify({ model, vectorDims: 3 }),
-      );
-      db.prepare(
-        `INSERT INTO memory_index_chunks
-             (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
-             VALUES ('preserved-chunk', 'MEMORY.md', 'memory', 1, 1, 'chunk-hash',
-                     'text-embedding-3-small', 'Keep this semantic memory.', ?, 1)`,
-      ).run(encodeMemoryEmbedding([1, 0, 0]));
-      const readSemanticData = () => ({
-        metadata: db.prepare("SELECT * FROM memory_index_meta ORDER BY key").all(),
-        chunks: db.prepare("SELECT * FROM memory_index_chunks ORDER BY id").all(),
-      });
-      const before = readSemanticData();
-      const authParams = {
-        cfg: config,
-        store: loadAuthProfileStoreForSecretsRuntime(agentDir),
-        profileId,
-        agentDir,
-      };
-      const embeddingAdapter = getRegisteredEmbeddingProvider("openai")?.adapter;
-      assert(embeddingAdapter);
-      // Even a valid stored ref is unavailable until the runtime publishes it.
-      await expect(embeddingAdapter.create({ config, agentDir, model })).rejects.toMatchObject({
-        code: "SECRET_SURFACE_UNAVAILABLE",
-      });
-
-      const params = {
-        config,
-        env: state.env,
-        stateDir: state.stateDir,
-        oauthDir: path.join(state.stateDir, "credentials"),
-        context: {
-          openPluginStateKeyedStore: (options) =>
-            createPluginStateKeyedStoreForTests("memory-core", { ...options, env: state.env }),
-        } satisfies PluginDoctorStateMigrationContext,
-      };
-      const { stateMigrations } = coercePluginDoctorContractModule(
-        await loadBundledPluginFacade<PluginDoctorContractModule>({
-          pluginId: "memory-core",
-          artifactBasename: "doctor-contract-api.js",
-        }),
-      );
-      expect(stateMigrations.length).toBeGreaterThan(0);
-      const warnings: string[] = [];
-      for (const migration of stateMigrations) {
-        if (await migration.detectLegacyState(params)) {
-          warnings.push(...(await migration.migrateLegacyState(params)).warnings);
+        if (entryState === "stored") {
+          await writeSecretStoreEntry({
+            scope: { kind: "team" },
+            name: ref.id,
+            value,
+            kind: "secret",
+            updatedBy: "test",
+            database: { env: state.env },
+          });
         }
-      }
-      // Startup refuses migration warnings before it can activate auth profiles.
-      expect(warnings).toEqual([]);
+        const db = new DatabaseSync(databasePath);
+        try {
+          ensureMemoryIndexSchema({ db, cacheEnabled: true, ftsEnabled: true });
+          db.prepare("INSERT INTO memory_index_meta (key, value) VALUES (?, ?)").run(
+            "memory_index_meta_v1",
+            JSON.stringify({ model: "text-embedding-3-small", vectorDims: 3 }),
+          );
+          db.prepare(
+            `INSERT INTO memory_index_chunks
+             (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            "preserved-chunk",
+            "MEMORY.md",
+            "memory",
+            1,
+            1,
+            "chunk-hash",
+            "text-embedding-3-small",
+            "Keep this semantic memory.",
+            encodeMemoryEmbedding([1, 0, 0]),
+            1,
+          );
+          const readSemanticData = () => ({
+            metadata: db.prepare("SELECT * FROM memory_index_meta ORDER BY key").all(),
+            chunks: db.prepare("SELECT * FROM memory_index_chunks ORDER BY id").all(),
+          });
+          const before = readSemanticData();
+          const authParams = {
+            cfg: config,
+            store: loadAuthProfileStoreForSecretsRuntime(state.agentDir()),
+            profileId,
+            agentDir: state.agentDir(),
+          };
+          // Even a valid stored ref is unavailable until the runtime publishes it.
+          await expect(resolveApiKeyForProfile(authParams)).rejects.toMatchObject({
+            code: "SECRET_SURFACE_UNAVAILABLE",
+          });
 
-      const snapshot = await prepareSecretsRuntimeSnapshot({
-        config,
-        env: state.env,
-        agentDirs: [agentDir],
-        allowUnavailableSecretOwners: true,
+          const embeddingAdapter = getRegisteredEmbeddingProvider("openai")?.adapter;
+          assert(embeddingAdapter);
+          await expect(
+            embeddingAdapter.create({
+              config,
+              agentDir: state.agentDir(),
+              model: "text-embedding-3-small",
+            }),
+          ).rejects.toMatchObject({ code: "SECRET_SURFACE_UNAVAILABLE" });
+
+          const context: PluginDoctorStateMigrationContext = {
+            openPluginStateKeyedStore: (options) =>
+              createPluginStateKeyedStoreForTests("memory-core", { ...options, env: state.env }),
+          };
+          const params = {
+            config,
+            env: state.env,
+            stateDir: state.stateDir,
+            oauthDir: path.join(state.stateDir, "credentials"),
+            context,
+          };
+          const { stateMigrations } = coercePluginDoctorContractModule(
+            await loadBundledPluginFacade<PluginDoctorContractModule>({
+              pluginId: "memory-core",
+              artifactBasename: "doctor-contract-api.js",
+            }),
+          );
+          expect(stateMigrations.length).toBeGreaterThan(0);
+          const warnings: string[] = [];
+          for (const migration of stateMigrations) {
+            if (await migration.detectLegacyState(params)) {
+              warnings.push(...(await migration.migrateLegacyState(params)).warnings);
+            }
+          }
+          expect(readSemanticData()).toEqual(before);
+          // Startup refuses migration warnings before it can activate auth profiles.
+          expect(warnings).toEqual([]);
+
+          const snapshot = await prepareSecretsRuntimeSnapshot({
+            config,
+            env: state.env,
+            agentDirs: [state.agentDir()],
+            allowUnavailableSecretOwners: true,
+          });
+          activateSecretsRuntimeSnapshot(snapshot);
+          if (entryState === "stored") {
+            await expect(resolveApiKeyForProfile(authParams)).resolves.toMatchObject({
+              provider: "openai",
+              apiKey: value,
+            });
+            expect(snapshot.degradedOwners).toEqual([]);
+          } else {
+            await expect(resolveApiKeyForProfile(authParams)).rejects.toMatchObject({
+              code: "SECRET_SURFACE_UNAVAILABLE",
+              ownerKind: "account",
+            });
+            expect(snapshot.degradedOwners).toEqual([
+              expect.objectContaining({ ownerKind: "account", state: "unavailable" }),
+            ]);
+          }
+          expect(readSemanticData()).toEqual(before);
+        } finally {
+          db.close();
+          clearSecretsRuntimeSnapshot();
+        }
       });
-      activateSecretsRuntimeSnapshot(snapshot);
-      if (entryState === "stored") {
-        await expect(resolveApiKeyForProfile(authParams)).resolves.toMatchObject({
-          provider: "openai",
-          apiKey: value,
-        });
-        expect(snapshot.degradedOwners).toEqual([]);
-      } else {
-        await expect(resolveApiKeyForProfile(authParams)).rejects.toMatchObject({
-          code: "SECRET_SURFACE_UNAVAILABLE",
-          ownerKind: "account",
-        });
-        expect(snapshot.degradedOwners).toEqual([
-          expect.objectContaining({ ownerKind: "account", state: "unavailable" }),
-        ]);
-      }
-      expect(readSemanticData()).toEqual(before);
-    }),
-);
+    },
+  );
+});

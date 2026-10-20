@@ -28,13 +28,11 @@ function setupArtwork(responses: Record<string, () => Response | Promise<Respons
   const previous = currentThemeBranding();
   const gateway = readAvatarGatewayContext();
   const fetch = globalThis.fetch;
-  const spy = vi
-    .spyOn(globalThis, "fetch")
-    .mockImplementation((input, init) =>
-      typeof input === "string" && Object.hasOwn(responses, input)
-        ? Promise.resolve(responses[input]())
-        : fetch(input, init),
-    );
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const respond =
+      typeof input === "string" && Object.hasOwn(responses, input) ? responses[input] : undefined;
+    return respond ? Promise.resolve(respond()) : fetch(input, init);
+  });
   setAvatarGatewayOrigin(location.origin);
   onTestFinished(() => {
     spy.mockRestore();

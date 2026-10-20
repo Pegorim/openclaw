@@ -6,6 +6,7 @@ import {
   resolveGatewayReloadPluginActivationCandidate,
 } from "./plugin-activation-runtime-config.js";
 
+// mock-isolation: Test config assembly with a controlled auto-enable result, without plugin discovery.
 vi.mock("../config/plugin-auto-enable.js", () => ({ applyPluginAutoEnable: vi.fn() }));
 
 const applyPluginAutoEnableMock = vi.mocked(applyPluginAutoEnable);

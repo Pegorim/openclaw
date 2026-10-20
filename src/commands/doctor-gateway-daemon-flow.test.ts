@@ -97,6 +97,7 @@ vi.mock("../daemon/constants.js", () => ({
   resolveNodeLaunchAgentLabel: vi.fn(() => "ai.openclaw.node"),
 }));
 
+// mock-isolation: Error-log diagnostics come from the fixture, not the host service.
 vi.mock("../daemon/diagnostics.js", () => ({ readLastGatewayErrorLine }));
 
 vi.mock("../daemon/launchd.js", async (original) => ({
@@ -106,6 +107,7 @@ vi.mock("../daemon/launchd.js", async (original) => ({
   repairLaunchAgentBootstrap: vi.fn(async () => ({ ok: true, status: "repaired" })),
 }));
 
+// mock-isolation: Service discovery must not inspect the host's installed daemons.
 vi.mock("../daemon/inspect.js", () => ({ findSystemGatewayServices }));
 
 vi.mock("../daemon/service.js", async (original) => ({
@@ -118,6 +120,7 @@ vi.mock("../daemon/systemd.js", async (importOriginal) => ({
   findInstalledSystemdGatewayScope,
 }));
 
+// mock-isolation: Systemd availability is supplied by the platform fixture.
 vi.mock("../daemon/systemd-hints.js", () => ({ renderSystemdUnavailableHints }));
 
 vi.mock("../gateway/net.js", async (importOriginal) => ({
@@ -148,6 +151,7 @@ vi.mock("../infra/wsl.js", () => ({
   isWSL: vi.fn(async () => false),
 }));
 
+// mock-isolation: Capture Doctor notices without rendering terminal UI.
 vi.mock("../../packages/terminal-core/src/note.js", () => ({ note }));
 
 vi.mock("../utils.js", async (original) => ({
@@ -167,6 +171,7 @@ vi.mock("./gateway-install-token.js", () => ({
   resolveGatewayInstallToken: vi.fn(),
 }));
 
+// mock-isolation: Each fixture controls its closed-connection diagnostic and health text.
 vi.mock("./health-format.js", () => ({
   formatGatewayClosedDiagnostic,
   formatHealthCheckFailure,

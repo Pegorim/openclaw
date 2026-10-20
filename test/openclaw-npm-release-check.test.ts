@@ -64,8 +64,9 @@ it("bounds commands that ignore termination", () => {
 });
 
 it("rejects private QA and local build artifacts while allowing runtime files", () => {
-  const forbidden = [
+  const forbidden: Array<[string, string]> = [
     ["generated docs artifact", "docs/.generated/config-baseline.json"],
+    ["generated docs artifact", "docs/.generated/config-baseline.plugin.json"],
     ["local application build output", "dist/OpenClaw.app/Contents/MacOS/OpenClaw"],
     ["local runtime build output", "dist-runtime/extensions/example/runtime.js"],
     ["private QA channel artifact", "dist/extensions/qa-channel/runtime-api.js"],

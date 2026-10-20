@@ -1,82 +1,104 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { configureAiTransportHost } from "../host.js";
-import type { AssistantMessage, AssistantMessageEvent, Context, ToolCall } from "../types.js";
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  Context,
+  Model,
+  ToolCall,
+} from "../types.js";
 import { streamGoogleInteractions, streamSimpleGoogleInteractions } from "./google-interactions.js";
-import { makeProviderModel } from "./provider-model.test-support.js";
 
-const completedSse = ({
-  status = "completed",
-  usage = { total_input_tokens: 1, total_output_tokens: 1, total_tokens: 2 },
-}: { status?: string; usage?: Record<string, number> | null } = {}): string =>
+const completedSse = (params?: {
+  status?: string;
+  usage?: Record<string, number> | null;
+}): string =>
   `data: ${JSON.stringify({
     event_type: "interaction.completed",
-    interaction: { status, ...(usage === null ? {} : { usage }) },
+    interaction: {
+      status: params?.status ?? "completed",
+      ...(params?.usage === null
+        ? {}
+        : {
+            usage: params?.usage ?? {
+              total_input_tokens: 1,
+              total_output_tokens: 1,
+              total_tokens: 2,
+            },
+          }),
+    },
   })}\n\n`;
 
-const makeInteractionsModel = (provider = "google") =>
-  makeProviderModel("google-interactions", provider, "gemini-3-flash-preview", {
+function makeInteractionsModel(provider = "google"): Model<"google-interactions"> {
+  return {
+    id: "gemini-3-flash-preview",
+    name: "Gemini 3 Flash",
+    api: "google-interactions",
+    provider,
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     reasoning: false,
-  });
-
-const expectedToolCall = (id: string, name: string, args: ToolCall["arguments"]): ToolCall => ({
-  type: "toolCall",
-  id,
-  name,
-  arguments: args,
-});
-
-const sseResponse = (body: BodyInit): Response =>
-  new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-
-function mockSse(body: BodyInit, onRequest?: (init?: RequestInit) => void): void {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (_url: string, init?: RequestInit) => {
-      onRequest?.(init);
-      return sseResponse(body);
-    }),
-  );
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+  };
 }
 
-function enqueue(
-  controller: ReadableStreamDefaultController<Uint8Array>,
-  ...frames: string[]
-): void {
-  controller.enqueue(new TextEncoder().encode(frames.join("")));
+function sseResponse(body: BodyInit): Response {
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+function mockSse(body: BodyInit): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => sseResponse(body)),
+  );
 }
 
 describe("google-interactions provider", () => {
   const originalFetch = globalThis.fetch;
-  beforeEach(() => vi.unstubAllEnvs());
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
     configureAiTransportHost({});
   });
+
   const basicContext: Context = {
     messages: [{ role: "user", content: "Hello", timestamp: 0 }],
   };
-  const runInteractions = (apiKey = "test-api-key") =>
-    streamGoogleInteractions(makeInteractionsModel(), basicContext, { apiKey }).result();
-  it("streams cumulative tool input before completion", async ({ onTestFinished }) => {
+
+  it("exposes cumulative tool input before the provider completes the call", async ({
+    onTestFinished,
+  }) => {
     const gate = createDeferred();
     onTestFinished(() => gate.resolve());
+    const encoder = new TextEncoder();
     mockSse(
       new ReadableStream<Uint8Array>({
         async start(controller) {
-          enqueue(
-            controller,
-            'data: {"event_type":"step.start","step":{"type":"function_call","id":"progress","name":"write","arguments":{}}}\n\n',
-            'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"content\\":\\"line"}}\n\n',
+          controller.enqueue(
+            encoder.encode(
+              [
+                'data: {"event_type":"step.start","step":{"type":"function_call","id":"progress","name":"write","arguments":{}}}\n\n',
+                'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"content\\":\\"line"}}\n\n',
+              ].join(""),
+            ),
           );
           await gate.promise;
-          enqueue(
-            controller,
-            'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":" end\\"}"}}\n\n',
-            'data: {"event_type":"step.stop"}\n\n',
-            completedSse({ status: "requires_action" }),
+          controller.enqueue(
+            encoder.encode(
+              [
+                'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":" end\\"}"}}\n\n',
+                'data: {"event_type":"step.stop"}\n\n',
+                completedSse({ status: "requires_action" }),
+              ].join(""),
+            ),
           );
           controller.close();
         },
@@ -102,37 +124,50 @@ describe("google-interactions provider", () => {
     ]);
   });
 
-  it("stops at [DONE] and cancels the open reader", async () => {
-    const cancel = vi.fn();
+  it("terminates outer stream loop immediately and cancels reader upon receiving data: [DONE]", async () => {
+    let cancelCalled = false;
+    const encoder = new TextEncoder();
+
+    // ReadableStream that delivers a text delta and [DONE], then hangs forever unless cancelled
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        enqueue(
-          controller,
-          'data: {"event_type":"step.delta","delta":{"type":"text","text":"Hello world"}}\n\n',
-          completedSse(),
-          "data: [DONE]\n\n",
+        controller.enqueue(
+          encoder.encode(
+            'data: {"event_type":"step.delta","delta":{"type":"text","text":"Hello world"}}\n\n' +
+              completedSse() +
+              "data: [DONE]\n\n",
+          ),
         );
       },
-      cancel,
+      cancel() {
+        cancelCalled = true;
+      },
     });
 
     mockSse(stream);
-    const eventStream = streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+
+    const model = makeInteractionsModel();
+    const eventStream = streamGoogleInteractions(model, basicContext, {
       apiKey: "test-api-key",
     });
+
     const events: AssistantMessageEvent[] = [];
     for await (const event of eventStream) {
       events.push(event);
-      if (event.type === "start" || event.type === "text_end" || event.type === "text_delta") {
+      if (event.type === "start" || event.type === "text_end") {
         expect(event.partial.api).toBe("google-interactions");
+      } else if (event.type === "text_delta") {
+        expect(event.partial?.api).toBe("google-interactions");
       } else if (event.type === "done") {
         expect(event.message.api).toBe("google-interactions");
       }
     }
-    expect(cancel).toHaveBeenCalledOnce();
+
+    expect(cancelCalled).toBe(true);
     expect(stream.locked).toBe(false);
     expect(events[0]?.type).toBe("start");
     const doneEvent = events.find((event) => event.type === "done");
+    expect(doneEvent).toBeDefined();
     expect(doneEvent?.message.content).toEqual([{ type: "text", text: "Hello world" }]);
   });
 
@@ -146,9 +181,13 @@ describe("google-interactions provider", () => {
       vi.stubEnv("GEMINI_API_KEY", geminiKey);
       vi.stubEnv("GOOGLE_API_KEY", "google-fallback-key");
       let capturedHeaders: HeadersInit | undefined;
-      mockSse(completedSse() + "data: [DONE]\n\n", (init) => {
-        capturedHeaders = init?.headers;
-      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          capturedHeaders = init?.headers;
+          return sseResponse(completedSse() + "data: [DONE]\n\n");
+        }),
+      );
       await (
         simple
           ? streamSimpleGoogleInteractions(makeInteractionsModel(provider), basicContext)
@@ -162,54 +201,96 @@ describe("google-interactions provider", () => {
   );
 
   it("preserves streamed text, thought signatures, and tool arguments", async () => {
-    const cases: Array<[string, AssistantMessage["content"], boolean?]> = [
-      [
-        'data: {"event_type":"step.start","step":{"type":"thought","summary":[{"type":"text","text":"Reasoning about tool..."}]}}\n\n' +
-          'data: {"event_type":"step.delta","delta":{"type":"thought_signature","signature":"sig_stream_thought=="}}\n\n' +
-          'data: {"event_type":"step.stop"}\n\n' +
+    const cases: Array<{
+      frames: string[];
+      content: AssistantMessage["content"];
+      toolUse?: boolean;
+    }> = [
+      {
+        frames: [
+          'data: {"event_type":"step.start","step":{"type":"thought","summary":[{"type":"text","text":"Reasoning about tool..."}]}}\n\n',
+          'data: {"event_type":"step.delta","delta":{"type":"thought_signature","signature":"sig_stream_thought=="}}\n\n',
+          'data: {"event_type":"step.stop"}\n\n',
           'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_99","name":"search","arguments":{"q":"gemini"}}}\n\n',
-        [
+        ],
+        toolUse: true,
+        content: [
           {
             type: "thinking",
             thinking: "Reasoning about tool...",
             thinkingSignature: "sig_stream_thought==",
           },
-          expectedToolCall("call_99", "search", { q: "gemini" }),
+          {
+            type: "toolCall",
+            id: "call_99",
+            name: "search",
+            arguments: { q: "gemini" },
+          },
         ],
-        true,
-      ],
-      [
-        'data: {"event_type":"step.start","step":{"type":"model_output","content":[{"type":"text","text":"Hello"}]}}\n\n' +
+      },
+      {
+        frames: [
+          'data: {"event_type":"step.start","step":{"type":"model_output","content":[{"type":"text","text":"Hello"}]}}\n\n',
           'data: {"event_type":"step.delta","delta":{"type":"text","text":" world"}}\n\n',
-        [{ type: "text", text: "Hello world" }],
-      ],
-      [
-        'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{}}}\n\n' +
-          'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"command\\":\\"ls "}}\n\n' +
+        ],
+        content: [{ type: "text", text: "Hello world" }],
+      },
+      {
+        frames: [
+          'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{}}}\n\n',
+          'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"command\\":\\"ls "}}\n\n',
           'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"-la\\"}"}}\n\n',
-        [expectedToolCall("call_exec_1", "exec", { command: "ls -la" })],
-        true,
-      ],
-      [
-        'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{}}}\n\n' +
+        ],
+        toolUse: true,
+        content: [
+          {
+            type: "toolCall",
+            id: "call_exec_1",
+            name: "exec",
+            arguments: { command: "ls -la" },
+          },
+        ],
+      },
+      {
+        frames: [
+          'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{}}}\n\n',
           'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"target\\":9223372036854775807}"}}\n\n',
-        [expectedToolCall("call_exec_1", "exec", { target: "9223372036854775807" })],
-        true,
-      ],
-      [
-        'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{"target":9223372036854775807}}}\n\n',
-        [expectedToolCall("call_exec_1", "exec", { target: "9223372036854775807" })],
-        true,
-      ],
+        ],
+        toolUse: true,
+        content: [
+          {
+            type: "toolCall",
+            id: "call_exec_1",
+            name: "exec",
+            arguments: { target: "9223372036854775807" },
+          },
+        ],
+      },
+      {
+        frames: [
+          'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{"target":9223372036854775807}}}\n\n',
+        ],
+        toolUse: true,
+        content: [
+          {
+            type: "toolCall",
+            id: "call_exec_1",
+            name: "exec",
+            arguments: { target: "9223372036854775807" },
+          },
+        ],
+      },
     ];
-    for (const [frames, content, toolUse] of cases) {
+    for (const { frames, content, toolUse } of cases) {
       mockSse(
-        frames +
+        frames.join("") +
           'data: {"event_type":"step.stop"}\n\n' +
           completedSse({ status: toolUse ? "requires_action" : "completed" }) +
           "data: [DONE]\n\n",
       );
-      const result = await runInteractions("test-key");
+      const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+        apiKey: "test-key",
+      }).result();
       expect(result.content).toEqual(content);
       expect(result.stopReason).toBe(toolUse ? "toolUse" : "stop");
       const toolCall = result.content.find((block): block is ToolCall => block.type === "toolCall");
@@ -220,6 +301,7 @@ describe("google-interactions provider", () => {
   it.each(["resolved", "rejected", "pending"])(
     "retires malformed tool streams when cancellation is %s",
     async (cancellationState) => {
+      const encoder = new TextEncoder();
       const ssePayload = [
         'data: {"event_type":"step.start","step":{"type":"function_call","id":"call_exec_1","name":"exec","arguments":{}}}\n\n',
         'data: {"event_type":"step.delta","delta":{"type":"arguments_delta","arguments":"{\\"command\\":\\"ls"}}\n\n',
@@ -242,13 +324,18 @@ describe("google-interactions provider", () => {
       });
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
-          enqueue(controller, ssePayload);
+          controller.enqueue(encoder.encode(ssePayload));
         },
         cancel,
       });
+
       mockSse(body);
+
       try {
-        const result = await runInteractions("test-key");
+        const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+          apiKey: "test-key",
+        }).result();
+
         expect(result).toMatchObject({
           stopReason: "error",
           errorCode: "malformed_tool_call_arguments",
@@ -269,29 +356,31 @@ describe("google-interactions provider", () => {
     const sentinel = "oc-sent-v2.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.end";
     const diagnostics: unknown[] = [];
     const guardedFetch = vi.fn(async (_url: string, init?: RequestInit) => {
-      expect(init?.headers).toMatchObject({
-        "x-goog-api-key": "resolved-secret",
-        Authorization: "Bearer resolved-secret",
-        "X-Option-Auth": "resolved-secret",
-      });
-      return sseResponse(completedSse() + "data: [DONE]\n\n");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["x-goog-api-key"]).toBe("resolved-secret");
+      expect(headers.Authorization).toBe("Bearer resolved-secret");
+      expect(headers["X-Option-Auth"]).toBe("resolved-secret");
+      return sseResponse(new TextEncoder().encode(completedSse() + "data: [DONE]\n\n"));
     });
     configureAiTransportHost({
       buildModelFetch: () => guardedFetch as typeof fetch,
       resolveSecretSentinel: (value) => value.replaceAll(sentinel, "resolved-secret"),
       logDebug: (_subsystem, build) => diagnostics.push(build()),
     });
+
     const result = await streamGoogleInteractions(
       { ...makeInteractionsModel(), headers: { Authorization: `Bearer ${sentinel}` } },
       basicContext,
       { apiKey: sentinel, headers: { "X-Option-Auth": sentinel } },
     ).result();
+
     expect(result.stopReason).toBe("stop");
     expect(guardedFetch).toHaveBeenCalledOnce();
     const serialized = JSON.stringify(diagnostics);
-    for (const secret of ["resolved-secret", sentinel, "Authorization", "Hello"]) {
-      expect(serialized).not.toContain(secret);
-    }
+    expect(serialized).not.toContain("resolved-secret");
+    expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toContain("Authorization");
+    expect(serialized).not.toContain("Hello");
     expect(serialized).toContain('"message":"request"');
   });
 
@@ -316,21 +405,31 @@ describe("google-interactions provider", () => {
     mockSse(
       new ReadableStream<Uint8Array>({
         start(controller) {
+          const encoder = new TextEncoder();
           for (const character of body) {
-            enqueue(controller, character);
+            controller.enqueue(encoder.encode(character));
           }
           controller.close();
         },
       }),
     );
-    const result = await runInteractions();
-    expect(result).toMatchObject({ stopReason: "stop" });
+
+    const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+      apiKey: "test-api-key",
+    }).result();
+
+    expect(result.stopReason).toBe("stop");
     expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
   });
 
   it("keeps a newline-terminated final event at EOF", async () => {
     mockSse(completedSse().trimEnd() + "\n");
-    expect((await runInteractions()).stopReason).toBe("stop");
+
+    const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+      apiKey: "test-api-key",
+    }).result();
+
+    expect(result.stopReason).toBe("stop");
   });
 
   it("surfaces malformed complete data without exposing payloads in output or diagnostics", async () => {
@@ -340,11 +439,13 @@ describe("google-interactions provider", () => {
       'data: {"event_type":"step.delta","delta":{"text":"private-broken-payload"\n\n' +
         completedSse(),
     );
-    const result = await runInteractions();
-    expect(result).toMatchObject({
-      stopReason: "error",
-      errorMessage: "OpenClaw transport error: malformed_streaming_fragment",
-    });
+
+    const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+      apiKey: "test-api-key",
+    }).result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("OpenClaw transport error: malformed_streaming_fragment");
     expect(result).not.toHaveProperty("cause");
     expect(result).not.toHaveProperty("errorBody");
     expect(diagnostics).toContainEqual([
@@ -357,14 +458,18 @@ describe("google-interactions provider", () => {
 
   it("surfaces a streamed provider error instead of completing successfully", async () => {
     mockSse(
-      'data: {"event_type":"error","error":{"message":"deadline expired","code":"gateway_timeout"}}\n\n',
+      new TextEncoder().encode(
+        'data: {"event_type":"error","error":{"message":"deadline expired","code":"gateway_timeout"}}\n\n',
+      ),
     );
-    const result = await runInteractions();
-    expect(result).toMatchObject({
-      stopReason: "error",
-      errorMessage: expect.stringContaining("deadline expired"),
-      errorCode: "gateway_timeout",
-    });
+
+    const result = await streamGoogleInteractions(makeInteractionsModel(), basicContext, {
+      apiKey: "test-api-key",
+    }).result();
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("deadline expired");
+    expect(result.errorCode).toBe("gateway_timeout");
   });
 
   it.each(["completion", "step.stop"])("maps cumulative %s usage and costs", async (source) => {
@@ -377,11 +482,14 @@ describe("google-interactions provider", () => {
       total_tokens: 155,
     };
     mockSse(
-      (source === "step.stop"
-        ? `data: ${JSON.stringify({ event_type: "step.stop", usage: cumulativeUsage })}\n\n` +
-          completedSse({ usage: null })
-        : completedSse({ usage: cumulativeUsage })) + "data: [DONE]\n\n",
+      new TextEncoder().encode(
+        (source === "step.stop"
+          ? `data: ${JSON.stringify({ event_type: "step.stop", usage: cumulativeUsage })}\n\n` +
+            completedSse({ usage: null })
+          : completedSse({ usage: cumulativeUsage })) + "data: [DONE]\n\n",
+      ),
     );
+
     const model = {
       ...makeInteractionsModel(),
       cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0 },
@@ -389,40 +497,75 @@ describe("google-interactions provider", () => {
     const result = await streamGoogleInteractions(model, basicContext, {
       apiKey: "test-api-key",
     }).result();
+
     expect(result.usage).toMatchObject({
       input: 65,
       output: 50,
       cacheRead: 40,
       totalTokens: 155,
       cacheTelemetry: { state: "available" },
-      cost: { input: 0.000065, output: 0.0001, cacheRead: 0.00001, total: 0.000175 },
+      cost: {
+        input: 0.000065,
+        output: 0.0001,
+        cacheRead: 0.00001,
+        total: 0.000175,
+      },
     });
   });
 
   it.each([
-    ["gemini-2.5-flash", "low", { thinking_level: "low", thinking_summaries: "auto" }],
-    ["gemini-2.5-flash", "xhigh", { thinking_level: "high", thinking_summaries: "auto" }],
-    ["gemini-2.5-flash", "max", { thinking_level: "high", thinking_summaries: "auto" }],
-    ["gemini-3-flash-preview", "off", { thinking_level: "minimal", thinking_summaries: "none" }],
-    ["gemini-3-flash-preview", "adaptive" as never, { thinking_summaries: "auto" }],
-  ] as const)("maps %s reasoning=%s into the request", async (modelId, reasoning, expected) => {
-    let requestBody: Record<string, unknown> | undefined;
-    mockSse(completedSse() + "data: [DONE]\n\n", (init) => {
-      if (typeof init?.body !== "string") {
-        throw new Error("expected serialized Interactions request body");
-      }
-      requestBody = JSON.parse(init.body);
-    });
-    await streamSimpleGoogleInteractions(
-      {
-        ...makeInteractionsModel(),
-        id: modelId,
-        reasoning: true,
-        thinkingLevelMap: { xhigh: "high", max: "high" },
-      },
-      basicContext,
-      { apiKey: "test-api-key", reasoning },
-    ).result();
-    expect(requestBody?.generation_config).toEqual(expected);
-  });
+    {
+      modelId: "gemini-2.5-flash",
+      reasoning: "low" as const,
+      expected: { thinking_level: "low", thinking_summaries: "auto" },
+    },
+    {
+      modelId: "gemini-2.5-flash",
+      reasoning: "xhigh" as const,
+      expected: { thinking_level: "high", thinking_summaries: "auto" },
+    },
+    {
+      modelId: "gemini-2.5-flash",
+      reasoning: "max" as const,
+      expected: { thinking_level: "high", thinking_summaries: "auto" },
+    },
+    {
+      modelId: "gemini-3-flash-preview",
+      reasoning: "off" as const,
+      expected: { thinking_level: "minimal", thinking_summaries: "none" },
+    },
+    {
+      modelId: "gemini-3-flash-preview",
+      reasoning: "adaptive" as never,
+      expected: { thinking_summaries: "auto" },
+    },
+  ])(
+    "maps $modelId reasoning=$reasoning into the request",
+    async ({ modelId, reasoning, expected }) => {
+      let requestBody: Record<string, unknown> | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (typeof init?.body !== "string") {
+            throw new Error("expected serialized Interactions request body");
+          }
+          requestBody = JSON.parse(init.body);
+          return sseResponse(new TextEncoder().encode(completedSse() + "data: [DONE]\n\n"));
+        }),
+      );
+
+      await streamSimpleGoogleInteractions(
+        {
+          ...makeInteractionsModel(),
+          id: modelId,
+          reasoning: true,
+          thinkingLevelMap: { xhigh: "high", max: "high" },
+        },
+        basicContext,
+        { apiKey: "test-api-key", reasoning },
+      ).result();
+
+      expect(requestBody?.generation_config).toEqual(expected);
+    },
+  );
 });

@@ -59,6 +59,7 @@ const getMissingLocalMemoryEmbeddingProviderMessage = vi.hoisted(() =>
   ),
 );
 
+// mock-isolation: Capture memory-health notices without rendering terminal UI.
 vi.mock("../../packages/terminal-core/src/note.js", () => ({ note }));
 
 vi.mock("../agents/agent-scope.js", () => ({
@@ -68,6 +69,7 @@ vi.mock("../agents/agent-scope.js", () => ({
   resolveAgentWorkspaceDir,
 }));
 
+// mock-isolation: Memory search configuration is supplied by each health scenario.
 vi.mock("../agents/memory-search.js", () => ({ resolveMemorySearchConfig }));
 
 vi.mock("../agents/model-auth.js", () => ({
@@ -82,14 +84,17 @@ vi.mock("../agents/auth-profiles.js", () => ({
   isConfiguredAwsSdkAuthProfileForProvider,
 }));
 
+// mock-isolation: Provider acquisition and backend selection use fixture-owned runtime state.
 vi.mock("../plugins/memory-runtime.js", () => ({
   getActiveMemoryProviderCore,
   getActiveMemorySearchManagerCore: vi.fn(),
   resolveActiveMemoryBackendConfig,
 }));
 
+// mock-isolation: Health scenarios must not discover or activate the host's plugins.
 vi.mock("../plugins/plugin-registry.js", () => ({ loadPluginManifestRegistryForPluginRegistry }));
 
+// mock-isolation: Fixtures select the installed-provider policy outcome explicitly.
 vi.mock("../plugins/manifest-owner-policy.js", () => ({ resolveManifestOwnerBasePolicyBlock }));
 
 vi.mock("../plugins/provider-public-artifacts.js", () => ({
@@ -502,7 +507,10 @@ it.each([
 ] as const)("checks an %s alternate memory slot entry", async (_name, entry, isActive) => {
   resolveActiveMemoryBackendConfig.mockReturnValue(null);
   const config: OpenClawConfig = entry
-    ? { plugins: { slots: { memory: "memory-lancedb" }, entries: { "memory-lancedb": entry } } }
+    ? {
+        session: { dmScope: "per-peer" },
+        plugins: { slots: { memory: "memory-lancedb" }, entries: { "memory-lancedb": entry } },
+      }
     : cfg;
   await runMemorySearchHealth("none", undefined, { fallback: "none" }, config);
   expect(resolveApiKeyForProviderCore).not.toHaveBeenCalled();

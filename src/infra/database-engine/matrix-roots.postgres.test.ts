@@ -52,10 +52,15 @@ const cryptoValue = JSON.stringify({
 });
 const selectEntries =
   "SELECT namespace, entry_key, value_json FROM plugin_state_entries WHERE plugin_id = 'matrix' ORDER BY namespace, entry_key";
-type MatrixPaths = Pick<
-  typeof import("../../../extensions/matrix/runtime-api.js"),
-  "resolveMatrixAccountStorageRoot"
->;
+type MatrixPaths = {
+  resolveMatrixAccountStorageRoot(params: {
+    stateDir: string;
+    homeserver: string;
+    userId: string;
+    accessToken: string;
+    accountId: string;
+  }): { rootDir: string };
+};
 
 describe.skipIf(!connection)("Matrix declared account-root database portability", () => {
   const client = new Client({ connectionString: connection });

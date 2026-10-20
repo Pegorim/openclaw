@@ -14,7 +14,10 @@ import {
 } from "../../config/runtime-snapshot.js";
 import { resolveDefaultSessionStorePath } from "../../config/sessions/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { OpenKeyedStoreOptions } from "../../plugin-sdk/plugin-state-runtime.js";
+import type {
+  OpenKeyedStoreOptions,
+  PluginStateKeyedStore,
+} from "../../plugin-sdk/plugin-state-runtime.js";
 import { createPluginStateKeyedStoreForTests } from "../../plugin-sdk/plugin-state-test-runtime.js";
 import { upsertSessionEntry } from "../../plugin-sdk/session-store-runtime.js";
 import { appendSessionTranscriptMessageByIdentity } from "../../plugin-sdk/session-transcript-runtime.js";
@@ -50,9 +53,10 @@ let workspace: string;
 let client: pg.Client;
 let runtime: MemoryPluginRuntime;
 const stateAnchors: DatabaseSync[] = [];
-type MemoryCliHost = Parameters<
-  typeof import("../../../extensions/memory-core/runtime-api.js").createMemoryRuntime
->[0];
+type MemoryCliHost = {
+  runInBackgroundContext: <T>(run: () => T) => T;
+  openKeyedStore: <T>(options: OpenKeyedStoreOptions) => PluginStateKeyedStore<T>;
+};
 let host: MemoryCliHost;
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>

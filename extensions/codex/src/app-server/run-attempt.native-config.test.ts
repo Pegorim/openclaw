@@ -282,7 +282,10 @@ describe("Codex native configuration", () => {
           },
         },
       });
-      assert(harness.runAttempt, "Registered Codex harness must support run attempts");
+      assert(
+        typeof harness.runAttempt === "function",
+        "Registered Codex harness must support run attempts",
+      );
       // Model policy owns this proof; cold preparation must not spend its logical clock.
       vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
       const runAttempt = harness.runAttempt.bind(harness);

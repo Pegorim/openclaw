@@ -145,7 +145,7 @@ function pointerDown(target: HTMLElement) {
 
 async function clickTarget(
   target: HTMLElement,
-  bounds = target.getBoundingClientRect(),
+  bounds: Pick<DOMRect, "left" | "top" | "width" | "height"> = target.getBoundingClientRect(),
   preventDefault = false,
 ) {
   let activated = false;

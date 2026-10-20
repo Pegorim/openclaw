@@ -4,6 +4,7 @@ import { createCodexAppServerConnectionHealthService } from "./connection-health
 import { createClientHarness } from "./test-support.js";
 
 const lease = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn() }));
+// mock-isolation: The fixture owns client leases; never acquire the process-shared client.
 vi.mock("./shared-client.js", () => ({
   getLeasedSharedCodexAppServerClient: lease.acquire,
   releaseLeasedSharedCodexAppServerClient: lease.release,

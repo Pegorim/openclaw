@@ -51,7 +51,15 @@ function fixture({
     expect(existsSync(staged)).toBe(false);
     expectUnchanged();
   };
-  return { repoRoot, packageDir, setMetadata, manifest, expectUnchanged, expectCleaned };
+  return {
+    repoRoot,
+    packageDir,
+    clawhubMetadataDir,
+    setMetadata,
+    manifest,
+    expectUnchanged,
+    expectCleaned,
+  };
 }
 
 function pack(packageDir: string, destination: string) {
